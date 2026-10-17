@@ -1,5 +1,6 @@
 mod rank;
 mod usage;
+mod workflow;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -31,17 +32,22 @@ fn usage_exit(err: clap::Error) -> ExitCode {
 }
 
 fn report(usage_path: &Path, workflows: Option<&Path>, top: Option<usize>) -> ExitCode {
-    match usage::read_usage(usage_path) {
-        Ok(rows) => {
-            let ranked = rank::rank(&rows, top);
-            let _ = (ranked.len(), workflows);
-            ExitCode::SUCCESS
-        }
+    let rows = match usage::read_usage(usage_path) {
+        Ok(rows) => rows,
         Err(err) => {
             eprintln!("ci-bill: {}: {err}", usage_path.display());
-            ExitCode::from(2)
+            return ExitCode::from(2);
+        }
+    };
+    if let Some(dir) = workflows {
+        if let Err(err) = workflow::scan_dir(dir) {
+            eprintln!("ci-bill: {}: {err}", err.path.display());
+            return ExitCode::from(2);
         }
     }
+    let ranked = rank::rank(&rows, top);
+    let _ = ranked.len();
+    ExitCode::SUCCESS
 }
 
 /// Rank workflow costs from a GitHub detailed usage report.

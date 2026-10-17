@@ -115,6 +115,27 @@ fn top_flag_exits_0() {
 }
 
 #[test]
+fn missing_workflows_dir_exits_2() {
+    let output = run(&[
+        "report",
+        "--usage",
+        "samples/usage-sample.csv",
+        "--workflows",
+        "samples/no-such-workflows",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let err = stderr(&output);
+    assert!(err.contains("cannot read directory"), "{err}");
+    assert!(err.contains("samples/no-such-workflows"), "{err}");
+}
+
+#[test]
 fn sample_usage_exits_0() {
     let output = run(&["report", "--usage", "samples/usage-sample.csv"]);
     assert_eq!(
