@@ -1,6 +1,7 @@
 mod api;
 mod findings;
 mod job_cost;
+mod matrix_cost;
 mod money;
 mod prices;
 mod rank;
@@ -122,12 +123,20 @@ fn report(
         None => None,
     };
     let ranked = ranking.workflows.as_slice();
-    let found = findings::append(
+    let mut found = findings::append(
         found,
         api.as_ref()
             .map(|data| rerun::findings(data, ranked, &scanned))
             .unwrap_or_default(),
     );
+    let measured = api
+        .as_ref()
+        .map(|data| matrix_cost::findings(data, ranked, &scanned))
+        .unwrap_or_default();
+    if let Some(items) = found.as_mut() {
+        matrix_cost::supersede(items, &measured);
+    }
+    let found = findings::append(found, measured);
     let text = if json {
         match api.as_ref() {
             Some(data) => report::render_json_with_runs(
