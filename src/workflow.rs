@@ -42,11 +42,13 @@ pub struct Job {
     pub matrix: Option<Matrix>,
     /// Job-level `concurrency.cancel-in-progress` cancels in-progress runs.
     pub cancel_in_progress: bool,
-    /// `uses: ./.github/workflows/<file>.yml` (or `.yaml`) on this job.
+    /// `uses:` calling a local or remote reusable workflow.
     pub uses: Option<ReusableCall>,
+    /// Job-level `uses:` that is not a reusable workflow call.
+    pub invalid_uses: Option<InvalidUses>,
 }
 
-/// A job calling a reusable workflow in the same repository.
+/// A job calling a reusable workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReusableCall {
     /// Line of the `uses:` key.
@@ -55,6 +57,64 @@ pub struct ReusableCall {
     pub spec: String,
     /// File name the call asks for, for example `lint.yml`.
     pub file_name: String,
+    /// Local scan or a remote repository pinned to a ref.
+    pub source: ReusableSource,
+}
+
+/// Where the called workflow file lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReusableSource {
+    /// `./.github/workflows/<file>.yml` in the scanned directory.
+    Local,
+    /// `owner/repo/.github/workflows/<file>.yml@ref` in the runs cache.
+    Remote(RemoteWorkflow),
+}
+
+/// A reusable workflow in another repository, pinned to a tag, branch, or SHA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteWorkflow {
+    pub owner: String,
+    pub repo: String,
+    /// Path inside the repository, for example `.github/workflows/lint.yml`.
+    pub workflow_path: String,
+    /// Tag, branch, or commit SHA. A branch may contain `/`.
+    pub reference: String,
+}
+
+impl RemoteWorkflow {
+    /// Relative runs-cache path `<owner>/<repo>/<workflow_path>@<reference>`.
+    ///
+    /// A reference that contains `/` continues as further path components.
+    /// `lint.yml` at ref `release/1.2` is `lint.yml@release/1.2`.
+    pub fn cache_relative(&self) -> PathBuf {
+        let mut path = PathBuf::new();
+        path.push(&self.owner);
+        path.push(&self.repo);
+        let mut parts = self
+            .workflow_path
+            .split('/')
+            .filter(|part| !part.is_empty());
+        let file = parts.next_back().unwrap_or("");
+        for part in parts {
+            path.push(part);
+        }
+        let mut refs = self.reference.split('/').filter(|part| !part.is_empty());
+        let first = refs.next().unwrap_or("");
+        path.push(format!("{file}@{first}"));
+        for part in refs {
+            path.push(part);
+        }
+        path
+    }
+}
+
+/// Job-level `uses:` that is not a local or remote reusable workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidUses {
+    /// Line of the `uses:` key.
+    pub line: usize,
+    /// Quoted scalar, or `a list` / `a mapping`.
+    pub detail: String,
 }
 
 /// `runs-on` for a job.
@@ -134,14 +194,14 @@ impl std::fmt::Display for ScanError {
 impl std::error::Error for ScanError {}
 
 impl ScanError {
-    fn directory(path: &Path) -> Self {
+    pub(crate) fn directory(path: &Path) -> Self {
         Self {
             path: path.to_path_buf(),
             kind: ScanErrorKind::Directory,
         }
     }
 
-    fn file(path: &Path) -> Self {
+    pub(crate) fn file(path: &Path) -> Self {
         Self {
             path: path.to_path_buf(),
             kind: ScanErrorKind::File,
@@ -747,6 +807,7 @@ fn note_jobs(workflow: &mut Workflow, node: &Node) {
             matrix: None,
             cancel_in_progress: false,
             uses: None,
+            invalid_uses: None,
         };
         if let Node::Mapping { entries, .. } = &item.value {
             fill_job(&mut job, entries);
@@ -789,14 +850,51 @@ fn fill_job(job: &mut Job, entries: &[Entry]) {
         job.cancel_in_progress = concurrency_enabled(&item.value);
     }
     if let Some(item) = entry(entries, "uses") {
-        if let Some(text) = scalar_text(&item.value) {
-            let text = trim_breaks(text);
-            let text = text.trim();
-            if let Some(call) = local_reusable_call(item.line, text) {
-                job.uses = Some(call);
-            }
+        match classify_uses(item.line, &item.value) {
+            UsesClass::Call(call) => job.uses = Some(call),
+            UsesClass::Invalid(invalid) => job.invalid_uses = Some(invalid),
         }
     }
+}
+
+enum UsesClass {
+    Call(ReusableCall),
+    Invalid(InvalidUses),
+}
+
+fn classify_uses(line: usize, node: &Node) -> UsesClass {
+    match node {
+        Node::Scalar { value, .. } => classify_uses_scalar(line, value),
+        Node::Sequence { .. } => UsesClass::Invalid(InvalidUses {
+            line,
+            detail: "a list".to_string(),
+        }),
+        Node::Mapping { .. } => UsesClass::Invalid(InvalidUses {
+            line,
+            detail: "a mapping".to_string(),
+        }),
+    }
+}
+
+fn classify_uses_scalar(line: usize, raw: &str) -> UsesClass {
+    let text = trim_breaks(raw);
+    let text = text.trim();
+    if text.is_empty() {
+        return UsesClass::Invalid(InvalidUses {
+            line,
+            detail: "\"\"".to_string(),
+        });
+    }
+    if let Some(call) = local_reusable_call(line, text) {
+        return UsesClass::Call(call);
+    }
+    if let Some(call) = remote_reusable_call(line, text) {
+        return UsesClass::Call(call);
+    }
+    UsesClass::Invalid(InvalidUses {
+        line,
+        detail: format!("{text:?}"),
+    })
 }
 
 /// `./.github/workflows/<file>.yml` or `.yaml`, ignoring ASCII case on the
@@ -835,6 +933,138 @@ fn local_reusable_call(line: usize, spec: &str) -> Option<ReusableCall> {
         line,
         spec: spec.to_string(),
         file_name: file_name.to_string(),
+        source: ReusableSource::Local,
+    })
+}
+
+/// `owner/repo/.github/workflows/<file>.yml@ref`, ref a tag, branch, or SHA.
+///
+/// Directory names and the extension are compared without ASCII case. `..` is
+/// rejected. The stored spec is the trimmed scalar, not a rewritten path.
+fn remote_reusable_call(line: usize, spec: &str) -> Option<ReusableCall> {
+    if spec.contains("://")
+        || spec
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return None;
+    }
+    let (path, reference) = spec.split_once('@')?;
+    if !valid_reference(reference) {
+        return None;
+    }
+    let path = path.replace('\\', "/");
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return None;
+        }
+        parts.push(part);
+    }
+    if parts.len() != 5 {
+        return None;
+    }
+    if !parts[2].eq_ignore_ascii_case(".github") || !parts[3].eq_ignore_ascii_case("workflows") {
+        return None;
+    }
+    let file_name = parts[4];
+    if !valid_github_name(parts[0])
+        || !valid_github_name(parts[1])
+        || !valid_workflow_file(file_name)
+    {
+        return None;
+    }
+    let workflow_path = format!("{}/{}/{}", parts[2], parts[3], file_name);
+    Some(ReusableCall {
+        line,
+        spec: spec.to_string(),
+        file_name: file_name.to_string(),
+        source: ReusableSource::Remote(RemoteWorkflow {
+            owner: parts[0].to_string(),
+            repo: parts[1].to_string(),
+            workflow_path,
+            reference: reference.to_string(),
+        }),
+    })
+}
+
+fn valid_github_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    let mut last = first;
+    for character in chars {
+        if !(character.is_ascii_alphanumeric()
+            || character == '.'
+            || character == '_'
+            || character == '-')
+        {
+            return false;
+        }
+        last = character;
+    }
+    last.is_ascii_alphanumeric()
+}
+
+fn valid_workflow_file(name: &str) -> bool {
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if stem.is_empty() || stem.starts_with('.') || stem.contains("..") {
+        return false;
+    }
+    if !ext.eq_ignore_ascii_case("yml") && !ext.eq_ignore_ascii_case("yaml") {
+        return false;
+    }
+    stem.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || character == '.'
+            || character == '_'
+            || character == '-'
+    })
+}
+
+fn valid_reference(reference: &str) -> bool {
+    if reference.is_empty()
+        || reference.starts_with('/')
+        || reference.ends_with('/')
+        || reference.contains("//")
+        || reference.contains('@')
+        || reference.contains('\\')
+    {
+        return false;
+    }
+    if reference.chars().any(|character| {
+        character.is_whitespace()
+            || character.is_control()
+            || matches!(
+                character,
+                '~' | '^' | ':' | '?' | '*' | '[' | ']' | '{' | '}'
+            )
+    }) {
+        return false;
+    }
+    reference.split('/').all(valid_ref_segment)
+}
+
+fn valid_ref_segment(segment: &str) -> bool {
+    if segment.is_empty()
+        || segment == "."
+        || segment == ".."
+        || segment.ends_with('.')
+        || segment.ends_with(".lock")
+    {
+        return false;
+    }
+    segment.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || character == '.'
+            || character == '_'
+            || character == '-'
     })
 }
 

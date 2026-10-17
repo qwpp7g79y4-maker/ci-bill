@@ -1,8 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 
 use crate::money;
 use crate::usage::UsageRow;
-use crate::workflow::{Job, Matrix, RunsOn, Workflow};
+use crate::workflow::{
+    scan_yaml, Job, Matrix, RemoteWorkflow, ReusableCall, ReusableSource, RunsOn, ScanError,
+    Workflow,
+};
 
 /// Why a workflow or job was flagged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -21,8 +26,12 @@ pub enum FindingKind {
     InvoiceMismatch,
     /// Job calls `./.github/workflows/<file>` and that file is not in the scan.
     CalleeNotFound,
-    /// A local reusable workflow calls back into a workflow already being expanded.
+    /// A reusable workflow calls back into a workflow already being expanded.
     ReusableCycle,
+    /// Remote reusable workflow. Shown on the `uses:` line when the cache has no file.
+    RemoteWorkflow,
+    /// Job-level `uses:` is not a local or remote reusable workflow.
+    InvalidUses,
 }
 
 impl FindingKind {
@@ -37,6 +46,8 @@ impl FindingKind {
             Self::InvoiceMismatch => "F9",
             Self::CalleeNotFound => "F6",
             Self::ReusableCycle => "F7",
+            Self::RemoteWorkflow => "F10",
+            Self::InvalidUses => "F11",
         }
     }
 }
@@ -64,19 +75,44 @@ const LINT_TOOLS: [&str; 5] = ["lint", "fmt", "clippy", "eslint", "prettier"];
 /// Findings for the scanned workflows, ordered by path, line, and kind.
 ///
 /// A job `uses: ./.github/workflows/<file>.yml` (or `.yaml`) loads that file
-/// from this scan. Findings for the callee are listed on the caller. The
-/// finding file and line stay on the callee. A missing file and a call cycle
-/// are findings on the `uses:` line.
+/// from this scan. A job `uses: owner/repo/.github/workflows/<file>.yml@ref`
+/// loads `<owner>/<repo>/<path>@<ref>` from the runs cache. Findings for the
+/// callee are listed on the caller. The finding file and line stay on the
+/// callee. A missing local file, a call cycle, an invalid uses value, and a
+/// remote call with no cache file are findings on the `uses:` line. Costs stay
+/// on the caller.
 pub fn findings(workflows: &[Workflow]) -> Vec<Finding> {
+    findings_with_cache(workflows, None)
+        .expect("findings without a runs directory do not read files")
+}
+
+/// [`findings`] plus remote reusable workflows stored under `runs`.
+///
+/// `runs` is the `--runs` directory. A missing callee file is a finding. An
+/// unreadable or invalid cache file is an error and names that file.
+pub fn findings_with_cache(
+    workflows: &[Workflow],
+    runs: Option<&Path>,
+) -> Result<Vec<Finding>, ScanError> {
     let mut found = Vec::new();
     for workflow in workflows {
         emit_workflow_findings(&mut found, workflow, None);
-        let mut stack = vec![workflow.path.clone()];
-        expand_calls(&mut found, workflows, workflow, workflow, &mut stack);
+        let mut stack = vec![CallFrame {
+            path: workflow.path.clone(),
+            label: display_name(&workflow.path).to_string(),
+        }];
+        let expand = Expand {
+            workflows,
+            root: workflow,
+            caller_key: usage_key(&workflow.path),
+            runs,
+            repo: None,
+        };
+        expand_calls(&mut found, workflow, &mut stack, &expand)?;
     }
     dedupe_findings(&mut found);
     found.sort_by(cmp_finding);
-    found
+    Ok(found)
 }
 
 fn emit_workflow_findings(found: &mut Vec<Finding>, workflow: &Workflow, caller_key: Option<&str>) {
@@ -102,7 +138,17 @@ fn emit_workflow_findings(found: &mut Vec<Finding>, workflow: &Workflow, caller_
         );
     }
     for job in &workflow.jobs {
-        if job.uses.is_none() {
+        if let Some(invalid) = &job.invalid_uses {
+            push_at(
+                found,
+                &workflow.path,
+                invalid.line,
+                FindingKind::InvalidUses,
+                &invalid_uses_message(&job.name, &invalid.detail),
+                Some(usage_key(&workflow.path)),
+            );
+        }
+        if job.uses.is_none() && job.invalid_uses.is_none() {
             note_job(found, &workflow.path, job);
         }
     }
@@ -117,18 +163,51 @@ fn duplicate_message(key: &str, first: usize, second: usize) -> String {
     format!("duplicate key {key} (line {first} and {second})")
 }
 
+struct CallFrame {
+    path: PathBuf,
+    label: String,
+}
+
+struct Expand<'a> {
+    workflows: &'a [Workflow],
+    root: &'a Workflow,
+    caller_key: String,
+    runs: Option<&'a Path>,
+    /// Set while expanding a file loaded from the runs cache.
+    repo: Option<RemoteWorkflow>,
+}
+
+impl Expand<'_> {
+    fn with_repo(&self, repo: RemoteWorkflow) -> Expand<'_> {
+        Expand {
+            workflows: self.workflows,
+            root: self.root,
+            caller_key: self.caller_key.clone(),
+            runs: self.runs,
+            repo: Some(repo),
+        }
+    }
+}
+
+/// What to record when a cache file is absent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CacheMiss {
+    /// Remote call: list the job, the uses line, and the full uses text.
+    ShowJob,
+    /// Local call inside a cached repo: the callee file is not in the cache.
+    NotFound,
+}
+
 /// Walk `uses:` from `current`, attributing every callee finding to `root`.
 ///
 /// The stack is the chain of files already entered. A call back into that
 /// chain records a cycle and returns, so a loop cannot run forever.
 fn expand_calls(
     found: &mut Vec<Finding>,
-    workflows: &[Workflow],
-    root: &Workflow,
     current: &Workflow,
-    stack: &mut Vec<PathBuf>,
-) {
-    let caller_key = usage_key(&root.path);
+    stack: &mut Vec<CallFrame>,
+    exp: &Expand<'_>,
+) -> Result<(), ScanError> {
     for job in &current.jobs {
         let Some(call) = &job.uses else {
             continue;
@@ -141,47 +220,248 @@ fn expand_calls(
                     matrix.line,
                     FindingKind::MatrixJobs,
                     &message,
-                    Some(caller_key.clone()),
+                    Some(exp.caller_key.clone()),
                 );
             }
         }
-        match find_callee(workflows, &call.file_name) {
-            None => push_at(
-                found,
-                &current.path,
-                call.line,
-                FindingKind::CalleeNotFound,
-                &missing_callee_message(&job.name, &call.spec),
-                Some(caller_key.clone()),
-            ),
-            Some(callee) => {
-                if stack.iter().any(|path| path == &callee.path) {
-                    push_at(
-                        found,
-                        &current.path,
-                        call.line,
-                        FindingKind::ReusableCycle,
-                        &cycle_message(stack, &callee.path),
-                        Some(caller_key.clone()),
-                    );
-                    continue;
-                }
-                emit_workflow_findings(found, callee, Some(&caller_key));
-                stack.push(callee.path.clone());
-                expand_calls(found, workflows, root, callee, stack);
-                stack.pop();
+        let site = CallSite { current, job, call };
+        match &call.source {
+            ReusableSource::Local => expand_local(found, site, stack, exp)?,
+            ReusableSource::Remote(remote) => {
+                enter_cached(found, site, stack, exp, remote, CacheMiss::ShowJob)?;
             }
         }
     }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct CallSite<'a> {
+    current: &'a Workflow,
+    job: &'a Job,
+    call: &'a ReusableCall,
+}
+
+fn expand_local(
+    found: &mut Vec<Finding>,
+    site: CallSite<'_>,
+    stack: &mut Vec<CallFrame>,
+    exp: &Expand<'_>,
+) -> Result<(), ScanError> {
+    let CallSite { current, job, call } = site;
+    if let Some(repo) = &exp.repo {
+        let remote = RemoteWorkflow {
+            owner: repo.owner.clone(),
+            repo: repo.repo.clone(),
+            workflow_path: format!(".github/workflows/{}", call.file_name),
+            reference: repo.reference.clone(),
+        };
+        return enter_cached(
+            found,
+            CallSite { current, job, call },
+            stack,
+            exp,
+            &remote,
+            CacheMiss::NotFound,
+        );
+    }
+    match find_callee(exp.workflows, &call.file_name) {
+        None => push_at(
+            found,
+            &current.path,
+            call.line,
+            FindingKind::CalleeNotFound,
+            &missing_callee_message(&job.name, &call.spec),
+            Some(exp.caller_key.clone()),
+        ),
+        Some(callee) => {
+            if stack.iter().any(|frame| frame.path == callee.path) {
+                push_at(
+                    found,
+                    &current.path,
+                    call.line,
+                    FindingKind::ReusableCycle,
+                    &cycle_message(stack, display_name(&callee.path)),
+                    Some(exp.caller_key.clone()),
+                );
+                return Ok(());
+            }
+            emit_workflow_findings(found, callee, Some(&exp.caller_key));
+            stack.push(CallFrame {
+                path: callee.path.clone(),
+                label: display_name(&callee.path).to_string(),
+            });
+            expand_calls(found, callee, stack, exp)?;
+            stack.pop();
+        }
+    }
+    Ok(())
+}
+
+fn enter_cached(
+    found: &mut Vec<Finding>,
+    site: CallSite<'_>,
+    stack: &mut Vec<CallFrame>,
+    exp: &Expand<'_>,
+    remote: &RemoteWorkflow,
+    miss: CacheMiss,
+) -> Result<(), ScanError> {
+    let CallSite { current, job, call } = site;
+    let Some(runs) = exp.runs else {
+        note_cache_miss(found, site, exp, miss);
+        return Ok(());
+    };
+    let Some(path) = find_cached_file(runs, &remote.cache_relative())? else {
+        note_cache_miss(found, site, exp, miss);
+        return Ok(());
+    };
+    if stack.iter().any(|frame| frame.path == path) {
+        push_at(
+            found,
+            &current.path,
+            call.line,
+            FindingKind::ReusableCycle,
+            &cycle_message(stack, &call.spec),
+            Some(exp.caller_key.clone()),
+        );
+        return Ok(());
+    }
+    let callee = load_cached(&path)?;
+    let before = found.len();
+    emit_workflow_findings(found, &callee, Some(&exp.caller_key));
+    stack.push(CallFrame {
+        path: callee.path.clone(),
+        label: call.spec.clone(),
+    });
+    let nested = exp.with_repo(remote.clone());
+    expand_calls(found, &callee, stack, &nested)?;
+    stack.pop();
+    if miss == CacheMiss::ShowJob && found.len() == before {
+        show_remote_job(found, CallSite { current, job, call }, exp);
+    }
+    Ok(())
+}
+
+fn note_cache_miss(
+    found: &mut Vec<Finding>,
+    site: CallSite<'_>,
+    exp: &Expand<'_>,
+    miss: CacheMiss,
+) {
+    match miss {
+        CacheMiss::ShowJob => show_remote_job(found, site, exp),
+        CacheMiss::NotFound => push_at(
+            found,
+            &site.current.path,
+            site.call.line,
+            FindingKind::CalleeNotFound,
+            &missing_callee_message(&site.job.name, &site.call.spec),
+            Some(exp.caller_key.clone()),
+        ),
+    }
+}
+
+fn show_remote_job(found: &mut Vec<Finding>, site: CallSite<'_>, exp: &Expand<'_>) {
+    push_at(
+        found,
+        &site.current.path,
+        site.call.line,
+        FindingKind::RemoteWorkflow,
+        &remote_job_message(&site.job.name, &site.call.spec),
+        Some(exp.caller_key.clone()),
+    );
+}
+
+fn remote_job_message(job: &str, spec: &str) -> String {
+    format!("job {job} uses {spec}")
+}
+
+fn invalid_uses_message(job: &str, detail: &str) -> String {
+    format!("invalid reusable workflow uses: job {job} uses {detail}")
+}
+
+fn find_cached_file(runs: &Path, relative: &Path) -> Result<Option<PathBuf>, ScanError> {
+    if !runs.is_dir() {
+        return Ok(None);
+    }
+    let exact = runs.join(relative);
+    if exact.is_file() {
+        return Ok(Some(exact));
+    }
+    let Some(parts) = relative_parts(relative) else {
+        return Ok(None);
+    };
+    let mut current = runs.to_path_buf();
+    for (index, part) in parts.iter().enumerate() {
+        let want_file = index + 1 == parts.len();
+        match child_ignore_ascii_case(&current, part, want_file)? {
+            Some(next) => current = next,
+            None => return Ok(None),
+        }
+    }
+    if current.is_file() {
+        Ok(Some(current))
+    } else {
+        Ok(None)
+    }
+}
+
+fn relative_parts(relative: &Path) -> Option<Vec<std::ffi::OsString>> {
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_os_string()),
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => return None,
+        }
+    }
+    Some(parts)
+}
+
+fn child_ignore_ascii_case(
+    dir: &Path,
+    name: &OsStr,
+    want_file: bool,
+) -> Result<Option<PathBuf>, ScanError> {
+    let entries = fs::read_dir(dir).map_err(|_| ScanError::directory(dir))?;
+    let mut exact = None;
+    let mut folded = None;
+    for entry in entries {
+        let entry = entry.map_err(|_| ScanError::directory(dir))?;
+        let entry_name = entry.file_name();
+        if !entry_name.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        let path = entry.path();
+        let matches_kind = if want_file {
+            path.is_file()
+        } else {
+            path.is_dir()
+        };
+        if !matches_kind {
+            continue;
+        }
+        if entry_name == name {
+            exact = Some(path);
+        } else if folded.is_none() {
+            folded = Some(path);
+        }
+    }
+    Ok(exact.or(folded))
+}
+
+fn load_cached(path: &Path) -> Result<Workflow, ScanError> {
+    let text = fs::read_to_string(path).map_err(|_| ScanError::file(path))?;
+    scan_yaml(path, &text)
 }
 
 fn missing_callee_message(job: &str, spec: &str) -> String {
     format!("callee not found: job {job} uses {spec}")
 }
 
-fn cycle_message(stack: &[PathBuf], next: &Path) -> String {
-    let mut names: Vec<&str> = stack.iter().map(|path| display_name(path)).collect();
-    names.push(display_name(next));
+fn cycle_message(stack: &[CallFrame], next: &str) -> String {
+    let mut names: Vec<&str> = stack.iter().map(|frame| frame.label.as_str()).collect();
+    names.push(next);
     let chain = names.join(" -> ");
     format!("reusable workflow cycle: {chain}")
 }
@@ -653,7 +933,7 @@ mod tests {
     use crate::rank::rank;
     use crate::report::{render, render_json};
     use crate::usage::{read_usage, UsageRow};
-    use crate::workflow::{scan_dir, scan_yaml, Workflow};
+    use crate::workflow::{scan_dir, scan_yaml, RemoteWorkflow, ReusableSource, Workflow};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -3696,5 +3976,1247 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
             .unwrap();
         assert_eq!(caller_json["net"], "0.060000");
         assert_eq!(caller_json["gross"], "0.060000");
+    }
+
+    struct RemoteCase {
+        name: &'static str,
+        caller_file: &'static str,
+        job_body: &'static str,
+        spec: &'static str,
+        relative: &'static str,
+        crlf: bool,
+        bom: bool,
+    }
+
+    fn remote_cases() -> Vec<RemoteCase> {
+        let path = "acme/tools/.github/workflows/lint.yml@v1";
+        vec![
+            RemoteCase {
+                name: "tag",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@v1\n",
+                spec: path,
+                relative: path,
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "yaml-ext",
+                caller_file: "caller.yaml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yaml@v1\n",
+                spec: "acme/tools/.github/workflows/lint.yaml@v1",
+                relative: "acme/tools/.github/workflows/lint.yaml@v1",
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "tag-dotted",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@v1.2.3\n",
+                spec: "acme/tools/.github/workflows/lint.yml@v1.2.3",
+                relative: "acme/tools/.github/workflows/lint.yml@v1.2.3",
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "branch",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@main\n",
+                spec: "acme/tools/.github/workflows/lint.yml@main",
+                relative: "acme/tools/.github/workflows/lint.yml@main",
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "branch-slash",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@feature/widget\n",
+                spec: "acme/tools/.github/workflows/lint.yml@feature/widget",
+                relative: "acme/tools/.github/workflows/lint.yml@feature/widget",
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "refs-heads",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@refs/heads/main\n",
+                spec: "acme/tools/.github/workflows/lint.yml@refs/heads/main",
+                relative: "acme/tools/.github/workflows/lint.yml@refs/heads/main",
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "sha",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@0123456789abcdef0123456789abcdef01234567\n",
+                spec: "acme/tools/.github/workflows/lint.yml@0123456789abcdef0123456789abcdef01234567",
+                relative: "acme/tools/.github/workflows/lint.yml@0123456789abcdef0123456789abcdef01234567",
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "short-sha",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@abc1234\n",
+                spec: "acme/tools/.github/workflows/lint.yml@abc1234",
+                relative: "acme/tools/.github/workflows/lint.yml@abc1234",
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "with-after",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@v1\nwith:\n  extra: \"1\"\n",
+                spec: path,
+                relative: path,
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "secrets-before",
+                caller_file: "caller.yml",
+                job_body: "secrets: inherit\nwith:\n  extra: \"1\"\nuses: acme/tools/.github/workflows/lint.yml@v1\n",
+                spec: path,
+                relative: path,
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "with-and-secrets",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@v1\nwith:\n  extra: \"1\"\nsecrets: inherit\n",
+                spec: path,
+                relative: path,
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "empty-with-secrets",
+                caller_file: "caller.yml",
+                job_body: "with: {}\nsecrets: {}\nuses: acme/tools/.github/workflows/lint.yml@v1\n",
+                spec: path,
+                relative: path,
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "secrets-map-before",
+                caller_file: "caller.yml",
+                job_body: "secrets:\n  token: value\nuses: acme/tools/.github/workflows/lint.yml@v1\nwith:\n  extra: \"1\"\n",
+                spec: path,
+                relative: path,
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "double-quoted",
+                caller_file: "caller.yml",
+                job_body: "uses: \"acme/tools/.github/workflows/lint.yml@v1\"\n",
+                spec: path,
+                relative: path,
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "single-quoted",
+                caller_file: "caller.yml",
+                job_body: "uses: 'acme/tools/.github/workflows/lint.yml@v1'\n",
+                spec: path,
+                relative: path,
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "capitals",
+                caller_file: "caller.yml",
+                job_body: "uses: Acme/Tools/.GitHub/Workflows/Lint.YML@V1\n",
+                spec: "Acme/Tools/.GitHub/Workflows/Lint.YML@V1",
+                relative: "Acme/Tools/.GitHub/Workflows/Lint.YML@V1",
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "backslash",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github\\workflows\\lint.yml@v1\n",
+                spec: "acme/tools/.github\\workflows\\lint.yml@v1",
+                relative: path,
+                crlf: false,
+                bom: false,
+            },
+            RemoteCase {
+                name: "crlf",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@v1\nsecrets: inherit\nwith:\n  extra: \"1\"\n",
+                spec: path,
+                relative: path,
+                crlf: true,
+                bom: false,
+            },
+            RemoteCase {
+                name: "bom",
+                caller_file: "caller.yml",
+                job_body: "uses: acme/tools/.github/workflows/lint.yml@v1\n",
+                spec: path,
+                relative: path,
+                crlf: false,
+                bom: true,
+            },
+            RemoteCase {
+                name: "block-scalar",
+                caller_file: "caller.yml",
+                job_body: "uses: |\n  acme/tools/.github/workflows/lint.yml@v1\n",
+                spec: path,
+                relative: path,
+                crlf: false,
+                bom: false,
+            },
+        ]
+    }
+
+    fn b4b_dirs(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join("ci-bill-b4b").join(name);
+        let _ = fs::remove_dir_all(&root);
+        let workflows = root.join(".github").join("workflows");
+        let runs = root.join("runs");
+        fs::create_dir_all(&workflows).unwrap();
+        fs::create_dir_all(&runs).unwrap();
+        (workflows, runs)
+    }
+
+    fn path_from_slash(relative: &str) -> PathBuf {
+        relative
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect()
+    }
+
+    fn write_cache(runs: &Path, relative: &str, text: &str, crlf_file: bool, bom: bool) {
+        let path = runs.join(path_from_slash(relative));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut body = if crlf_file {
+            text.replace('\n', "\r\n")
+        } else {
+            text.to_string()
+        };
+        if bom {
+            body.insert(0, '\u{feff}');
+        }
+        fs::write(path, body).unwrap();
+    }
+
+    fn caller_yaml(job_body: &str) -> String {
+        indent_job_body(&format!(
+            "name: Caller\non: push\njobs:\n  call-lint:\n{job_body}"
+        ))
+    }
+
+    fn uses_key_line(yaml: &str) -> usize {
+        yaml.lines()
+            .position(|line| line.contains("uses:"))
+            .unwrap_or_else(|| panic!("no uses key in {yaml}"))
+            + 1
+    }
+
+    fn remote_of(job: &crate::workflow::Job) -> RemoteWorkflow {
+        match &job.uses.as_ref().expect("uses").source {
+            ReusableSource::Remote(remote) => remote.clone(),
+            ReusableSource::Local => panic!("expected a remote reusable workflow"),
+        }
+    }
+
+    fn assert_no_limitation(text: &str) {
+        let lower = text.to_ascii_lowercase();
+        assert!(!lower.contains("not supported"), "{text}");
+        assert!(!lower.contains("unsupported"), "{text}");
+        assert!(!lower.contains("skipped"), "{text}");
+        assert!(!lower.contains("not implemented"), "{text}");
+    }
+
+    fn assert_costs_stay_on_caller(
+        found: &[Finding],
+        caller_file: &str,
+        needle: &str,
+    ) -> (String, serde_json::Value) {
+        let rows = [
+            usage(&caller_key(caller_file), "0.06", "0.006"),
+            usage(".github/workflows/other.yml", "1.00", "0.100"),
+        ];
+        let ranking = rank(&rows, None);
+        assert_eq!(ranking.workflows.len(), 2);
+        let caller = ranking
+            .workflows
+            .iter()
+            .find(|item| item.workflow_path == caller_key(caller_file))
+            .unwrap();
+        let other = ranking
+            .workflows
+            .iter()
+            .find(|item| item.workflow_path == ".github/workflows/other.yml")
+            .unwrap();
+        assert_eq!(caller.net, Micros::parse("0.06").unwrap());
+        assert_eq!(other.net, Micros::parse("1.00").unwrap());
+        assert_eq!(
+            ranking.bill.total_net,
+            Micros::parse("1.06").unwrap(),
+            "remote calls must not add or move invoice net"
+        );
+        let (text, json) = report_for(found, &rows);
+        assert_no_limitation(&text);
+        assert_no_limitation(&json.to_string());
+        let label = format!("example-org/app {}", caller_key(caller_file));
+        let other_label = "example-org/app .github/workflows/other.yml";
+        let other_at = text
+            .find(other_label)
+            .unwrap_or_else(|| panic!("missing {other_label} in {text}"));
+        let caller_at = text
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing {label} in {text}"));
+        assert!(other_at < caller_at, "{text}");
+        assert!(
+            !text[other_at..caller_at].contains(needle),
+            "{needle} landed on the other workflow:\n{text}"
+        );
+        assert!(
+            text[caller_at..].contains(needle),
+            "missing {needle} under the caller:\n{text}"
+        );
+        assert!(!text.contains("Workflows without usage"), "{text}");
+        let caller_json = json["workflows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["path"] == caller_key(caller_file))
+            .unwrap();
+        assert_eq!(caller_json["net"], "0.060000");
+        assert!(
+            json["unattached_findings"].as_array().unwrap().is_empty(),
+            "{json}"
+        );
+        (text, json)
+    }
+
+    #[test]
+    fn remote_without_cache_shows_the_job_at_the_uses_line() {
+        for case in remote_cases() {
+            let (dir, runs) = b4b_dirs(&format!("miss-{}", case.name));
+            let yaml = caller_yaml(case.job_body);
+            let expected_line = uses_key_line(&yaml);
+            write_workflow(&dir, case.caller_file, &yaml, case.crlf, case.bom);
+            for runs_arg in [None, Some(runs.as_path())] {
+                let scanned = scan_dir(&dir).expect("scan");
+                let found = findings_with_cache(&scanned, runs_arg).expect("findings");
+                let call = job_named(&scanned, case.caller_file, "call-lint");
+                assert_eq!(call.uses.as_ref().unwrap().spec, case.spec, "{}", case.name);
+                assert_eq!(
+                    call.uses.as_ref().unwrap().line,
+                    expected_line,
+                    "{}",
+                    case.name
+                );
+                assert_eq!(
+                    remote_of(call).cache_relative(),
+                    path_from_slash(case.relative),
+                    "{}",
+                    case.name
+                );
+                assert!(call.invalid_uses.is_none(), "{}", case.name);
+                assert_no_timeout_on_call(&found, case.caller_file, call.line);
+                let shown = attributed(&found, case.caller_file, FindingKind::RemoteWorkflow);
+                assert_eq!(shown.len(), 1, "{}: {found:?}", case.name);
+                assert_eq!(shown[0].line, expected_line, "{}", case.name);
+                assert_eq!(shown[0].kind.code(), "F10");
+                assert_eq!(
+                    shown[0].message,
+                    format!("job call-lint uses {}", case.spec),
+                    "{}",
+                    case.name
+                );
+                assert!(shown[0].path.ends_with(case.caller_file), "{}", case.name);
+                assert!(
+                    found
+                        .iter()
+                        .all(|item| item.kind != FindingKind::CalleeNotFound),
+                    "{}: {found:?}",
+                    case.name
+                );
+                let needle = format!(
+                    "F10 {}:{}: job call-lint uses {}",
+                    shown[0].path.display(),
+                    expected_line,
+                    case.spec
+                );
+                let (_text, json) = assert_costs_stay_on_caller(&found, case.caller_file, &needle);
+                let listed = json["workflows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["path"] == caller_key(case.caller_file))
+                    .unwrap()["findings"]
+                    .as_array()
+                    .unwrap()
+                    .clone();
+                assert!(
+                    listed.iter().any(|item| {
+                        item["id"] == "F10"
+                            && item["line"] == expected_line
+                            && item["message"] == format!("job call-lint uses {}", case.spec)
+                    }),
+                    "{}: {listed:?}",
+                    case.name
+                );
+            }
+        }
+
+        let (dir, _) = b4b_dirs("miss-flow");
+        let flow = "name: Caller\non: push\njobs: {call-lint: {secrets: inherit, with: {extra: \"1\"}, uses: acme/tools/.github/workflows/lint.yml@v1}}\n";
+        write_workflow(&dir, "caller.yml", flow, false, false);
+        let (workflows, found) = load_cached_pair(&dir, None);
+        let call = job_named(&workflows, "caller.yml", "call-lint");
+        let shown = attributed(&found, "caller.yml", FindingKind::RemoteWorkflow);
+        assert_eq!(shown.len(), 1, "{found:?}");
+        assert_eq!(shown[0].line, call.uses.as_ref().unwrap().line);
+        assert_eq!(
+            shown[0].message,
+            "job call-lint uses acme/tools/.github/workflows/lint.yml@v1"
+        );
+        assert_eq!(shown[0].line, uses_key_line(flow));
+
+        let (dir, _) = b4b_dirs("miss-two-jobs");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  first:\n    uses: acme/tools/.github/workflows/lint.yml@v1\n  second:\n    with: {}\n    uses: other/repo/.github/workflows/build.yaml@release/1.2\n",
+            false,
+            false,
+        );
+        let (workflows, found) = load_cached_pair(&dir, None);
+        let shown = attributed(&found, "caller.yml", FindingKind::RemoteWorkflow);
+        assert_eq!(shown.len(), 2, "{found:?}");
+        let first = job_named(&workflows, "caller.yml", "first");
+        let second = job_named(&workflows, "caller.yml", "second");
+        assert!(shown.iter().any(|item| {
+            item.line == first.uses.as_ref().unwrap().line
+                && item.message == "job first uses acme/tools/.github/workflows/lint.yml@v1"
+        }));
+        assert!(shown.iter().any(|item| {
+            item.line == second.uses.as_ref().unwrap().line
+                && item.message
+                    == "job second uses other/repo/.github/workflows/build.yaml@release/1.2"
+        }));
+        assert_eq!(
+            remote_of(second).cache_relative(),
+            path_from_slash("other/repo/.github/workflows/build.yaml@release/1.2")
+        );
+    }
+
+    fn load_cached_pair(dir: &Path, runs: Option<&Path>) -> (Vec<Workflow>, Vec<Finding>) {
+        let workflows = scan_dir(dir).expect("scan workflows");
+        let found = findings_with_cache(&workflows, runs).expect("findings");
+        (workflows, found)
+    }
+
+    #[test]
+    fn remote_cache_file_puts_callee_findings_under_the_caller() {
+        for case in remote_cases() {
+            let (dir, runs) = b4b_dirs(&format!("hit-{}", case.name));
+            let yaml = caller_yaml(case.job_body);
+            write_workflow(&dir, case.caller_file, &yaml, case.crlf, case.bom);
+            write_cache(&runs, case.relative, LINT_CALLEE, case.crlf, case.bom);
+            let (workflows, found) = load_cached_pair(&dir, Some(&runs));
+            let call = job_named(&workflows, case.caller_file, "call-lint");
+            assert_eq!(call.uses.as_ref().unwrap().spec, case.spec, "{}", case.name);
+            assert_no_timeout_on_call(&found, case.caller_file, call.line);
+            let f1 = attributed(&found, case.caller_file, FindingKind::LintOnRunner);
+            assert_eq!(f1.len(), 1, "{}: {found:?}", case.name);
+            assert_eq!(f1[0].line, 5, "{}", case.name);
+            assert_eq!(f1[0].message, "lint on macOS", "{}", case.name);
+            assert_eq!(f1[0].kind.code(), "F1");
+            assert!(
+                f1[0].path.ends_with(path_from_slash(case.relative)),
+                "{}: {}",
+                case.name,
+                f1[0].path.display()
+            );
+            assert!(
+                attributed(&found, case.caller_file, FindingKind::RemoteWorkflow).is_empty(),
+                "{} still listed the call as uncached: {found:?}",
+                case.name
+            );
+            assert!(
+                found
+                    .iter()
+                    .all(|item| item.kind != FindingKind::CalleeNotFound),
+                "{}",
+                case.name
+            );
+            let needle = format!("F1 {}:5: lint on macOS", f1[0].path.display());
+            let (_text, json) = assert_costs_stay_on_caller(&found, case.caller_file, &needle);
+            let listed = json["workflows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["path"] == caller_key(case.caller_file))
+                .unwrap()["findings"]
+                .as_array()
+                .unwrap()
+                .clone();
+            assert!(
+                listed.iter().any(|item| {
+                    item["id"] == "F1"
+                        && item["line"] == 5
+                        && item["message"] == "lint on macOS"
+                        && item["file"]
+                            .as_str()
+                            .unwrap()
+                            .ends_with(case.relative.rsplit('/').next().unwrap())
+                }),
+                "{}: {listed:?}",
+                case.name
+            );
+        }
+
+        let (dir, runs) = b4b_dirs("hit-flow");
+        let flow = "on: push\njobs: {call-lint: {uses: acme/tools/.github/workflows/lint.yml@v1, secrets: inherit, with: {extra: \"1\"}}}\n";
+        write_workflow(&dir, "caller.yml", flow, true, false);
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/lint.yml@v1",
+            LINT_CALLEE,
+            true,
+            true,
+        );
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 5);
+        assert_eq!(f1[0].message, "lint on macOS");
+
+        let (dir, runs) = b4b_dirs("hit-casefold");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: Acme/Tools/.GitHub/Workflows/Lint.YML@V1\n",
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/lint.yml@v1",
+            LINT_CALLEE,
+            false,
+            false,
+        );
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert!(
+            f1[0]
+                .path
+                .ends_with(path_from_slash("acme/tools/.github/workflows/lint.yml@v1")),
+            "{}",
+            f1[0].path.display()
+        );
+
+        let (dir, runs) = b4b_dirs("hit-exact-wins");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: Acme/Tools/.GitHub/Workflows/Lint.YML@V1\n",
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            "Acme/Tools/.GitHub/Workflows/Lint.YML@V1",
+            LINT_CALLEE,
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/lint.yml@v1",
+            "name: Lint\non: workflow_call\njobs:\n  fmt:\n    runs-on: windows-latest\n    timeout-minutes: 10\n    steps:\n      - run: cargo fmt --check\n",
+            false,
+            false,
+        );
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].message, "lint on macOS");
+        assert!(
+            f1[0]
+                .path
+                .ends_with(path_from_slash("Acme/Tools/.GitHub/Workflows/Lint.YML@V1")),
+            "{}",
+            f1[0].path.display()
+        );
+
+        let bodies = [
+            (
+                "windows",
+                "name: Lint\non: workflow_call\njobs:\n  fmt:\n    runs-on: windows-latest\n    timeout-minutes: 10\n    steps:\n      - run: cargo fmt --check\n",
+                FindingKind::LintOnRunner,
+                5,
+                "lint on Windows",
+            ),
+            (
+                "timeout",
+                "name: Called\non: workflow_call\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo build\n",
+                FindingKind::MissingTimeout,
+                4,
+                "default timeout is 360 minutes",
+            ),
+            (
+                "pull-request",
+                "name: Called\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - run: cargo test\n",
+                FindingKind::PullRequestConcurrency,
+                2,
+                "pull_request without concurrency cancel-in-progress",
+            ),
+            (
+                "matrix",
+                MATRIX_CALLEE,
+                FindingKind::MatrixJobs,
+                8,
+                "matrix runs 6 jobs; each job is billed in whole minutes",
+            ),
+            (
+                "duplicate",
+                "name: Called\non: workflow_call\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    runs-on: macos-latest\n    steps:\n      - run: cargo fmt --check\n",
+                FindingKind::DuplicateKey,
+                6,
+                "duplicate key runs-on (line 5 and 6)",
+            ),
+        ];
+        for (name, body, kind, line, message) in bodies {
+            let (dir, runs) = b4b_dirs(&format!("hit-{name}"));
+            write_workflow(
+                &dir,
+                "caller.yml",
+                "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/lint.yml@v1\n",
+                false,
+                false,
+            );
+            write_cache(
+                &runs,
+                "acme/tools/.github/workflows/lint.yml@v1",
+                body,
+                false,
+                false,
+            );
+            let (workflows, found) = load_cached_pair(&dir, Some(&runs));
+            let call = job_named(&workflows, "caller.yml", "call-lint");
+            assert_no_timeout_on_call(&found, "caller.yml", call.line);
+            let matched = attributed(&found, "caller.yml", kind);
+            assert_eq!(matched.len(), 1, "{name}: {found:?}");
+            assert_eq!(matched[0].line, line, "{name}");
+            assert_eq!(matched[0].message, message, "{name}");
+            assert!(
+                matched[0]
+                    .path
+                    .ends_with(path_from_slash("acme/tools/.github/workflows/lint.yml@v1")),
+                "{name}: {}",
+                matched[0].path.display()
+            );
+            let needle = format!(
+                "{} {}:{}: {message}",
+                kind.code(),
+                matched[0].path.display(),
+                line
+            );
+            let _ = assert_costs_stay_on_caller(&found, "caller.yml", &needle);
+        }
+    }
+
+    #[test]
+    fn remote_cache_expands_nested_calls_and_stops_cycles() {
+        let (dir, runs) = b4b_dirs("nested-remote");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-mid:\n    secrets: inherit\n    uses: acme/tools/.github/workflows/mid.yml@v1\n",
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/mid.yml@v1",
+            "name: Mid\non: workflow_call\njobs:\n  forward:\n    with:\n      extra: \"1\"\n    uses: acme/tools/.github/workflows/lint.yml@v1\n",
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/lint.yml@v1",
+            LINT_CALLEE,
+            false,
+            false,
+        );
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 5);
+        assert!(
+            f1[0].path.ends_with("lint.yml@v1"),
+            "{}",
+            f1[0].path.display()
+        );
+        assert!(
+            attributed(&found, "caller.yml", FindingKind::ReusableCycle).is_empty(),
+            "{found:?}"
+        );
+
+        let (dir, runs) = b4b_dirs("nested-local-inside-remote");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-mid:\n    uses: acme/tools/.github/workflows/mid.yml@release/1.2\n",
+            true,
+            false,
+        );
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/mid.yml@release/1.2",
+            "name: Mid\non: workflow_call\njobs:\n  forward:\n    uses: ./.github/workflows/lint.yml\n    secrets: inherit\n",
+            true,
+            false,
+        );
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/lint.yml@release/1.2",
+            LINT_CALLEE,
+            true,
+            false,
+        );
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].message, "lint on macOS");
+        assert!(
+            f1[0].path.ends_with(path_from_slash(
+                "acme/tools/.github/workflows/lint.yml@release/1.2"
+            )),
+            "{}",
+            f1[0].path.display()
+        );
+
+        let (dir, runs) = b4b_dirs("nested-local-missing");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-mid:\n    uses: acme/tools/.github/workflows/mid.yml@v1\n",
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/mid.yml@v1",
+            "name: Mid\non: workflow_call\njobs:\n  forward:\n    uses: ./.github/workflows/missing.yml\n",
+            false,
+            false,
+        );
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        let missing = attributed(&found, "caller.yml", FindingKind::CalleeNotFound);
+        assert_eq!(missing.len(), 1, "{found:?}");
+        assert!(
+            missing[0].message.contains("callee not found"),
+            "{}",
+            missing[0].message
+        );
+        assert!(
+            missing[0]
+                .message
+                .contains("./.github/workflows/missing.yml"),
+            "{}",
+            missing[0].message
+        );
+        assert!(
+            missing[0].path.ends_with("mid.yml@v1"),
+            "{}",
+            missing[0].path.display()
+        );
+        assert_no_limitation(&missing[0].message);
+
+        let (dir, runs) = b4b_dirs("cycle-two");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-a:\n    uses: acme/tools/.github/workflows/a.yml@v1\n",
+            false,
+            false,
+        );
+        let spec_a = "acme/tools/.github/workflows/a.yml@v1";
+        let spec_b = "acme/tools/.github/workflows/b.yml@v1";
+        write_cache(
+            &runs,
+            spec_a,
+            &format!(
+                "name: A\non: workflow_call\njobs:\n  lint:\n    runs-on: macos-latest\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n  call-b:\n    uses: {spec_b}\n"
+            ),
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            spec_b,
+            &format!("name: B\non: workflow_call\njobs:\n  call-a:\n    uses: {spec_a}\n    secrets: inherit\n"),
+            false,
+            false,
+        );
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        assert!(found.len() < 12, "{found:?}");
+        let cycles = attributed(&found, "caller.yml", FindingKind::ReusableCycle);
+        assert_eq!(cycles.len(), 1, "{found:?}");
+        assert!(cycles[0].message.contains(spec_a), "{}", cycles[0].message);
+        assert!(cycles[0].message.contains(spec_b), "{}", cycles[0].message);
+        assert!(cycles[0].message.contains(" -> "), "{}", cycles[0].message);
+        assert_eq!(cycles[0].kind.code(), "F7");
+        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].message, "lint on macOS");
+
+        let (dir, runs) = b4b_dirs("cycle-self");
+        let spec = "acme/tools/.github/workflows/loop.yml@main";
+        write_workflow(
+            &dir,
+            "caller.yml",
+            &format!("name: Caller\non: push\njobs:\n  again:\n    uses: {spec}\n"),
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            spec,
+            &format!("name: Loop\non: workflow_call\njobs:\n  again:\n    uses: {spec}\n"),
+            false,
+            false,
+        );
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        assert!(found.len() < 6, "{found:?}");
+        let cycles = attributed(&found, "caller.yml", FindingKind::ReusableCycle);
+        assert_eq!(cycles.len(), 1, "{found:?}");
+        assert!(
+            cycles[0].message.contains(&format!("{spec} -> {spec}")),
+            "{}",
+            cycles[0].message
+        );
+    }
+
+    #[test]
+    fn remote_cache_errors_name_the_file_and_keep_a_visible_job() {
+        let (dir, runs) = b4b_dirs("bad-yaml");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/lint.yml@v1\n",
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/lint.yml@v1",
+            "name: Broken\non: push\njobs: [\nUNIQUE_SECRET_TOKEN\n",
+            false,
+            false,
+        );
+        let scanned = scan_dir(&dir).unwrap();
+        let err = findings_with_cache(&scanned, Some(&runs)).unwrap_err();
+        let message = err.to_string();
+        assert!(message.starts_with("line "), "{message}");
+        assert!(message.contains("invalid YAML"), "{message}");
+        assert!(!message.contains("UNIQUE_SECRET_TOKEN"), "{message}");
+        assert!(
+            err.path
+                .ends_with(path_from_slash("acme/tools/.github/workflows/lint.yml@v1")),
+            "{}",
+            err.path.display()
+        );
+
+        let (dir, runs) = b4b_dirs("bad-bytes");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/lint.yml@v1\n",
+            false,
+            false,
+        );
+        let bytes = runs.join(path_from_slash("acme/tools/.github/workflows/lint.yml@v1"));
+        fs::create_dir_all(bytes.parent().unwrap()).unwrap();
+        fs::write(&bytes, [0xff, 0xfe, 0xfd]).unwrap();
+        let scanned = scan_dir(&dir).unwrap();
+        let err = findings_with_cache(&scanned, Some(&runs)).unwrap_err();
+        assert_eq!(err.to_string(), "cannot read file");
+        assert!(!format!("{err} {}", err.path.display()).contains("not supported"));
+
+        let (dir, runs) = b4b_dirs("empty-callee");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/lint.yml@v1\n",
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/lint.yml@v1",
+            "",
+            false,
+            false,
+        );
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        let shown = attributed(&found, "caller.yml", FindingKind::RemoteWorkflow);
+        assert_eq!(shown.len(), 1, "{found:?}");
+        assert_eq!(
+            shown[0].message,
+            "job call-lint uses acme/tools/.github/workflows/lint.yml@v1"
+        );
+        assert_eq!(shown[0].line, 5);
+
+        let (dir, runs) = b4b_dirs("dir-callee");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/lint.yml@v1\n",
+            false,
+            false,
+        );
+        fs::create_dir_all(runs.join(path_from_slash("acme/tools/.github/workflows/lint.yml@v1")))
+            .unwrap();
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        let shown = attributed(&found, "caller.yml", FindingKind::RemoteWorkflow);
+        assert_eq!(shown.len(), 1, "{found:?}");
+        assert_eq!(shown[0].line, 5);
+        assert!(shown[0]
+            .message
+            .contains("acme/tools/.github/workflows/lint.yml@v1"));
+
+        let (dir, runs) = b4b_dirs("invalid-inside-callee");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/lint.yml@v1\n",
+            false,
+            false,
+        );
+        write_cache(
+            &runs,
+            "acme/tools/.github/workflows/lint.yml@v1",
+            "name: Called\non: workflow_call\njobs:\n  bad:\n    uses: actions/checkout@v4\n",
+            false,
+            false,
+        );
+        let (_, found) = load_cached_pair(&dir, Some(&runs));
+        let invalid = attributed(&found, "caller.yml", FindingKind::InvalidUses);
+        assert_eq!(invalid.len(), 1, "{found:?}");
+        assert_eq!(
+            invalid[0].message,
+            "invalid reusable workflow uses: job bad uses \"actions/checkout@v4\""
+        );
+        assert!(invalid[0].path.ends_with("lint.yml@v1"));
+    }
+
+    struct InvalidCase {
+        name: &'static str,
+        yaml: &'static str,
+        job: &'static str,
+        detail: &'static str,
+        crlf: bool,
+    }
+
+    #[test]
+    fn invalid_uses_text_is_a_finding_and_does_not_panic() {
+        let cases = [
+            InvalidCase {
+                name: "empty",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: \"\"\n",
+                job: "call-lint",
+                detail: "\"\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "blank",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: \"   \"\n",
+                job: "call-lint",
+                detail: "\"\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "missing-ref",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/lint.yml\n",
+                job: "call-lint",
+                detail: "\"acme/tools/.github/workflows/lint.yml\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "empty-ref",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/lint.yml@\n",
+                job: "call-lint",
+                detail: "\"acme/tools/.github/workflows/lint.yml@\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "bad-extension",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/lint.txt@v1\n",
+                job: "call-lint",
+                detail: "\"acme/tools/.github/workflows/lint.txt@v1\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "action",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: actions/checkout@v4\n",
+                job: "call-lint",
+                detail: "\"actions/checkout@v4\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "action-capitals",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: ACTIONS/CHECKOUT@V4\n",
+                job: "call-lint",
+                detail: "\"ACTIONS/CHECKOUT@V4\"",
+                crlf: true,
+            },
+            InvalidCase {
+                name: "local-other",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: ./foo.yml\n",
+                job: "call-lint",
+                detail: "\"./foo.yml\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "url",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: https://github.com/acme/tools/.github/workflows/lint.yml@v1\n",
+                job: "call-lint",
+                detail: "\"https://github.com/acme/tools/.github/workflows/lint.yml@v1\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "owner-repo-only",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools@v1\n",
+                job: "call-lint",
+                detail: "\"acme/tools@v1\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "list",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses:\n      - acme/tools/.github/workflows/lint.yml@v1\n",
+                job: "call-lint",
+                detail: "a list",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "mapping",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    secrets: inherit\n    uses:\n      path: acme/tools/.github/workflows/lint.yml@v1\n",
+                job: "call-lint",
+                detail: "a mapping",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "flow-list",
+                yaml: "on: push\njobs: {call-lint: {uses: [acme/tools/.github/workflows/lint.yml@v1]}}\n",
+                job: "call-lint",
+                detail: "a list",
+                crlf: true,
+            },
+            InvalidCase {
+                name: "flow-mapping",
+                yaml: "on: push\njobs: {call-lint: {uses: {path: acme/tools/.github/workflows/lint.yml@v1}}}\n",
+                job: "call-lint",
+                detail: "a mapping",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "number",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: 1\n",
+                job: "call-lint",
+                detail: "\"1\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "bool",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: true\n",
+                job: "call-lint",
+                detail: "\"true\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "parent-segment",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/../tools/.github/workflows/lint.yml@v1\n",
+                job: "call-lint",
+                detail: "\"acme/../tools/.github/workflows/lint.yml@v1\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "absolute",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: /acme/tools/.github/workflows/lint.yml@v1\n",
+                job: "call-lint",
+                detail: "\"/acme/tools/.github/workflows/lint.yml@v1\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "double-slash",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github//workflows/lint.yml@v1\n",
+                job: "call-lint",
+                detail: "\"acme/tools/.github//workflows/lint.yml@v1\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "ref-dotdot",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/lint.yml@foo/../../etc\n",
+                job: "call-lint",
+                detail: "\"acme/tools/.github/workflows/lint.yml@foo/../../etc\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "missing-file",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflows/@v1\n",
+                job: "call-lint",
+                detail: "\"acme/tools/.github/workflows/@v1\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "singular-workflow",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: acme/tools/.github/workflow/lint.yml@v1\n",
+                job: "call-lint",
+                detail: "\"acme/tools/.github/workflow/lint.yml@v1\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "unicode",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: \"acmé/tools/.github/workflows/lint.yml@v1\"\n",
+                job: "call-lint",
+                detail: "\"acmé/tools/.github/workflows/lint.yml@v1\"",
+                crlf: false,
+            },
+            InvalidCase {
+                name: "only-at",
+                yaml: "name: Caller\non: push\njobs:\n  call-lint:\n    uses: \"@v1\"\n",
+                job: "call-lint",
+                detail: "\"@v1\"",
+                crlf: false,
+            },
+        ];
+        for case in cases {
+            let (dir, runs) = b4b_dirs(&format!("bad-{}", case.name));
+            write_workflow(&dir, "caller.yml", case.yaml, case.crlf, false);
+            let caught = std::panic::catch_unwind(|| load_cached_pair(&dir, Some(&runs)));
+            let (workflows, found) = caught.expect("invalid uses panicked");
+            let job = job_named(&workflows, "caller.yml", case.job);
+            assert!(job.uses.is_none(), "{}", case.name);
+            let invalid = job.invalid_uses.as_ref().expect(case.name);
+            assert_eq!(invalid.detail, case.detail, "{}", case.name);
+            assert_eq!(invalid.line, uses_key_line(case.yaml), "{}", case.name);
+            let matched: Vec<_> = found
+                .iter()
+                .filter(|item| {
+                    item.kind == FindingKind::InvalidUses && item.path.ends_with("caller.yml")
+                })
+                .collect();
+            assert_eq!(matched.len(), 1, "{}: {found:?}", case.name);
+            assert_eq!(matched[0].line, invalid.line, "{}", case.name);
+            assert_eq!(matched[0].kind.code(), "F11");
+            assert_eq!(
+                matched[0].message,
+                format!(
+                    "invalid reusable workflow uses: job {} uses {}",
+                    case.job, case.detail
+                ),
+                "{}",
+                case.name
+            );
+            assert_no_limitation(&matched[0].message);
+            assert!(
+                of_kind(&found, FindingKind::MissingTimeout).is_empty(),
+                "{}: {found:?}",
+                case.name
+            );
+            let needle = format!(
+                "F11 {}:{}: {}",
+                matched[0].path.display(),
+                matched[0].line,
+                matched[0].message
+            );
+            let _ = assert_costs_stay_on_caller(&found, "caller.yml", &needle);
+        }
+
+        let long = format!("\"{}\"", "x".repeat(4000));
+        let yaml = format!("name: Caller\non: push\njobs:\n  call-lint:\n    uses: {long}\n");
+        let (dir, _) = b4b_dirs("bad-long");
+        write_workflow(&dir, "caller.yml", &yaml, false, false);
+        let caught = std::panic::catch_unwind(|| load_cached_pair(&dir, None));
+        let (_, found) = caught.expect("long uses panicked");
+        let matched = attributed(&found, "caller.yml", FindingKind::InvalidUses);
+        assert_eq!(matched.len(), 1, "{found:?}");
+        assert!(matched[0].message.contains(&"x".repeat(4000)));
+        assert_no_limitation(&matched[0].message);
+
+        let nasty = [
+            "\0\0\0",
+            "jobs: [\n",
+            "uses: &\n",
+            "jobs:\n  bad:\n    uses: \"unterminated",
+            "a: &a\n  b: *a\n",
+        ];
+        for text in nasty {
+            let parsed = std::panic::catch_unwind(|| scan_yaml(Path::new("odd.yml"), text));
+            assert!(parsed.is_ok(), "parser panicked on {text:?}");
+            if let Ok(Ok(workflow)) = parsed {
+                let found = std::panic::catch_unwind(|| findings(&[workflow]));
+                assert!(found.is_ok(), "findings panicked on {text:?}");
+            }
+        }
+
+        let (dir, _) = b4b_dirs("step-uses");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - uses: acme/tools/.github/workflows/lint.yml@v1\n      - uses: actions/checkout@v4\n",
+            false,
+            false,
+        );
+        let (workflows, found) = load_cached_pair(&dir, None);
+        let build = job_named(&workflows, "caller.yml", "build");
+        assert!(build.uses.is_none());
+        assert!(build.invalid_uses.is_none());
+        assert!(
+            of_kind(&found, FindingKind::InvalidUses).is_empty(),
+            "{found:?}"
+        );
+        assert!(
+            of_kind(&found, FindingKind::RemoteWorkflow).is_empty(),
+            "{found:?}"
+        );
+
+        let (dir, _) = b4b_dirs("last-key-wins");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: actions/checkout@v4\n    uses: acme/tools/.github/workflows/lint.yml@v1\n",
+            false,
+            false,
+        );
+        let (workflows, found) = load_cached_pair(&dir, None);
+        let call = job_named(&workflows, "caller.yml", "call-lint");
+        assert_eq!(
+            call.uses.as_ref().unwrap().spec,
+            "acme/tools/.github/workflows/lint.yml@v1"
+        );
+        assert!(call.invalid_uses.is_none());
+        assert_eq!(
+            of_kind(&found, FindingKind::DuplicateKey).len(),
+            1,
+            "{found:?}"
+        );
+        let shown = attributed(&found, "caller.yml", FindingKind::RemoteWorkflow);
+        assert_eq!(shown.len(), 1, "{found:?}");
+        assert!(shown[0]
+            .message
+            .contains("acme/tools/.github/workflows/lint.yml@v1"));
+        assert!(
+            of_kind(&found, FindingKind::InvalidUses).is_empty(),
+            "{found:?}"
+        );
     }
 }

@@ -65,7 +65,19 @@ fn report(
     let ranking = rank::rank(&rows, None);
     let yaml = match workflows {
         Some(dir) => match workflow::scan_dir(dir) {
-            Ok(scanned) => Some(findings::findings(&scanned)),
+            Ok(scanned) => {
+                let result = match runs {
+                    Some(cache) => findings::findings_with_cache(&scanned, Some(cache)),
+                    None => Ok(findings::findings(&scanned)),
+                };
+                match result {
+                    Ok(items) => Some(items),
+                    Err(err) => {
+                        eprintln!("ci-bill: {}: {err}", err.path.display());
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             Err(err) => {
                 eprintln!("ci-bill: {}: {err}", err.path.display());
                 return ExitCode::from(2);
@@ -158,7 +170,8 @@ enum Command {
         /// Directory of workflow YAML files.
         #[arg(long, value_name = "DIR")]
         workflows: Option<PathBuf>,
-        /// Saved Actions API JSON (`runs-*.json` and `jobs-<run_id>*.json`).
+        /// Saved Actions API JSON (`runs-*.json` and `jobs-<run_id>*.json`)
+        /// and cached remote workflows at `<owner>/<repo>/<path>@<ref>`.
         #[arg(long, value_name = "DIR")]
         runs: Option<PathBuf>,
         /// Show the N workflows with the highest net amount.
