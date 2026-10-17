@@ -15,6 +15,8 @@ pub enum FindingKind {
     PullRequestConcurrency,
     /// Matrix expands to at least six billed jobs, or an axis length is an expression.
     MatrixJobs,
+    /// The same mapping key is written more than once. The later value is kept.
+    DuplicateKey,
     /// A usage row disagrees with quantity * unit price, or with gross - discount.
     InvoiceMismatch,
 }
@@ -27,6 +29,7 @@ impl FindingKind {
             Self::MissingTimeout => "F2",
             Self::PullRequestConcurrency => "F3",
             Self::MatrixJobs => "F4",
+            Self::DuplicateKey => "F8",
             Self::InvoiceMismatch => "F9",
         }
     }
@@ -61,6 +64,18 @@ pub fn findings(workflows: &[Workflow]) -> Vec<Finding> {
                     "pull_request without concurrency cancel-in-progress",
                 );
             }
+        }
+        for dup in &workflow.duplicate_keys {
+            push(
+                &mut found,
+                &workflow.path,
+                dup.second,
+                FindingKind::DuplicateKey,
+                &format!(
+                    "duplicate key {} (line {} and {})",
+                    dup.key, dup.first, dup.second
+                ),
+            );
         }
         for job in &workflow.jobs {
             note_job(&mut found, &workflow.path, job);
@@ -197,8 +212,19 @@ fn note_job(found: &mut Vec<Finding>, path: &Path, job: &Job) {
     }
 }
 
-/// Six or more concrete jobs, or any expression axis whose lower bound is at least one.
+/// Six or more concrete jobs, a finite upper bound of at least six, or any
+/// expression axis whose lower bound is at least one.
 fn matrix_message(matrix: &Matrix) -> Option<String> {
+    if let Some(hi) = matrix.jobs_hi {
+        if hi < 6 {
+            return None;
+        }
+        let noun = if hi == 1 { "job" } else { "jobs" };
+        return Some(format!(
+            "matrix runs between {} and {hi} {noun}; each job is billed in whole minutes",
+            matrix.jobs
+        ));
+    }
     let wide = matrix.jobs >= 6 || (matrix.at_least && matrix.jobs > 0);
     if !wide {
         return None;
@@ -765,6 +791,167 @@ jobs:
         let f2 = of_kind(&found, FindingKind::MissingTimeout);
         assert_eq!(f2.len(), 1, "{found:?}");
         assert_eq!(f2[0].line, 14);
+    }
+
+    fn f4_between(lo: u64, hi: u64) -> String {
+        let noun = if hi == 1 { "job" } else { "jobs" };
+        format!("matrix runs between {lo} and {hi} {noun}; each job is billed in whole minutes")
+    }
+
+    fn f8(key: &str, first: usize, second: usize) -> String {
+        format!("duplicate key {key} (line {first} and {second})")
+    }
+
+    #[test]
+    fn f8_reports_the_later_runs_on_value() {
+        let yaml = "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    runs-on: macos-latest\n    steps:\n      - run: cargo fmt --check\n";
+        let found = analyze(yaml);
+        let f8s = of_kind(&found, FindingKind::DuplicateKey);
+        assert_eq!(f8s.len(), 1, "{found:?}");
+        assert_eq!(f8s[0].line, 4);
+        assert_eq!(f8s[0].message, f8("runs-on", 3, 4));
+        let f1 = of_kind(&found, FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 4);
+        assert_eq!(f1[0].message, "lint on macOS");
+
+        let crlf = analyze(&yaml.replace('\n', "\r\n"));
+        let f8s = of_kind(&crlf, FindingKind::DuplicateKey);
+        assert_eq!(f8s[0].message, f8("runs-on", 3, 4));
+        assert_eq!(
+            of_kind(&crlf, FindingKind::LintOnRunner)[0].message,
+            "lint on macOS"
+        );
+
+        let reversed = analyze(
+            "jobs:\n  lint:\n    runs-on: macos-latest\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo fmt --check\n",
+        );
+        assert_eq!(
+            of_kind(&reversed, FindingKind::DuplicateKey)[0].message,
+            f8("runs-on", 3, 4)
+        );
+        assert!(of_kind(&reversed, FindingKind::LintOnRunner).is_empty());
+
+        let capitals = analyze(
+            "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    runs-on: MacOS-latest\n    steps:\n      - run: cargo fmt --check\n",
+        );
+        assert_eq!(
+            of_kind(&capitals, FindingKind::LintOnRunner)[0].message,
+            "lint on macOS"
+        );
+        assert_eq!(
+            of_kind(&capitals, FindingKind::DuplicateKey)[0].message,
+            f8("runs-on", 3, 4)
+        );
+
+        let flow = analyze(
+            "jobs:\n  lint: {\n    runs-on: ubuntu-latest,\n    runs-on: macos-latest,\n    steps: [{run: cargo fmt --check}]\n  }\n",
+        );
+        assert_eq!(
+            of_kind(&flow, FindingKind::DuplicateKey)[0].message,
+            f8("runs-on", 3, 4)
+        );
+        assert_eq!(
+            of_kind(&flow, FindingKind::LintOnRunner)[0].message,
+            "lint on macOS"
+        );
+
+        let quoted = analyze(
+            "jobs:\n  lint:\n    \"runs-on\": \"ubuntu-latest\"\n    \"runs-on\": \"macos-latest\"\n    steps:\n      - run: cargo fmt --check\n",
+        );
+        assert_eq!(
+            of_kind(&quoted, FindingKind::DuplicateKey)[0].message,
+            f8("runs-on", 3, 4)
+        );
+
+        let empty_then = analyze(
+            "jobs:\n  lint:\n    runs-on: \"\"\n    runs-on: macos-latest\n    steps:\n      - run: cargo fmt --check\n",
+        );
+        assert_eq!(
+            of_kind(&empty_then, FindingKind::LintOnRunner)[0].message,
+            "lint on macOS"
+        );
+
+        let value_then_empty = analyze(
+            "jobs:\n  lint:\n    runs-on: macos-latest\n    runs-on: \"\"\n    steps:\n      - run: cargo fmt --check\n",
+        );
+        assert!(of_kind(&value_then_empty, FindingKind::LintOnRunner).is_empty());
+        assert_eq!(
+            of_kind(&value_then_empty, FindingKind::DuplicateKey)[0].message,
+            f8("runs-on", 3, 4)
+        );
+
+        let third = analyze(
+            "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    runs-on: windows-latest\n    runs-on: macos-latest\n    steps:\n      - run: cargo fmt --check\n",
+        );
+        let f8s = of_kind(&third, FindingKind::DuplicateKey);
+        assert_eq!(f8s.len(), 2, "{third:?}");
+        assert_eq!(f8s[0].message, f8("runs-on", 3, 4));
+        assert_eq!(f8s[1].message, f8("runs-on", 4, 5));
+        assert_eq!(of_kind(&third, FindingKind::LintOnRunner).len(), 1);
+
+        let unchanged = analyze(
+            "defaults: &defaults\n  runs-on: ubuntu-latest\njobs:\n  lint:\n    <<: *defaults\n    runs-on: macos-latest\n    steps:\n      - run: cargo fmt --check\n",
+        );
+        assert!(of_kind(&unchanged, FindingKind::DuplicateKey).is_empty());
+        assert_eq!(
+            of_kind(&unchanged, FindingKind::LintOnRunner)[0].message,
+            "lint on macOS"
+        );
+
+        let explicit_first = analyze(
+            "defaults: &defaults\n  runs-on: macos-latest\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    <<: *defaults\n    steps:\n      - run: cargo fmt --check\n",
+        );
+        assert!(of_kind(&explicit_first, FindingKind::DuplicateKey).is_empty());
+        assert!(of_kind(&explicit_first, FindingKind::LintOnRunner).is_empty());
+
+        let missing = analyze(
+            "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo fmt --check\n",
+        );
+        assert!(of_kind(&missing, FindingKind::DuplicateKey).is_empty());
+        assert!(of_kind(&missing, FindingKind::LintOnRunner).is_empty());
+    }
+
+    #[test]
+    fn f4_dynamic_exclude_says_between_lower_and_upper() {
+        let yaml = "jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: ${{ inputs.rules }}\n";
+        let (found, matrix) = matrix_case(yaml);
+        assert_eq!(matrix.jobs, 0);
+        assert_eq!(matrix.jobs_hi, Some(6));
+        assert!(!matrix.at_least);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, 6);
+        assert_eq!(f4[0].message, f4_between(0, 6));
+
+        let crlf = yaml.replace('\n', "\r\n");
+        let (found, matrix) = matrix_case(&crlf);
+        assert_eq!(matrix.jobs_hi, Some(6));
+        assert_eq!(
+            of_kind(&found, FindingKind::MatrixJobs)[0].message,
+            f4_between(0, 6)
+        );
+
+        let added = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: ${{ inputs.rules }}\n        include:\n          - os: macos-latest\n            node: 20\n";
+        let (found, matrix) = matrix_case(added);
+        assert_eq!(matrix.jobs, 1);
+        assert_eq!(matrix.jobs_hi, Some(7));
+        assert_eq!(
+            of_kind(&found, FindingKind::MatrixJobs)[0].message,
+            f4_between(1, 7)
+        );
+
+        let narrow = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16]\n        exclude: ${{ inputs.rules }}\n";
+        let (found, matrix) = matrix_case(narrow);
+        assert_eq!(matrix.jobs, 0);
+        assert_eq!(matrix.jobs_hi, Some(4));
+        assert!(of_kind(&found, FindingKind::MatrixJobs).is_empty());
+
+        let chain = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        include:\n          - os: macos-latest\n          - os: macos-latest\n            npm: \"6\"\n";
+        let (found, matrix) = matrix_case(chain);
+        assert_eq!(matrix.jobs, 1);
+        assert!(matrix.jobs_hi.is_none());
+        assert!(of_kind(&found, FindingKind::MatrixJobs).is_empty());
     }
 
     fn usd(text: &str) -> crate::money::Micros {

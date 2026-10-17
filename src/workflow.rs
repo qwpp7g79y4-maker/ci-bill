@@ -19,6 +19,8 @@ pub struct Workflow {
     /// Top-level `concurrency.cancel-in-progress` is the literal `true`.
     pub cancel_in_progress: bool,
     pub jobs: Vec<Job>,
+    /// Repeated mapping keys, in document order. The later value won.
+    pub duplicate_keys: Vec<DuplicateKey>,
 }
 
 /// One job under top-level `jobs:`.
@@ -52,12 +54,27 @@ pub struct RunsOn {
 /// `jobs` is the expanded combination count. When an axis value is a
 /// `${{ ... }}` expression, `at_least` is set and `jobs` is the product of the
 /// other axes (each expression axis contributes at least one value).
+/// A dynamic `exclude` stores a finite upper bound in `jobs_hi` and the lower
+/// bound in `jobs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Matrix {
     /// Line of the `matrix:` key.
     pub line: usize,
+    /// Exact count, or the lower bound when `at_least` or `jobs_hi` is set.
     pub jobs: u64,
     pub at_least: bool,
+    /// Finite upper bound, present only when it is greater than `jobs`.
+    pub jobs_hi: Option<u64>,
+}
+
+/// One repeated mapping key. The later line wins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateKey {
+    pub key: String,
+    /// Line of the earlier occurrence.
+    pub first: usize,
+    /// Line of the later occurrence, whose value is kept.
+    pub second: usize,
 }
 
 /// The workflow directory or a workflow file could not be read.
@@ -179,9 +196,17 @@ fn collect_events(text: &str) -> Result<Vec<(Event, Marker)>, usize> {
 
 #[derive(Clone)]
 enum Node {
-    Scalar { value: String, line: usize },
-    Sequence { items: Vec<Node> },
-    Mapping { entries: Vec<Entry> },
+    Scalar {
+        value: String,
+        line: usize,
+    },
+    Sequence {
+        items: Vec<Node>,
+    },
+    Mapping {
+        entries: Vec<Entry>,
+        duplicates: Vec<DuplicateKey>,
+    },
 }
 
 #[derive(Clone)]
@@ -321,8 +346,10 @@ impl Cursor<'_> {
                 });
             }
         }
+        let (entries, duplicates) = resolve_merge(raw);
         let node = Node::Mapping {
-            entries: resolve_merge(raw),
+            entries,
+            duplicates,
         };
         self.finish_anchor(anchors, building, anchor, &node);
         Ok(node)
@@ -364,23 +391,73 @@ impl Cursor<'_> {
     }
 }
 
-fn resolve_merge(entries: Vec<Entry>) -> Vec<Entry> {
-    let mut explicit = Vec::new();
-    let mut merges = Vec::new();
-    let mut seen = HashSet::new();
+/// Last explicit value wins. `<<` fills only keys that were not written explicitly,
+/// so an explicit key still wins whether it is written before or after the merge.
+fn resolve_merge(entries: Vec<Entry>) -> (Vec<Entry>, Vec<DuplicateKey>) {
+    let mut explicit: Vec<Entry> = Vec::new();
+    let mut merge: Option<Node> = None;
+    let mut merge_line: Option<usize> = None;
+    let mut duplicates: Vec<DuplicateKey> = Vec::new();
     for item in entries {
         if item.key == "<<" {
-            merges.push(item.value);
+            if let Some(previous) = merge_line {
+                duplicates.push(DuplicateKey {
+                    key: "<<".to_string(),
+                    first: previous,
+                    second: item.line,
+                });
+            }
+            merge_line = Some(item.line);
+            merge = Some(item.value);
             continue;
         }
-        if seen.insert(item.key.clone()) {
+        if let Some(pos) = explicit.iter().position(|entry| entry.key == item.key) {
+            duplicates.push(DuplicateKey {
+                key: item.key.clone(),
+                first: explicit[pos].line,
+                second: item.line,
+            });
+            explicit[pos] = item;
+        } else {
             explicit.push(item);
         }
     }
-    for value in merges {
+    if let Some(value) = merge {
+        let mut seen: HashSet<String> = explicit.iter().map(|entry| entry.key.clone()).collect();
         merge_node(&mut explicit, &mut seen, &value);
     }
-    explicit
+    (explicit, duplicates)
+}
+
+fn collect_duplicates(node: &Node, out: &mut Vec<DuplicateKey>) {
+    match node {
+        Node::Mapping {
+            entries,
+            duplicates,
+        } => {
+            out.extend(duplicates.iter().cloned());
+            for item in entries {
+                collect_duplicates(&item.value, out);
+            }
+        }
+        Node::Sequence { items } => {
+            for item in items {
+                collect_duplicates(item, out);
+            }
+        }
+        Node::Scalar { .. } => {}
+    }
+}
+
+fn dedupe_duplicates(items: Vec<DuplicateKey>) -> Vec<DuplicateKey> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        if seen.insert((item.key.clone(), item.first, item.second)) {
+            out.push(item);
+        }
+    }
+    out
 }
 
 fn merge_node(out: &mut Vec<Entry>, seen: &mut HashSet<String>, node: &Node) {
@@ -408,12 +485,17 @@ fn entry<'a>(entries: &'a [Entry], key: &str) -> Option<&'a Entry> {
 }
 
 fn workflow_from(path: &Path, root: Option<&Node>) -> Workflow {
+    let mut duplicate_keys = Vec::new();
+    if let Some(node) = root {
+        collect_duplicates(node, &mut duplicate_keys);
+    }
     let mut workflow = Workflow {
         path: path.to_path_buf(),
         on_line: None,
         has_pull_request: false,
         cancel_in_progress: false,
         jobs: Vec::new(),
+        duplicate_keys: dedupe_duplicates(duplicate_keys),
     };
     let Some(Node::Mapping { entries, .. }) = root else {
         return workflow;
@@ -645,10 +727,13 @@ struct AxisSpec {
     dynamic: bool,
 }
 
-enum Table {
-    Dynamic,
-    Rows(Vec<Vec<(String, String)>>),
+struct Table {
+    rows: Vec<Row>,
+    /// `exclude: ${{ ... }}` or an expression item. The concrete rows still apply.
+    dynamic: bool,
 }
+
+type Row = Vec<(String, String)>;
 
 fn matrix_from(strategy: &Node) -> Option<Matrix> {
     let Node::Mapping { entries, .. } = strategy else {
@@ -664,20 +749,28 @@ fn eval_matrix(line: usize, node: &Node) -> Matrix {
             line,
             jobs: 1,
             at_least: true,
+            jobs_hi: None,
         },
         Node::Mapping { entries, .. } => count_matrix(line, entries),
         _ => Matrix {
             line,
             jobs: 0,
             at_least: false,
+            jobs_hi: None,
         },
     }
 }
 
 fn count_matrix(line: usize, entries: &[Entry]) -> Matrix {
     let mut axes = Vec::new();
-    let mut include = Table::Rows(Vec::new());
-    let mut exclude = Table::Rows(Vec::new());
+    let mut include = Table {
+        rows: Vec::new(),
+        dynamic: false,
+    };
+    let mut exclude = Table {
+        rows: Vec::new(),
+        dynamic: false,
+    };
     for item in entries {
         match item.key.as_str() {
             "include" => include = parse_table(&item.value),
@@ -685,11 +778,12 @@ fn count_matrix(line: usize, entries: &[Entry]) -> Matrix {
             _ => axes.push(parse_axis(&item.key, &item.value)),
         }
     }
-    let (jobs, at_least) = combination_count(&axes, &include, &exclude);
+    let (jobs, jobs_hi, at_least) = combination_count(&axes, &include, &exclude);
     Matrix {
         line,
         jobs,
         at_least,
+        jobs_hi,
     }
 }
 
@@ -715,24 +809,30 @@ fn parse_axis(name: &str, node: &Node) -> AxisSpec {
 
 fn parse_table(node: &Node) -> Table {
     match node {
-        Node::Scalar { value, .. } if is_github_expression(value) => Table::Dynamic,
+        Node::Scalar { value, .. } if is_github_expression(value) => Table {
+            rows: Vec::new(),
+            dynamic: true,
+        },
         Node::Sequence { items, .. } => {
             let dynamic = items.iter().any(
                 |item| matches!(item, Node::Scalar { value, .. } if is_github_expression(value)),
             );
-            if dynamic {
-                return Table::Dynamic;
-            }
             let mut rows = Vec::new();
             for item in items {
                 if let Node::Mapping { entries, .. } = item {
                     rows.push(row_from(entries));
                 }
             }
-            Table::Rows(rows)
+            Table { rows, dynamic }
         }
-        Node::Mapping { entries, .. } => Table::Rows(vec![row_from(entries)]),
-        _ => Table::Rows(Vec::new()),
+        Node::Mapping { entries, .. } => Table {
+            rows: vec![row_from(entries)],
+            dynamic: false,
+        },
+        _ => Table {
+            rows: Vec::new(),
+            dynamic: false,
+        },
     }
 }
 
@@ -773,107 +873,193 @@ fn canonical(node: &Node) -> String {
     }
 }
 
-fn combination_count(axes: &[AxisSpec], include: &Table, exclude: &Table) -> (u64, bool) {
+/// `(jobs, jobs_hi, at_least)`. `jobs_hi` is set only for a finite range.
+fn combination_count(
+    axes: &[AxisSpec],
+    include: &Table,
+    exclude: &Table,
+) -> (u64, Option<u64>, bool) {
     let dynamic_axis = axes.iter().any(|axis| axis.dynamic);
     let concrete: Vec<&AxisSpec> = axes.iter().filter(|axis| !axis.dynamic).collect();
     let empty_axis = concrete.iter().any(|axis| axis.values.is_empty());
-    let concrete_names: HashSet<&str> = concrete.iter().map(|axis| axis.name.as_str()).collect();
+    let axis_names: HashSet<&str> = concrete.iter().map(|axis| axis.name.as_str()).collect();
     let dynamic_names: HashSet<&str> = axes
         .iter()
         .filter(|axis| axis.dynamic)
         .map(|axis| axis.name.as_str())
         .collect();
-    let include_dynamic = matches!(include, Table::Dynamic);
-    let exclude_dynamic = matches!(exclude, Table::Dynamic);
     let dynamic_only = dynamic_axis && concrete.is_empty() && !empty_axis;
+    let unbounded = (dynamic_axis && !empty_axis) || include.dynamic;
 
-    let product = axis_product(&concrete);
-    let over_cap = product > MAX_MATRIX_COMBINATIONS;
+    let (product, saturated) = axis_product(&concrete);
+    let over_cap = saturated || product > MAX_MATRIX_COMBINATIONS;
     let original = if empty_axis || concrete.is_empty() || over_cap {
         Vec::new()
     } else {
         cartesian(&concrete)
     };
 
-    let retained = if let Table::Rows(rows) = exclude {
-        if over_cap {
-            original.clone()
-        } else {
-            let mut kept = original.clone();
-            kept.retain(|combo| {
-                !rows
-                    .iter()
-                    .any(|row| exclude_hits(combo, row, &dynamic_names))
-            });
-            kept
-        }
-    } else {
-        original.clone()
-    };
-
-    // Include is applied after exclude, and only to combinations that came
-    // from the axes. A row that fits one of those is an expansion (no new job).
-    // A row that fits none is one extra job. Rows added by an earlier include
-    // are not expansion targets.
-    let match_against = if exclude_dynamic {
-        &original
-    } else {
-        &retained
-    };
-    let mut added = 0u64;
-    if let Table::Rows(rows) = include {
-        if !over_cap {
-            for row in rows {
-                if dynamic_only {
-                    continue;
-                }
-                let expands = match_against
-                    .iter()
-                    .any(|combo| include_expands(combo, row, &concrete_names));
-                if !expands {
-                    added += 1;
-                }
+    if unbounded {
+        let jobs = if dynamic_only && !exclude.dynamic {
+            1
+        } else if over_cap || empty_axis || concrete.is_empty() {
+            let new = if dynamic_only {
+                0
+            } else {
+                count_new_includes_analytical(&concrete, &include.rows, &axis_names)
+            };
+            if exclude.dynamic || empty_axis || concrete.is_empty() {
+                new
+            } else {
+                product.saturating_add(new)
             }
+        } else if exclude.dynamic {
+            count_new_includes(&original, &include.rows, &axis_names)
+        } else {
+            let reduced = apply_excludes(&original, &exclude.rows, &dynamic_names);
+            u64::try_from(reduced.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(count_new_includes(&reduced, &include.rows, &axis_names))
+        };
+        return (jobs, None, true);
+    }
+
+    if over_cap {
+        return capped_bounds(&concrete, include, exclude, product, &axis_names);
+    }
+
+    let reduced = apply_excludes(&original, &exclude.rows, &dynamic_names);
+    if exclude.dynamic {
+        let lo = count_new_includes(&original, &include.rows, &axis_names);
+        let hi = u64::try_from(reduced.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(count_new_includes(&reduced, &include.rows, &axis_names));
+        return range(lo.min(hi), hi);
+    }
+    let jobs = u64::try_from(reduced.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(count_new_includes(&reduced, &include.rows, &axis_names));
+    (jobs, None, false)
+}
+
+/// Above the combination cap the bounds use saturating products and spans.
+/// Combinations are not allocated.
+fn capped_bounds(
+    concrete: &[&AxisSpec],
+    include: &Table,
+    exclude: &Table,
+    product: u64,
+    axis_names: &HashSet<&str>,
+) -> (u64, Option<u64>, bool) {
+    let (min_remove, max_remove) =
+        exclusion_bounds(&exclude.rows, concrete, product, exclude.dynamic);
+    let new = count_new_includes_analytical(concrete, &include.rows, axis_names);
+    let matching = include
+        .rows
+        .iter()
+        .filter(|row| matches_original_space(row, concrete))
+        .count();
+    let matching = u64::try_from(matching).unwrap_or(u64::MAX);
+    // An include that fits the original space adds a job only when exclude
+    // removed its target. That slack keeps the upper bound above the true count.
+    let restore = if max_remove == 0 { 0 } else { matching };
+    let hi = product
+        .saturating_sub(min_remove)
+        .saturating_add(new)
+        .saturating_add(restore);
+    let lo = product.saturating_sub(max_remove).saturating_add(new);
+    range(lo.min(hi), hi)
+}
+
+fn range(lo: u64, hi: u64) -> (u64, Option<u64>, bool) {
+    if hi > lo {
+        (lo, Some(hi), false)
+    } else {
+        (lo, None, false)
+    }
+}
+
+fn apply_excludes(original: &[Row], rows: &[Row], dynamic_names: &HashSet<&str>) -> Vec<Row> {
+    if rows.is_empty() {
+        return original.to_vec();
+    }
+    let mut kept = original.to_vec();
+    kept.retain(|combo| {
+        !rows
+            .iter()
+            .any(|row| exclude_hits(combo, row, dynamic_names))
+    });
+    kept
+}
+
+fn exclusion_bounds(rows: &[Row], axes: &[&AxisSpec], product: u64, dynamic: bool) -> (u64, u64) {
+    if product == 0 {
+        return (0, 0);
+    }
+    let mut min_remove = 0u64;
+    let mut max_remove = 0u64;
+    for row in rows {
+        let span = exclusion_span(row, axes, product);
+        min_remove = min_remove.max(span);
+        max_remove = max_remove.saturating_add(span).min(product);
+    }
+    if dynamic {
+        max_remove = product;
+    }
+    (min_remove.min(product), max_remove.min(product))
+}
+
+/// How many original combinations one exclude row removes.
+///
+/// The span is `product / product_of_named_axis_lengths` when every named
+/// value exists. Overlapping rows are not subtracted twice; callers turn the
+/// spans into a lower and an upper bound.
+fn exclusion_span(row: &Row, axes: &[&AxisSpec], product: u64) -> u64 {
+    if product == 0 || axes.is_empty() {
+        return 0;
+    }
+    if row.is_empty() {
+        return product;
+    }
+    let mut specified = 1u64;
+    for (key, value) in row {
+        let Some(axis) = axes.iter().find(|axis| axis.name == *key) else {
+            return 0;
+        };
+        if !axis.values.iter().any(|item| item == value) {
+            return 0;
+        }
+        let len = u64::try_from(axis.values.len()).unwrap_or(u64::MAX);
+        if len == 0 || specified > u64::MAX / len {
+            return product;
+        }
+        specified *= len;
+    }
+    if specified == 0 || specified > product {
+        return 0;
+    }
+    product / specified
+}
+
+fn axis_product(axes: &[&AxisSpec]) -> (u64, bool) {
+    if axes.is_empty() {
+        return (0, false);
+    }
+    let mut total = 1u64;
+    let mut saturated = false;
+    for axis in axes {
+        if axis.values.is_empty() {
+            return (0, false);
+        }
+        let len = u64::try_from(axis.values.len()).unwrap_or(u64::MAX);
+        if len != 0 && total > u64::MAX / len {
+            saturated = true;
+            total = u64::MAX;
+        } else {
+            total *= len;
         }
     }
-
-    let base = if over_cap {
-        product
-    } else if exclude_dynamic {
-        // Every axis combination might be removed. Includes that fit no
-        // original combination are still started.
-        0
-    } else {
-        u64::try_from(retained.len()).unwrap_or(u64::MAX)
-    };
-
-    let mut jobs = base.saturating_add(added);
-    if dynamic_only && !over_cap {
-        jobs = jobs.max(1);
-    }
-
-    let at_least = (dynamic_axis && !empty_axis)
-        || include_dynamic
-        || exclude_dynamic
-        || (over_cap
-            && (include_dynamic || exclude_dynamic || has_rows(include) || has_rows(exclude)));
-    (jobs, at_least)
-}
-
-fn has_rows(table: &Table) -> bool {
-    match table {
-        Table::Dynamic => false,
-        Table::Rows(rows) => !rows.is_empty(),
-    }
-}
-
-fn axis_product(axes: &[&AxisSpec]) -> u64 {
-    let mut total = 1u64;
-    for axis in axes {
-        let len = u64::try_from(axis.values.len()).unwrap_or(u64::MAX);
-        total = total.saturating_mul(len);
-    }
-    total
+    (total, saturated)
 }
 
 fn cartesian(axes: &[&AxisSpec]) -> Vec<Vec<(String, String)>> {
@@ -920,6 +1106,105 @@ fn include_expands(
                 .iter()
                 .any(|field| field.0 == pair.0 && field.1 == pair.1)
         })
+}
+
+/// Include rows that add a job on top of `base`.
+///
+/// A row that only adds keys to an existing combination, including one created
+/// by an earlier include, does not add a job. A row that sets an original axis
+/// the combination does not have is a new job (it does not merge into that
+/// include-created combination).
+fn count_new_includes(base: &[Row], rows: &[Row], axis_names: &HashSet<&str>) -> u64 {
+    let mut extras: Vec<Row> = Vec::new();
+    for row in rows {
+        if base
+            .iter()
+            .any(|combo| include_expands(combo, row, axis_names))
+        {
+            continue;
+        }
+        if extras
+            .iter()
+            .any(|combo| extra_accepts(combo, row, axis_names))
+        {
+            for combo in &mut extras {
+                if extra_accepts(combo, row, axis_names) {
+                    overlay(combo, row);
+                }
+            }
+            continue;
+        }
+        extras.push(row.clone());
+    }
+    u64::try_from(extras.len()).unwrap_or(u64::MAX)
+}
+
+fn count_new_includes_analytical(
+    axes: &[&AxisSpec],
+    rows: &[Row],
+    axis_names: &HashSet<&str>,
+) -> u64 {
+    let mut extras: Vec<Row> = Vec::new();
+    for row in rows {
+        if matches_original_space(row, axes) {
+            continue;
+        }
+        if extras
+            .iter()
+            .any(|combo| extra_accepts(combo, row, axis_names))
+        {
+            for combo in &mut extras {
+                if extra_accepts(combo, row, axis_names) {
+                    overlay(combo, row);
+                }
+            }
+            continue;
+        }
+        extras.push(row.clone());
+    }
+    u64::try_from(extras.len()).unwrap_or(u64::MAX)
+}
+
+fn matches_original_space(row: &Row, axes: &[&AxisSpec]) -> bool {
+    if axes.is_empty() || axes.iter().any(|axis| axis.values.is_empty()) {
+        return false;
+    }
+    for (key, value) in row {
+        if let Some(axis) = axes.iter().find(|axis| axis.name == *key) {
+            if !axis.values.iter().any(|item| item == value) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// An include-created combination accepts a later row when shared keys match
+/// and every original axis in the row is already present with the same value.
+fn extra_accepts(combo: &Row, row: &Row, axis_names: &HashSet<&str>) -> bool {
+    for (key, value) in row {
+        if axis_names.contains(key.as_str()) {
+            match combo.iter().find(|(name, _)| name == key) {
+                Some((_, existing)) if existing == value => {}
+                _ => return false,
+            }
+        } else if let Some((_, existing)) = combo.iter().find(|(name, _)| name == key) {
+            if existing != value {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn overlay(combo: &mut Row, row: &Row) {
+    for (key, value) in row {
+        if let Some((_, existing)) = combo.iter_mut().find(|(name, _)| name == key) {
+            *existing = value.clone();
+        } else {
+            combo.push((key.clone(), value.clone()));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1745,5 +2030,369 @@ jobs:
             "jobs:\n  build:\n    strategy:\n      fail-fast: false\n      max-parallel: 2\n",
         );
         assert!(workflow.jobs[0].matrix.is_none());
+    }
+
+    fn crlf(text: &str) -> String {
+        text.replace('\n', "\r\n")
+    }
+
+    #[test]
+    fn duplicate_runs_on_keeps_the_later_value() {
+        let cases = [
+            (
+                "block",
+                "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    runs-on: macos-latest\n",
+                "macos-latest",
+                3,
+                4,
+            ),
+            (
+                "crlf",
+                "jobs:\r\n  lint:\r\n    runs-on: ubuntu-latest\r\n    runs-on: macos-latest\r\n",
+                "macos-latest",
+                3,
+                4,
+            ),
+            (
+                "reversed",
+                "jobs:\n  lint:\n    runs-on: macos-latest\n    runs-on: ubuntu-latest\n",
+                "ubuntu-latest",
+                3,
+                4,
+            ),
+            (
+                "quoted",
+                "jobs:\n  lint:\n    runs-on: \"ubuntu-latest\"\n    runs-on: \"macos-latest\"\n",
+                "macos-latest",
+                3,
+                4,
+            ),
+            (
+                "capitals",
+                "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    runs-on: MacOS-latest\n",
+                "MacOS-latest",
+                3,
+                4,
+            ),
+            (
+                "flow",
+                "jobs:\n  lint: {\n    runs-on: ubuntu-latest,\n    runs-on: macos-latest\n  }\n",
+                "macos-latest",
+                3,
+                4,
+            ),
+            (
+                "empty-then-value",
+                "jobs:\n  lint:\n    runs-on: \"\"\n    runs-on: macos-latest\n",
+                "macos-latest",
+                3,
+                4,
+            ),
+            (
+                "value-then-empty",
+                "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    runs-on: \"\"\n",
+                "",
+                3,
+                4,
+            ),
+            (
+                "list-wins",
+                "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    runs-on: [macos-latest]\n",
+                "[macos-latest]",
+                3,
+                4,
+            ),
+        ];
+        for (name, text, value, first, second) in cases {
+            let workflow = must_scan(name, text);
+            assert_eq!(workflow.jobs.len(), 1, "{name}");
+            let runs_on = workflow.jobs[0].runs_on.as_ref().unwrap();
+            assert_eq!(runs_on.value, value, "{name}");
+            assert_eq!(runs_on.line, second, "{name}");
+            assert_eq!(workflow.duplicate_keys.len(), 1, "{name}");
+            assert_eq!(workflow.duplicate_keys[0].key, "runs-on");
+            assert_eq!(workflow.duplicate_keys[0].first, first, "{name}");
+            assert_eq!(workflow.duplicate_keys[0].second, second, "{name}");
+        }
+
+        let third = must_scan(
+            "three.yml",
+            "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    runs-on: windows-latest\n    runs-on: macos-latest\n",
+        );
+        assert_eq!(
+            third.jobs[0].runs_on.as_ref().unwrap().value,
+            "macos-latest"
+        );
+        assert_eq!(third.duplicate_keys.len(), 2);
+        assert_eq!(third.duplicate_keys[0].first, 3);
+        assert_eq!(third.duplicate_keys[0].second, 4);
+        assert_eq!(third.duplicate_keys[1].first, 4);
+        assert_eq!(third.duplicate_keys[1].second, 5);
+
+        let same_line = must_scan(
+            "flow.yml",
+            "jobs: {lint: {runs-on: ubuntu-latest, runs-on: macos-latest}}\n",
+        );
+        assert_eq!(
+            same_line.jobs[0].runs_on.as_ref().unwrap().value,
+            "macos-latest"
+        );
+        assert_eq!(same_line.duplicate_keys[0].first, 1);
+        assert_eq!(same_line.duplicate_keys[0].second, 1);
+
+        let distinct = must_scan(
+            "case.yml",
+            "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    Runs-on: macos-latest\n",
+        );
+        assert_eq!(
+            distinct.jobs[0].runs_on.as_ref().unwrap().value,
+            "ubuntu-latest"
+        );
+        assert!(distinct.duplicate_keys.is_empty());
+
+        let missing = must_scan("one.yml", "jobs:\n  lint:\n    runs-on: ubuntu-latest\n");
+        assert!(missing.duplicate_keys.is_empty());
+    }
+
+    #[test]
+    fn merge_key_does_not_override_an_explicit_key() {
+        let explicit_last = must_scan(
+            "anchor.yml",
+            "defaults: &defaults\n  runs-on: ubuntu-latest\njobs:\n  lint:\n    <<: *defaults\n    runs-on: macos-latest\n",
+        );
+        let runs_on = explicit_last.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(runs_on.value, "macos-latest");
+        assert_eq!(runs_on.line, 6);
+        assert!(explicit_last.duplicate_keys.is_empty());
+
+        let explicit_first = must_scan(
+            "anchor.yml",
+            "defaults: &defaults\n  runs-on: ubuntu-latest\njobs:\n  lint:\n    runs-on: windows-latest\n    <<: *defaults\n",
+        );
+        let runs_on = explicit_first.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(runs_on.value, "windows-latest");
+        assert_eq!(runs_on.line, 5);
+        assert!(explicit_first.duplicate_keys.is_empty());
+
+        let crlf = must_scan(
+            "anchor.yml",
+            &crlf("defaults: &defaults\n  runs-on: ubuntu-latest\njobs:\n  lint:\n    runs-on: windows-latest\n    <<: *defaults\n"),
+        );
+        assert_eq!(
+            crlf.jobs[0].runs_on.as_ref().unwrap().value,
+            "windows-latest"
+        );
+        assert!(crlf.duplicate_keys.is_empty());
+
+        let inside_anchor = must_scan(
+            "anchor.yml",
+            "defaults: &defaults\n  runs-on: ubuntu-latest\n  runs-on: macos-latest\njobs:\n  lint:\n    <<: *defaults\n    runs-on: windows-latest\n",
+        );
+        assert_eq!(
+            inside_anchor.jobs[0].runs_on.as_ref().unwrap().value,
+            "windows-latest"
+        );
+        assert_eq!(inside_anchor.duplicate_keys.len(), 1);
+        assert_eq!(inside_anchor.duplicate_keys[0].key, "runs-on");
+        assert_eq!(inside_anchor.duplicate_keys[0].first, 2);
+        assert_eq!(inside_anchor.duplicate_keys[0].second, 3);
+    }
+
+    #[test]
+    fn include_chain_that_only_adds_keys_is_one_job() {
+        let chain = "jobs:\n  build:\n    strategy:\n      matrix:\n        include:\n          - os: macos-latest\n          - os: macos-latest\n            npm: \"6\"\n";
+        let matrix = job_matrix(chain);
+        assert_eq!(matrix.jobs, 1);
+        assert!(matrix.jobs_hi.is_none());
+        assert!(!matrix.at_least);
+
+        let crlf_chain = job_matrix(&crlf(chain));
+        assert_eq!(crlf_chain.jobs, 1);
+
+        let flow = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        include: [{os: macos-latest}, {npm: \"6\", os: macos-latest}]\n",
+        );
+        assert_eq!(flow.jobs, 1);
+
+        let missing_os = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        include:\n          - os: macos-latest\n          - npm: \"6\"\n",
+        );
+        assert_eq!(missing_os.jobs, 1);
+
+        let third = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        include:\n          - os: macos-latest\n          - os: macos-latest\n            npm: \"6\"\n          - os: macos-latest\n            npm: \"6\"\n            cache: true\n",
+        );
+        assert_eq!(third.jobs, 1);
+
+        let capitals = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        include:\n          - os: MacOS-latest\n          - os: MacOS-latest\n            npm: \"6\"\n",
+        );
+        assert_eq!(capitals.jobs, 1);
+
+        let other_os = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        include:\n          - os: macos-latest\n          - os: windows-latest\n            npm: \"6\"\n",
+        );
+        assert_eq!(other_os.jobs, 2);
+
+        let beside_axis = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - os: macos-latest\n          - os: macos-latest\n            npm: \"6\"\n",
+        );
+        assert_eq!(beside_axis.jobs, 2);
+        assert!(!beside_axis.at_least);
+
+        let empty_extra = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        include:\n          - os: macos-latest\n          - os: macos-latest\n            npm: \"\"\n",
+        );
+        assert_eq!(empty_extra.jobs, 1);
+    }
+
+    #[test]
+    fn dynamic_exclude_reports_lower_and_upper_bounds() {
+        let plain = "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: ${{ inputs.rules }}\n";
+        let matrix = job_matrix(plain);
+        assert_eq!(matrix.line, 4);
+        assert_eq!(matrix.jobs, 0);
+        assert_eq!(matrix.jobs_hi, Some(6));
+        assert!(!matrix.at_least);
+
+        assert_eq!(job_matrix(&crlf(plain)).jobs_hi, Some(6));
+
+        let flow = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix: {node: [14, 16, 18], os: [ubuntu-latest, windows-latest], exclude: \"${{ inputs.rules }}\"}\n",
+        );
+        assert_eq!(flow.jobs, 0);
+        assert_eq!(flow.jobs_hi, Some(6));
+
+        let capitals = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: ${{ INPUTS.RULES }}\n",
+        );
+        assert_eq!(capitals.jobs, 0);
+        assert_eq!(capitals.jobs_hi, Some(6));
+
+        let spaced = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: ${{ inputs.rules }}\n",
+        );
+        assert_eq!(spaced.jobs_hi, Some(6));
+
+        let reordered = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        exclude: ${{ inputs.rules }}\n        node: [14, 16, 18]\n        os: [ubuntu-latest, windows-latest]\n",
+        );
+        assert_eq!(reordered.jobs, 0);
+        assert_eq!(reordered.jobs_hi, Some(6));
+
+        let added = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: ${{ inputs.rules }}\n        include:\n          - os: macos-latest\n            node: 20\n",
+        );
+        assert_eq!(added.jobs, 1);
+        assert_eq!(added.jobs_hi, Some(7));
+
+        let chain = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: ${{ inputs.rules }}\n        include:\n          - os: macos-latest\n            node: 20\n          - os: macos-latest\n            node: 20\n            npm: \"6\"\n",
+        );
+        assert_eq!(chain.jobs, 1);
+        assert_eq!(chain.jobs_hi, Some(7));
+
+        let expands = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: ${{ inputs.rules }}\n        include:\n          - os: ubuntu-latest\n            node: 14\n            npm: \"6\"\n",
+        );
+        assert_eq!(expands.jobs, 0);
+        assert_eq!(expands.jobs_hi, Some(6));
+
+        let narrow = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16]\n        exclude: ${{ inputs.rules }}\n",
+        );
+        assert_eq!(narrow.jobs, 0);
+        assert_eq!(narrow.jobs_hi, Some(4));
+        assert!(!narrow.at_least);
+
+        let absent = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n",
+        );
+        assert_eq!(absent.jobs, 6);
+        assert!(absent.jobs_hi.is_none());
+
+        let empty_list = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: []\n",
+        );
+        assert_eq!(empty_list.jobs, 6);
+        assert!(empty_list.jobs_hi.is_none());
+    }
+
+    fn axis_block(name: &str, prefix: &str, count: usize) -> String {
+        let mut text = format!("        {name}:\n");
+        for index in 0..count {
+            text.push_str(&format!("          - {prefix}{index}\n"));
+        }
+        text
+    }
+
+    #[test]
+    fn large_matrix_bounds_use_saturating_arithmetic() {
+        let wide = format!(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n{}{}",
+            axis_block("a", "a", 500),
+            axis_block("b", "b", 401),
+        );
+        let matrix = job_matrix(&wide);
+        assert_eq!(matrix.jobs, 200_500);
+        assert!(matrix.jobs_hi.is_none());
+        assert!(!matrix.at_least);
+
+        let excluded = format!("{wide}        exclude: ${{{{ inputs.rules }}}}\n");
+        let matrix = job_matrix(&excluded);
+        assert_eq!(matrix.jobs, 0);
+        assert_eq!(matrix.jobs_hi, Some(200_500));
+
+        let crlf_excluded = job_matrix(&crlf(&excluded));
+        assert_eq!(crlf_excluded.jobs, 0);
+        assert_eq!(crlf_excluded.jobs_hi, Some(200_500));
+
+        let added = format!(
+            "{wide}        exclude: ${{{{ inputs.rules }}}}\n        include:\n          - a: other\n          - a: other\n            npm: \"6\"\n"
+        );
+        let matrix = job_matrix(&added);
+        assert_eq!(matrix.jobs, 1);
+        assert_eq!(matrix.jobs_hi, Some(200_501));
+
+        let chained = format!(
+            "{wide}        include:\n          - a: other\n          - a: other\n            npm: \"6\"\n"
+        );
+        let matrix = job_matrix(&chained);
+        assert_eq!(matrix.jobs, 200_501);
+        assert!(matrix.jobs_hi.is_none());
+
+        let one = format!("{wide}        exclude:\n          - a: a0\n");
+        let matrix = job_matrix(&one);
+        assert_eq!(matrix.jobs, 200_500 - 401);
+        assert!(matrix.jobs_hi.is_none());
+
+        let two = format!("{wide}        exclude:\n          - a: a0\n          - a: a1\n");
+        let matrix = job_matrix(&two);
+        assert_eq!(matrix.jobs, 200_500 - 802);
+        assert_eq!(matrix.jobs_hi, Some(200_500 - 401));
+
+        let mut saturated = String::from("jobs:\n  build:\n    strategy:\n      matrix:\n");
+        for axis in 0..16 {
+            saturated.push_str(&axis_block(&format!("a{axis}"), "v", 16));
+        }
+        let matrix = job_matrix(&saturated);
+        assert_eq!(matrix.jobs, u64::MAX);
+        assert!(matrix.jobs_hi.is_none());
+        assert!(!matrix.at_least);
+
+        saturated.push_str("        exclude: ${{ inputs.rules }}\n");
+        let matrix = job_matrix(&saturated);
+        assert_eq!(matrix.jobs, 0);
+        assert_eq!(matrix.jobs_hi, Some(u64::MAX));
+    }
+
+    #[test]
+    fn duplicate_axis_keeps_the_later_list() {
+        let matrix = job_matrix(
+            "jobs:\n  build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        os: [ubuntu-latest]\n",
+        );
+        assert_eq!(matrix.jobs, 3);
+        assert!(matrix.jobs_hi.is_none());
+        assert!(!matrix.at_least);
     }
 }
