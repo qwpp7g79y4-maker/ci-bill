@@ -5,8 +5,8 @@ use std::path::{Component, Path, PathBuf};
 use crate::money;
 use crate::usage::UsageRow;
 use crate::workflow::{
-    scan_yaml, Job, Matrix, RemoteWorkflow, ReusableCall, ReusableSource, RunsOn, ScanError,
-    Workflow,
+    load_action, locate_action, repository_root, scan_yaml, ActionStep, Job, LocalAction, Matrix,
+    RemoteWorkflow, ReusableCall, ReusableSource, RunsOn, ScanError, Workflow,
 };
 
 /// Why a workflow or job was flagged.
@@ -32,6 +32,10 @@ pub enum FindingKind {
     RemoteWorkflow,
     /// Job-level `uses:` is not a local or remote reusable workflow.
     InvalidUses,
+    /// Step `uses: ./path` and that directory has no `action.yml` or `action.yaml`.
+    ActionNotFound,
+    /// A composite action calls an action already being expanded.
+    ActionCycle,
 }
 
 impl FindingKind {
@@ -48,6 +52,8 @@ impl FindingKind {
             Self::ReusableCycle => "F7",
             Self::RemoteWorkflow => "F10",
             Self::InvalidUses => "F11",
+            Self::ActionNotFound => "F12",
+            Self::ActionCycle => "F13",
         }
     }
 }
@@ -81,9 +87,14 @@ const LINT_TOOLS: [&str; 5] = ["lint", "fmt", "clippy", "eslint", "prettier"];
 /// callee. A missing local file, a call cycle, an invalid uses value, and a
 /// remote call with no cache file are findings on the `uses:` line. Costs stay
 /// on the caller.
-pub fn findings(workflows: &[Workflow]) -> Vec<Finding> {
+///
+/// A step `uses: ./path` loads `action.yml` or `action.yaml` from that
+/// directory under the repository root. Composite steps count toward lint
+/// detection. The finding file and line are the action step. A missing
+/// directory or action file is a finding. Docker and Node actions stay on the
+/// step and are not expanded. Invalid action YAML is an error.
+pub fn findings(workflows: &[Workflow]) -> Result<Vec<Finding>, ScanError> {
     findings_with_cache(workflows, None)
-        .expect("findings without a runs directory do not read files")
 }
 
 /// [`findings`] plus remote reusable workflows stored under `runs`.
@@ -96,7 +107,7 @@ pub fn findings_with_cache(
 ) -> Result<Vec<Finding>, ScanError> {
     let mut found = Vec::new();
     for workflow in workflows {
-        emit_workflow_findings(&mut found, workflow, None);
+        emit_workflow_findings(&mut found, workflow, None)?;
         let mut stack = vec![CallFrame {
             path: workflow.path.clone(),
             label: display_name(&workflow.path).to_string(),
@@ -115,7 +126,11 @@ pub fn findings_with_cache(
     Ok(found)
 }
 
-fn emit_workflow_findings(found: &mut Vec<Finding>, workflow: &Workflow, caller_key: Option<&str>) {
+fn emit_workflow_findings(
+    found: &mut Vec<Finding>,
+    workflow: &Workflow,
+    caller_key: Option<&str>,
+) -> Result<(), ScanError> {
     let start = found.len();
     if pulls_without_cancel(workflow) {
         if let Some(line) = workflow.on_line {
@@ -150,6 +165,7 @@ fn emit_workflow_findings(found: &mut Vec<Finding>, workflow: &Workflow, caller_
         }
         if job.uses.is_none() && job.invalid_uses.is_none() {
             note_job(found, &workflow.path, job);
+            note_local_actions(found, workflow, job)?;
         }
     }
     if let Some(key) = caller_key {
@@ -157,6 +173,7 @@ fn emit_workflow_findings(found: &mut Vec<Finding>, workflow: &Workflow, caller_
             item.workflow_path = Some(key.to_string());
         }
     }
+    Ok(())
 }
 
 fn duplicate_message(key: &str, first: usize, second: usize) -> String {
@@ -286,7 +303,7 @@ fn expand_local(
                 );
                 return Ok(());
             }
-            emit_workflow_findings(found, callee, Some(&exp.caller_key));
+            emit_workflow_findings(found, callee, Some(&exp.caller_key))?;
             stack.push(CallFrame {
                 path: callee.path.clone(),
                 label: display_name(&callee.path).to_string(),
@@ -328,7 +345,7 @@ fn enter_cached(
     }
     let callee = load_cached(&path)?;
     let before = found.len();
-    emit_workflow_findings(found, &callee, Some(&exp.caller_key));
+    emit_workflow_findings(found, &callee, Some(&exp.caller_key))?;
     stack.push(CallFrame {
         path: callee.path.clone(),
         label: call.spec.clone(),
@@ -632,6 +649,192 @@ fn note_job(found: &mut Vec<Finding>, path: &Path, job: &Job) {
             push(found, path, matrix.line, FindingKind::MatrixJobs, &message);
         }
     }
+}
+
+struct ActionFrame {
+    relative: String,
+    spec: String,
+}
+
+/// Load `uses: ./path` steps. Composite steps join lint detection.
+///
+/// Docker and Node actions are left as the step that names them. A missing
+/// directory or action file is a finding. A cycle stops and is a finding.
+fn note_local_actions(
+    found: &mut Vec<Finding>,
+    workflow: &Workflow,
+    job: &Job,
+) -> Result<(), ScanError> {
+    let mut stack = Vec::new();
+    for step in &job.steps {
+        if let Some(action) = &step.local_action {
+            load_local_action(found, workflow, job, &workflow.path, action, &mut stack)?;
+        }
+    }
+    Ok(())
+}
+
+fn load_local_action(
+    found: &mut Vec<Finding>,
+    workflow: &Workflow,
+    job: &Job,
+    from: &Path,
+    action: &LocalAction,
+    stack: &mut Vec<ActionFrame>,
+) -> Result<(), ScanError> {
+    if stack.iter().any(|frame| frame.relative == action.relative) {
+        push_action(
+            found,
+            workflow,
+            from,
+            action.line,
+            FindingKind::ActionCycle,
+            &action_cycle_message(stack, &action.spec),
+        );
+        return Ok(());
+    }
+    let Some(root) = repository_root(&workflow.path) else {
+        push_missing_action(found, workflow, job, from, action);
+        return Ok(());
+    };
+    let Some(path) = locate_action(&root, &action.relative)? else {
+        push_missing_action(found, workflow, job, from, action);
+        return Ok(());
+    };
+    let parsed = load_action(&path)?;
+    if !parsed.using.trim().eq_ignore_ascii_case("composite") {
+        return Ok(());
+    }
+    stack.push(ActionFrame {
+        relative: action.relative.clone(),
+        spec: action.spec.clone(),
+    });
+    for step in &parsed.steps {
+        if let Some(line) = action_lint_line(step) {
+            note_action_runner(found, workflow, job, &path, line);
+        }
+        if let Some(nested) = &step.local_action {
+            load_local_action(found, workflow, job, &path, nested, stack)?;
+        }
+    }
+    stack.pop();
+    Ok(())
+}
+
+fn action_lint_line(step: &ActionStep) -> Option<usize> {
+    if step.run_line.is_some() && mentions_lint_tool(&step.run_text) {
+        return step.run_line;
+    }
+    if step.name_line.is_some() && mentions_lint_tool(&step.name) {
+        return step.name_line;
+    }
+    None
+}
+
+fn note_action_runner(
+    found: &mut Vec<Finding>,
+    workflow: &Workflow,
+    job: &Job,
+    action_path: &Path,
+    line: usize,
+) {
+    let Some(runs_on) = &job.runs_on else {
+        return;
+    };
+    if self_hosted(&runs_on.labels) {
+        return;
+    }
+    let (macos, windows) = label_set_os(&runs_on.labels);
+    if macos {
+        push_action(
+            found,
+            workflow,
+            action_path,
+            line,
+            FindingKind::LintOnRunner,
+            "lint on macOS",
+        );
+    }
+    if windows {
+        push_action(
+            found,
+            workflow,
+            action_path,
+            line,
+            FindingKind::LintOnRunner,
+            "lint on Windows",
+        );
+    }
+    let Some(matrix) = &job.matrix else {
+        return;
+    };
+    for hit in matrix_runner_hits(runs_on, matrix) {
+        if hit.macos {
+            push_action(
+                found,
+                workflow,
+                action_path,
+                line,
+                FindingKind::LintOnRunner,
+                &axis_lint_message("macOS", runs_on.line, &hit.axis, hit.line),
+            );
+        }
+        if hit.windows {
+            push_action(
+                found,
+                workflow,
+                action_path,
+                line,
+                FindingKind::LintOnRunner,
+                &axis_lint_message("Windows", runs_on.line, &hit.axis, hit.line),
+            );
+        }
+    }
+}
+
+fn push_missing_action(
+    found: &mut Vec<Finding>,
+    workflow: &Workflow,
+    job: &Job,
+    from: &Path,
+    action: &LocalAction,
+) {
+    push_action(
+        found,
+        workflow,
+        from,
+        action.line,
+        FindingKind::ActionNotFound,
+        &missing_action_message(&job.name, &action.spec),
+    );
+}
+
+fn push_action(
+    found: &mut Vec<Finding>,
+    workflow: &Workflow,
+    path: &Path,
+    line: usize,
+    kind: FindingKind,
+    message: &str,
+) {
+    push_at(
+        found,
+        path,
+        line,
+        kind,
+        message,
+        Some(usage_key(&workflow.path)),
+    );
+}
+
+fn missing_action_message(job: &str, spec: &str) -> String {
+    format!("action not found: job {job} uses {spec}")
+}
+
+fn action_cycle_message(stack: &[ActionFrame], next: &str) -> String {
+    let mut names: Vec<&str> = stack.iter().map(|frame| frame.spec.as_str()).collect();
+    names.push(next);
+    format!("composite action cycle: {}", names.join(" -> "))
 }
 
 /// Six or more concrete jobs, a finite upper bound of at least six, or any
@@ -939,7 +1142,7 @@ mod tests {
 
     fn analyze(yaml: &str) -> Vec<Finding> {
         let workflow = scan_yaml(Path::new("fixture.yml"), yaml).expect("valid fixture");
-        findings(&[workflow])
+        findings(&[workflow]).expect("findings")
     }
 
     fn of_kind(found: &[Finding], kind: FindingKind) -> Vec<&Finding> {
@@ -1105,7 +1308,7 @@ jobs:
                 workflow.path.file_name().and_then(|name| name.to_str()) == Some("ci.yml")
             })
             .expect("ci.yml fixture");
-        let found = findings(&[ci]);
+        let found = findings(&[ci]).expect("findings");
         assert!(
             found.iter().all(|item| {
                 !matches!(
@@ -1212,7 +1415,7 @@ jobs:
     fn matrix_case(yaml: &str) -> (Vec<Finding>, Matrix) {
         let workflow = scan_yaml(Path::new("fixture.yml"), yaml).expect("valid fixture");
         let matrix = workflow.jobs[0].matrix.clone().expect("matrix");
-        let found = findings(&[workflow]);
+        let found = findings(&[workflow]).expect("findings");
         (found, matrix)
     }
 
@@ -1425,7 +1628,7 @@ jobs:
         assert_eq!(workflow.jobs[0].matrix.as_ref().unwrap().jobs, 4);
         assert_eq!(workflow.jobs[1].matrix.as_ref().unwrap().jobs, 6);
         assert_eq!(workflow.jobs[2].matrix.as_ref().unwrap().jobs, 6);
-        let found = findings(&[workflow]);
+        let found = findings(&[workflow]).expect("findings");
         let f4 = of_kind(&found, FindingKind::MatrixJobs);
         assert_eq!(f4.len(), 2, "{found:?}");
         assert_eq!(f4[0].line, 11);
@@ -2805,7 +3008,7 @@ jobs:
 
     fn load_dir(dir: &Path) -> (Vec<Workflow>, Vec<Finding>) {
         let workflows = scan_dir(dir).expect("scan workflows");
-        let found = findings(&workflows);
+        let found = findings(&workflows).expect("findings");
         (workflows, found)
     }
 
@@ -5226,5 +5429,954 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
             of_kind(&found, FindingKind::InvalidUses).is_empty(),
             "{found:?}"
         );
+    }
+
+    fn b4d_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join("ci-bill-b4d").join(name);
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".github").join("workflows")).unwrap();
+        root
+    }
+
+    fn write_at(path: &Path, text: &str, crlf_file: bool, bom: bool) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut body = if crlf_file {
+            text.replace('\n', "\r\n")
+        } else {
+            text.to_string()
+        };
+        if bom {
+            body.insert(0, '\u{feff}');
+        }
+        fs::write(path, body).unwrap();
+    }
+
+    const BUILD_USES_LINT: &str = "\
+name: Build
+on: push
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: ./.github/actions/lint
+";
+
+    const COMPOSITE_FMT: &str = "\
+name: Lint
+description: Format the tree
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: cargo fmt --check
+";
+
+    fn scan_repo(root: &Path) -> (Vec<Workflow>, Vec<Finding>) {
+        let dir = root.join(".github").join("workflows");
+        let workflows = scan_dir(&dir).expect("scan workflows");
+        let found = findings(&workflows).expect("findings");
+        (workflows, found)
+    }
+
+    fn f1_on<'a>(found: &'a [Finding], suffix: &str) -> Vec<&'a Finding> {
+        found
+            .iter()
+            .filter(|item| item.kind == FindingKind::LintOnRunner && item.path.ends_with(suffix))
+            .collect()
+    }
+
+    #[test]
+    fn composite_macos_lint_uses_the_action_line() {
+        let cases = [
+            ("plain", "caller.yml", "action.yml", BUILD_USES_LINT, COMPOSITE_FMT, false, false, 7, "lint on macOS"),
+            ("yaml-ext", "caller.yml", "action.yaml", BUILD_USES_LINT, COMPOSITE_FMT, false, false, 7, "lint on macOS"),
+            ("crlf", "caller.yml", "action.yml", BUILD_USES_LINT, COMPOSITE_FMT, true, false, 7, "lint on macOS"),
+            ("bom", "caller.yml", "action.yml", BUILD_USES_LINT, COMPOSITE_FMT, false, true, 7, "lint on macOS"),
+            (
+                "reordered",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    timeout-minutes: 10\n    steps:\n      - name: Format\n        uses: ./.github/actions/lint\n    runs-on: macos-latest\n",
+                "name: Lint\nruns:\n  steps:\n    - shell: bash\n      run: cargo fmt --check\n  using: composite\n",
+                false,
+                false,
+                5,
+                "lint on macOS",
+            ),
+            (
+                "capitals",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: MacOS-latest\n    timeout-minutes: 10\n    steps:\n      - USES: ./.github/actions/lint\n",
+                "name: Lint\nRUNS:\n  USING: Composite\n  STEPS:\n    - SHELL: bash\n      RUN: cargo fmt --check\n",
+                false,
+                false,
+                6,
+                "lint on macOS",
+            ),
+            (
+                "windows",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: windows-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/lint\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on Windows",
+            ),
+            (
+                "windows-arm",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: Windows-11-arm\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/lint\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on Windows",
+            ),
+            (
+                "macos-scalar",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: macOS\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/lint\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on macOS",
+            ),
+            (
+                "both-os",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: [macos-latest, windows-latest]\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/lint\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on macOS",
+            ),
+            (
+                "quoted",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: \"./.github/actions/lint\"\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on macOS",
+            ),
+            (
+                "single-quoted",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: './.github/actions/lint'\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on macOS",
+            ),
+            (
+                "backslash",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github\\actions\\lint\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on macOS",
+            ),
+            (
+                "dot-segments",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/../actions/./lint\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on macOS",
+            ),
+            (
+                "double-slash",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github//actions/lint/\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on macOS",
+            ),
+            (
+                "explicit-action-file",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/lint/action.yml\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on macOS",
+            ),
+            (
+                "with-inputs",
+                "caller.yml",
+                "action.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/lint\n        with:\n          version: \"1\"\n",
+                COMPOSITE_FMT,
+                false,
+                false,
+                7,
+                "lint on macOS",
+            ),
+            (
+                "flow",
+                "caller.yml",
+                "action.yml",
+                "on: push\njobs: {build: {runs-on: macos-latest, timeout-minutes: 10, steps: [{uses: ./.github/actions/lint}]}}\n",
+                "name: Lint\nruns: {using: composite, steps: [{shell: bash, run: cargo fmt --check}]}\n",
+                false,
+                false,
+                2,
+                "lint on macOS",
+            ),
+            (
+                "flow-crlf",
+                "caller.yml",
+                "action.yml",
+                "on: push\njobs: {build: {runs-on: macos-latest, timeout-minutes: 10, steps: [{uses: ./.github/actions/lint}]}}\n",
+                "name: Lint\nruns: {using: composite, steps: [{shell: bash, run: cargo fmt --check}]}\n",
+                true,
+                false,
+                2,
+                "lint on macOS",
+            ),
+            (
+                "name-only",
+                "caller.yml",
+                "action.yml",
+                BUILD_USES_LINT,
+                "name: Lint\nruns:\n  using: composite\n  steps:\n    - name: prettier\n      shell: bash\n      run: echo ok\n",
+                false,
+                false,
+                5,
+                "lint on macOS",
+            ),
+            (
+                "multiline-run",
+                "caller.yml",
+                "action.yml",
+                BUILD_USES_LINT,
+                "name: Lint\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        cargo fmt --check\n        cargo clippy -- -D warnings\n",
+                false,
+                false,
+                6,
+                "lint on macOS",
+            ),
+            (
+                "run-wins-over-name",
+                "caller.yml",
+                "action.yml",
+                BUILD_USES_LINT,
+                "name: Lint\nruns:\n  using: composite\n  steps:\n    - name: fmt\n      run: cargo fmt --check\n      shell: bash\n",
+                false,
+                false,
+                6,
+                "lint on macOS",
+            ),
+        ];
+        for (name, caller, action_file, workflow, action, crlf_file, bom, line, message) in cases {
+            let root = b4d_root(name);
+            write_at(
+                &root.join(".github").join("workflows").join(caller),
+                workflow,
+                crlf_file,
+                false,
+            );
+            write_at(
+                &root
+                    .join(".github")
+                    .join("actions")
+                    .join("lint")
+                    .join(action_file),
+                action,
+                crlf_file,
+                bom,
+            );
+            let (workflows, found) = scan_repo(&root);
+            let f1 = f1_on(&found, action_file);
+            assert_eq!(
+                f1.len(),
+                if name == "both-os" { 2 } else { 1 },
+                "{name}: {found:?}"
+            );
+            assert!(
+                f1.iter()
+                    .any(|item| item.line == line && item.message == message),
+                "{name}: {found:?}"
+            );
+            assert_eq!(
+                f1[0].workflow_path.as_deref(),
+                Some(".github/workflows/caller.yml"),
+                "{name}"
+            );
+            assert_no_limitation(&f1[0].message);
+            let rows = [usage(".github/workflows/caller.yml", "0.62", "0.062")];
+            let (text, json) = report_for(&found, &rows);
+            let section = section_after(&text, "example-org/app .github/workflows/caller.yml");
+            assert!(
+                section.contains(&format!("{action_file}:{line}: {message}")),
+                "{name}: {text}"
+            );
+            assert!(!text.contains("Workflows without usage"), "{name}: {text}");
+            assert_eq!(json["workflows"][0]["net"], "0.620000", "{name}");
+            let listed = json["workflows"][0]["findings"].as_array().unwrap();
+            assert!(
+                listed.iter().any(|item| {
+                    item["id"] == "F1"
+                        && item["line"] == line
+                        && item["message"] == message
+                        && item["file"].as_str().unwrap().ends_with(action_file)
+                }),
+                "{name}: {listed:?}"
+            );
+            let build = job_named(&workflows, caller, "build");
+            assert!(
+                build.steps.iter().any(|step| step.local_action.is_some()),
+                "{name}"
+            );
+            if name == "plain" {
+                assert_eq!(build.steps[0].name, "./.github/actions/lint");
+                assert_eq!(build.steps[0].line, 8);
+            }
+        }
+    }
+
+    #[test]
+    fn composite_action_file_name_variants() {
+        let root = b4d_root("prefer-yml");
+        let dir = root.join(".github").join("actions").join("lint");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            BUILD_USES_LINT,
+            false,
+            false,
+        );
+        write_at(
+            &dir.join("action.yml"),
+            "name: Quiet\nruns:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n",
+            false,
+            false,
+        );
+        write_at(&dir.join("action.yaml"), COMPOSITE_FMT, false, false);
+        let (_, found) = scan_repo(&root);
+        assert!(f1_on(&found, "action.yml").is_empty(), "{found:?}");
+        assert!(f1_on(&found, "action.yaml").is_empty(), "{found:?}");
+
+        let root = b4d_root("capital-filename");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            BUILD_USES_LINT,
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/lint/Action.YML"),
+            COMPOSITE_FMT,
+            false,
+            false,
+        );
+        let (_, found) = scan_repo(&root);
+        let f1 = f1_on(&found, "Action.YML");
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 7);
+        assert_eq!(f1[0].message, "lint on macOS");
+
+        let root = b4d_root("repo-root");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./\n",
+            false,
+            false,
+        );
+        write_at(&root.join("action.yml"), COMPOSITE_FMT, false, false);
+        let (_, found) = scan_repo(&root);
+        let f1 = f1_on(&found, "action.yml");
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 7);
+        assert!(
+            f1[0].path.parent().unwrap() == root.as_path(),
+            "{}",
+            f1[0].path.display()
+        );
+    }
+
+    #[test]
+    fn missing_local_action_is_a_finding() {
+        let cases = [
+            ("missing-dir", false, "caller.yml", BUILD_USES_LINT, 8, "./.github/actions/lint"),
+            (
+                "missing-dir-crlf",
+                true,
+                "caller.yml",
+                BUILD_USES_LINT,
+                8,
+                "./.github/actions/lint",
+            ),
+            (
+                "missing-dir-yaml",
+                false,
+                "caller.yaml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./tools/lint\n",
+                8,
+                "./tools/lint",
+            ),
+            (
+                "missing-quoted",
+                false,
+                "caller.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: MACOS-latest\n    timeout-minutes: 10\n    steps:\n      - uses: \"./.github/actions/lint\"\n",
+                8,
+                "./.github/actions/lint",
+            ),
+            (
+                "missing-flow",
+                false,
+                "caller.yml",
+                "on: push\njobs: {build: {runs-on: macos-latest, timeout-minutes: 10, steps: [{uses: ./tools/lint}]}}\n",
+                2,
+                "./tools/lint",
+            ),
+            (
+                "missing-backslash",
+                false,
+                "caller.yml",
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./tools\\lint\n",
+                8,
+                "./tools\\lint",
+            ),
+        ];
+        for (name, crlf_file, caller, workflow, line, spec) in cases {
+            let root = b4d_root(name);
+            write_at(
+                &root.join(".github").join("workflows").join(caller),
+                workflow,
+                crlf_file,
+                false,
+            );
+            let caught = std::panic::catch_unwind(|| scan_repo(&root));
+            let (_, found) = caught.expect(name);
+            let missing: Vec<_> = found
+                .iter()
+                .filter(|item| item.kind == FindingKind::ActionNotFound)
+                .collect();
+            assert_eq!(missing.len(), 1, "{name}: {found:?}");
+            assert_eq!(missing[0].line, line, "{name}");
+            assert_eq!(missing[0].kind.code(), "F12");
+            assert_eq!(
+                missing[0].message,
+                format!("action not found: job build uses {spec}"),
+                "{name}"
+            );
+            assert!(missing[0].path.ends_with(caller), "{name}");
+            assert_no_limitation(&missing[0].message);
+            assert!(f1_on(&found, "action.yml").is_empty(), "{name}");
+            let (text, json) = report_for(&found, &[usage(&caller_key(caller), "0.06", "0.006")]);
+            assert!(text.contains("F12 "), "{name}: {text}");
+            assert!(text.contains(&missing[0].message), "{name}: {text}");
+            assert!(!text.contains("Workflows without usage"), "{name}: {text}");
+            let listed = json["workflows"][0]["findings"].as_array().unwrap();
+            assert!(
+                listed.iter().any(|item| item["id"] == "F12"),
+                "{name}: {listed:?}"
+            );
+        }
+
+        let root = b4d_root("empty-dir");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            BUILD_USES_LINT,
+            false,
+            false,
+        );
+        fs::create_dir_all(root.join(".github/actions/lint")).unwrap();
+        let (_, found) = scan_repo(&root);
+        let missing = of_kind(&found, FindingKind::ActionNotFound);
+        assert_eq!(missing.len(), 1, "{found:?}");
+        assert_eq!(missing[0].line, 8);
+        assert!(missing[0].message.contains("./.github/actions/lint"));
+
+        let root = b4d_root("readme-only");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            BUILD_USES_LINT,
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/lint/README.md"),
+            "not an action\n",
+            false,
+            false,
+        );
+        let (_, found) = scan_repo(&root);
+        assert_eq!(
+            of_kind(&found, FindingKind::ActionNotFound).len(),
+            1,
+            "{found:?}"
+        );
+
+        let outside = scan_yaml(
+            Path::new("fixture.yml"),
+            "jobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 1\n    steps:\n      - uses: ./lint\n",
+        )
+        .unwrap();
+        let found = std::panic::catch_unwind(|| findings(&[outside]));
+        let found = found.expect("findings panicked").expect("findings");
+        assert_eq!(
+            of_kind(&found, FindingKind::ActionNotFound).len(),
+            1,
+            "{found:?}"
+        );
+        assert!(
+            of_kind(&found, FindingKind::LintOnRunner).is_empty(),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn composite_without_lint_and_empty_fields_stay_quiet() {
+        let bodies = [
+            ("empty-file", ""),
+            ("name-only", "name: Lint\n"),
+            ("missing-runs", "name: Lint\ndescription: none\n"),
+            ("missing-using", "name: Lint\nruns:\n  steps:\n    - run: cargo fmt --check\n"),
+            ("empty-using", "name: Lint\nruns:\n  using: \"\"\n  steps:\n    - run: cargo fmt --check\n"),
+            ("using-list", "name: Lint\nruns:\n  using: [composite]\n  steps:\n    - run: cargo fmt --check\n"),
+            ("empty-steps", "name: Lint\nruns:\n  using: composite\n  steps: []\n"),
+            ("missing-steps", "name: Lint\nruns:\n  using: composite\n"),
+            ("null-steps", "name: Lint\nruns:\n  using: composite\n  steps:\n"),
+            ("empty-run", "name: Lint\nruns:\n  using: composite\n  steps:\n    - run: \"\"\n      shell: bash\n"),
+            ("null-run", "name: Lint\nruns:\n  using: composite\n  steps:\n    - run: ~\n      name: \"\"\n"),
+            ("checkout-step", "name: Lint\nruns:\n  using: composite\n  steps:\n    - uses: actions/checkout@v4\n"),
+            ("echo", "name: Lint\nruns:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n"),
+            ("spaced-using", "name: Lint\nruns:\n  using: \" composite \"\n  steps:\n    - run: echo hi\n"),
+        ];
+        for (name, body) in bodies {
+            let root = b4d_root(name);
+            write_at(
+                &root.join(".github/workflows/caller.yml"),
+                BUILD_USES_LINT,
+                false,
+                false,
+            );
+            write_at(
+                &root.join(".github/actions/lint/action.yml"),
+                body,
+                false,
+                false,
+            );
+            let caught = std::panic::catch_unwind(|| scan_repo(&root));
+            let (_, found) = caught.expect(name);
+            assert!(
+                of_kind(&found, FindingKind::LintOnRunner).is_empty(),
+                "{name}: {found:?}"
+            );
+            assert!(
+                of_kind(&found, FindingKind::ActionNotFound).is_empty(),
+                "{name}: {found:?}"
+            );
+            for item in &found {
+                assert_no_limitation(&item.message);
+            }
+        }
+
+        let negatives = [
+            ("ubuntu", "ubuntu-latest"),
+            ("self-hosted", "[self-hosted, macos-latest]"),
+            (
+                "self-hosted-flow",
+                "{group: large, labels: [self-hosted, macos]}",
+            ),
+        ];
+        for (name, runner) in negatives {
+            let root = b4d_root(name);
+            let workflow = format!(
+                "name: Build\non: push\njobs:\n  build:\n    runs-on: {runner}\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/lint\n"
+            );
+            write_at(
+                &root.join(".github/workflows/caller.yml"),
+                &workflow,
+                false,
+                false,
+            );
+            write_at(
+                &root.join(".github/actions/lint/action.yml"),
+                COMPOSITE_FMT,
+                false,
+                false,
+            );
+            let (_, found) = scan_repo(&root);
+            assert!(
+                of_kind(&found, FindingKind::LintOnRunner).is_empty(),
+                "{name}: {found:?}"
+            );
+        }
+
+        let root = b4d_root("no-runner");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            "name: Build\non: push\njobs:\n  build:\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/lint\n",
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/lint/action.yml"),
+            COMPOSITE_FMT,
+            false,
+            false,
+        );
+        let (_, found) = scan_repo(&root);
+        assert!(
+            of_kind(&found, FindingKind::LintOnRunner).is_empty(),
+            "{found:?}"
+        );
+        assert!(
+            of_kind(&found, FindingKind::ActionNotFound).is_empty(),
+            "{found:?}"
+        );
+
+        let root = b4d_root("remote-step");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: actions/checkout@v4\n      - uses: docker://alpine\n      - uses: ./.github/workflows/lint.yml\n      - uses: ./../outside\n",
+            false,
+            false,
+        );
+        let (_, found) = scan_repo(&root);
+        assert!(
+            of_kind(&found, FindingKind::ActionNotFound).is_empty(),
+            "{found:?}"
+        );
+        assert!(
+            of_kind(&found, FindingKind::LintOnRunner).is_empty(),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn docker_and_node_actions_are_shown_not_unpacked() {
+        let kinds = [
+            "docker", "Docker", "node12", "node16", "node20", "NODE20", "node24", "node",
+        ];
+        for (index, using) in kinds.iter().enumerate() {
+            let root = b4d_root(&format!("show-{index}"));
+            write_at(
+                &root.join(".github/workflows/caller.yml"),
+                BUILD_USES_LINT,
+                false,
+                false,
+            );
+            let body = format!(
+                "name: Tool\nruns:\n  using: {using}\n  image: Dockerfile\n  main: index.js\n  steps:\n    - run: cargo fmt --check\n      shell: bash\n    - uses: ./.github/actions/inner\n"
+            );
+            write_at(
+                &root.join(".github/actions/lint/action.yml"),
+                &body,
+                false,
+                false,
+            );
+            write_at(
+                &root.join(".github/actions/lint/Dockerfile"),
+                "FROM alpine\nRUN cargo fmt --check\n",
+                false,
+                false,
+            );
+            write_at(
+                &root.join(".github/actions/inner/action.yml"),
+                COMPOSITE_FMT,
+                false,
+                false,
+            );
+            let (workflows, found) = scan_repo(&root);
+            assert!(
+                of_kind(&found, FindingKind::LintOnRunner).is_empty(),
+                "{using}: {found:?}"
+            );
+            assert!(
+                of_kind(&found, FindingKind::ActionNotFound).is_empty(),
+                "{using}: {found:?}"
+            );
+            let step = &job_named(&workflows, "caller.yml", "build").steps[0];
+            assert_eq!(step.name, "./.github/actions/lint");
+            assert!(step.local_action.is_some(), "{using}");
+            let rows = [usage(".github/workflows/caller.yml", "0.06", "0.006")];
+            let ranking = rank(&rows, None);
+            let json: serde_json::Value = serde_json::from_str(
+                render_json(
+                    &ranking.workflows,
+                    &ranking.bill,
+                    Some(&found),
+                    None,
+                    None,
+                    &workflows,
+                )
+                .trim_end(),
+            )
+            .unwrap();
+            assert_eq!(
+                json["workflows"][0]["steps"][0]["name"],
+                "./.github/actions/lint"
+            );
+            assert_eq!(json["workflows"][0]["steps"][0]["line"], 8);
+            assert!(json["workflows"][0]["findings"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn nested_composite_lint_points_at_the_inner_action() {
+        let root = b4d_root("nested");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            BUILD_USES_LINT,
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/lint/action.yml"),
+            "name: Outer\nruns:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n",
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/inner/action.yml"),
+            "name: Inner\nruns:\n  using: composite\n  steps:\n    - run: cargo fmt --check\n      shell: bash\n",
+            false,
+            false,
+        );
+        let (_, found) = scan_repo(&root);
+        let f1 = f1_on(&found, "inner/action.yml");
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 5);
+        assert_eq!(f1[0].message, "lint on macOS");
+        assert_eq!(
+            f1[0].workflow_path.as_deref(),
+            Some(".github/workflows/caller.yml")
+        );
+        let (text, _) = report_for(
+            &found,
+            &[usage(".github/workflows/caller.yml", "0.06", "0.006")],
+        );
+        assert!(text.contains("inner/action.yml:5: lint on macOS"), "{text}");
+        assert!(!text.contains("Workflows without usage"), "{text}");
+
+        let root = b4d_root("nested-missing");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            BUILD_USES_LINT,
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/lint/action.yml"),
+            "name: Outer\nruns:\n  using: composite\n  steps:\n    - uses: ./tools/missing\n",
+            false,
+            false,
+        );
+        let (_, found) = scan_repo(&root);
+        let missing = of_kind(&found, FindingKind::ActionNotFound);
+        assert_eq!(missing.len(), 1, "{found:?}");
+        assert!(
+            missing[0].path.ends_with("lint/action.yml"),
+            "{}",
+            missing[0].path.display()
+        );
+        assert_eq!(missing[0].line, 5);
+        assert_eq!(
+            missing[0].message,
+            "action not found: job build uses ./tools/missing"
+        );
+
+        let root = b4d_root("cycle");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            "name: Build\non: push\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/a\n",
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/a/action.yml"),
+            "name: A\nruns:\n  using: composite\n  steps:\n    - uses: ./.github/actions/b\n",
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/b/action.yml"),
+            "name: B\nruns:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n    - uses: ./.github/actions/a\n",
+            false,
+            false,
+        );
+        let caught = std::panic::catch_unwind(|| scan_repo(&root));
+        let (_, found) = caught.expect("cycle panicked");
+        let cycles = of_kind(&found, FindingKind::ActionCycle);
+        assert_eq!(cycles.len(), 1, "{found:?}");
+        assert_eq!(cycles[0].kind.code(), "F13");
+        assert!(
+            cycles[0].path.ends_with("b/action.yml"),
+            "{}",
+            cycles[0].path.display()
+        );
+        assert_eq!(cycles[0].line, 7);
+        assert_eq!(
+            cycles[0].message,
+            "composite action cycle: ./.github/actions/a -> ./.github/actions/b -> ./.github/actions/a"
+        );
+        assert_no_limitation(&cycles[0].message);
+    }
+
+    #[test]
+    fn invalid_action_yaml_is_an_error_without_the_body() {
+        let root = b4d_root("bad-yaml");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            BUILD_USES_LINT,
+            false,
+            false,
+        );
+        let token = "TOKEN_NOT_IN_ERRORS";
+        write_at(
+            &root.join(".github/actions/lint/action.yml"),
+            &format!("runs: [\n{token}\n"),
+            false,
+            false,
+        );
+        let dir = root.join(".github/workflows");
+        let workflows = scan_dir(&dir).unwrap();
+        let err = findings(&workflows).expect_err("invalid action yaml");
+        let text = err.to_string();
+        assert!(text.contains("invalid YAML"), "{text}");
+        assert!(!text.contains(token), "{text}");
+        assert!(err.path.ends_with("action.yml"), "{}", err.path.display());
+    }
+
+    #[test]
+    fn composite_matrix_and_callee_keep_the_action_line() {
+        let root = b4d_root("matrix");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            "name: Build\non: push\njobs:\n  build:\n    runs-on: ${{ matrix.os }}\n    timeout-minutes: 10\n    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n    steps:\n      - uses: ./.github/actions/lint\n",
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/lint/action.yml"),
+            COMPOSITE_FMT,
+            false,
+            false,
+        );
+        let (_, found) = scan_repo(&root);
+        let f1 = f1_on(&found, "action.yml");
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 7);
+        assert_eq!(
+            f1[0].message,
+            "lint on macOS (runs-on line 5, axis os line 9)"
+        );
+
+        let root = b4d_root("two-steps");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            BUILD_USES_LINT,
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/lint/action.yml"),
+            "name: Lint\nruns:\n  using: composite\n  steps:\n    - run: cargo fmt --check\n      shell: bash\n    - name: eslint\n      run: echo ok\n      shell: bash\n",
+            false,
+            false,
+        );
+        let (_, found) = scan_repo(&root);
+        let f1 = f1_on(&found, "action.yml");
+        assert_eq!(f1.len(), 2, "{found:?}");
+        assert!(f1.iter().any(|item| item.line == 5), "{found:?}");
+        assert!(f1.iter().any(|item| item.line == 7), "{found:?}");
+
+        let root = b4d_root("callee");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            "name: Caller\non: push\njobs:\n  call:\n    uses: ./.github/workflows/called.yml\n",
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/workflows/called.yml"),
+            "name: Called\non: workflow_call\njobs:\n  build:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/lint\n",
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/lint/action.yml"),
+            COMPOSITE_FMT,
+            false,
+            false,
+        );
+        let (_, found) = scan_repo(&root);
+        let on_caller = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(on_caller.len(), 1, "{found:?}");
+        assert_eq!(on_caller[0].line, 7);
+        assert!(on_caller[0].path.ends_with("action.yml"));
+        assert_eq!(on_caller[0].message, "lint on macOS");
+        let rows = [
+            usage(".github/workflows/caller.yml", "0.06", "0.006"),
+            usage(".github/workflows/called.yml", "1.00", "0.100"),
+        ];
+        let (text, _) = report_for(&found, &rows);
+        let caller_at = text
+            .find("example-org/app .github/workflows/caller.yml")
+            .unwrap();
+        assert!(
+            text[caller_at..].contains("action.yml:7: lint on macOS"),
+            "{text}"
+        );
+        assert!(text[..caller_at].contains("0.06") || text[caller_at..].contains("0.06"));
+    }
+
+    #[test]
+    fn job_lint_and_composite_lint_are_both_reported() {
+        let root = b4d_root("both-signals");
+        write_at(
+            &root.join(".github/workflows/caller.yml"),
+            "name: Build\non: push\njobs:\n  lint:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - uses: ./.github/actions/lint\n",
+            false,
+            false,
+        );
+        write_at(
+            &root.join(".github/actions/lint/action.yml"),
+            COMPOSITE_FMT,
+            false,
+            false,
+        );
+        let (_, found) = scan_repo(&root);
+        let f1 = of_kind(&found, FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 2, "{found:?}");
+        assert!(f1
+            .iter()
+            .any(|item| item.path.ends_with("caller.yml") && item.line == 5));
+        assert!(f1
+            .iter()
+            .any(|item| item.path.ends_with("action.yml") && item.line == 7));
     }
 }

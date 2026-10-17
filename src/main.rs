@@ -76,7 +76,7 @@ fn report(
     let yaml = if workflows.is_some() {
         let result = match runs {
             Some(cache) => findings::findings_with_cache(&scanned, Some(cache)),
-            None => Ok(findings::findings(&scanned)),
+            None => findings::findings(&scanned),
         };
         match result {
             Ok(items) => Some(items),

@@ -58,10 +58,49 @@ pub struct Job {
 /// ASCII case, and the later key wins. Block and flow styles both count.
 /// A step with none of those keys keeps an empty name and the line of its
 /// first key, or the line of the step itself.
+///
+/// `local_action` is set when `uses` is a `./` path to an action in this
+/// repository. A reusable workflow path and a remote action stay empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
     pub name: String,
     pub line: usize,
+    /// `uses: ./path` for a local action directory, when present.
+    pub local_action: Option<LocalAction>,
+}
+
+/// A step calling `uses: ./path` in this repository.
+///
+/// The path is relative to the repository root. `./`, `./action.yml`, and
+/// `./pad/action.yaml` all name the directory that holds the action file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAction {
+    /// Line of the `uses:` key.
+    pub line: usize,
+    /// Trimmed scalar, for example `./.github/actions/lint`.
+    pub spec: String,
+    /// Directory relative to the repository root, `/`-separated.
+    /// Empty means the repository root (`uses: ./`).
+    pub relative: String,
+}
+
+/// `runs` from an action file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedAction {
+    pub path: PathBuf,
+    /// Trimmed `runs.using` text. Empty when the key is missing.
+    pub using: String,
+    pub steps: Vec<ActionStep>,
+}
+
+/// One step under `runs.steps` of an action file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionStep {
+    pub name: String,
+    pub name_line: Option<usize>,
+    pub run_text: String,
+    pub run_line: Option<usize>,
+    pub local_action: Option<LocalAction>,
 }
 
 /// A job calling a reusable workflow.
@@ -1224,6 +1263,7 @@ fn collect_steps(node: &Node, out: &mut Vec<Step>, depth: usize) {
         out.push(Step {
             name: String::new(),
             line: node_line(node),
+            local_action: None,
         });
         return;
     }
@@ -1240,25 +1280,32 @@ fn collect_steps(node: &Node, out: &mut Vec<Step>, depth: usize) {
             } else {
                 first_content_line(value)
             };
-            out.push(Step { name, line: *line });
+            out.push(Step {
+                name,
+                line: *line,
+                local_action: None,
+            });
         }
     }
 }
 
 fn step_from_entries(entries: &[Entry], line: usize) -> Step {
-    if let Some(step) = step_from_key(entries, "name") {
-        return step;
-    }
-    if let Some(step) = step_from_key(entries, "uses") {
-        return step;
-    }
-    if let Some(step) = step_from_key(entries, "run") {
-        return step;
-    }
-    Step {
-        name: String::new(),
-        line: entries.first().map_or(line, |item| item.line),
-    }
+    let local_action = local_action_of(entries);
+    let mut step = if let Some(step) = step_from_key(entries, "name") {
+        step
+    } else if let Some(step) = step_from_key(entries, "uses") {
+        step
+    } else if let Some(step) = step_from_key(entries, "run") {
+        step
+    } else {
+        Step {
+            name: String::new(),
+            line: entries.first().map_or(line, |item| item.line),
+            local_action: None,
+        }
+    };
+    step.local_action = local_action;
+    step
 }
 
 fn step_from_key(entries: &[Entry], key: &str) -> Option<Step> {
@@ -1274,7 +1321,260 @@ fn step_from_key(entries: &[Entry], key: &str) -> Option<Step> {
     Some(Step {
         name,
         line: item.line,
+        local_action: None,
     })
+}
+
+fn local_action_of(entries: &[Entry]) -> Option<LocalAction> {
+    let item = entry_last(entries, "uses")?;
+    let text = scalar_text(&item.value)?;
+    local_action_spec(item.line, text)
+}
+
+/// `./path` to a local action. Reusable workflow calls and remote actions are not.
+fn local_action_spec(line: usize, raw: &str) -> Option<LocalAction> {
+    let spec = trim_breaks(raw);
+    let spec = spec.trim();
+    if spec.is_empty()
+        || spec.contains('@')
+        || spec.contains("://")
+        || spec.chars().any(|character| character.is_control())
+    {
+        return None;
+    }
+    if local_reusable_call(line, spec).is_some() {
+        return None;
+    }
+    let relative = normalize_action_dir(spec)?;
+    if is_workflow_relative(&relative) {
+        return None;
+    }
+    Some(LocalAction {
+        line,
+        spec: spec.to_string(),
+        relative,
+    })
+}
+
+/// Directory relative to the repository root.
+///
+/// `./` and `./action.yml` are the repository root. `..` that leaves the
+/// root is rejected. An empty string means the root.
+fn normalize_action_dir(spec: &str) -> Option<String> {
+    let rest = spec
+        .strip_prefix("./")
+        .or_else(|| spec.strip_prefix(".\\"))?;
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rest.split(['/', '\\']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            parts.pop()?;
+            continue;
+        }
+        parts.push(part);
+    }
+    if parts.last().is_some_and(|part| is_action_file_name(part)) {
+        parts.pop();
+    }
+    Some(parts.join("/"))
+}
+
+fn is_action_file_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("action.yml") || name.eq_ignore_ascii_case("action.yaml")
+}
+
+/// `.github/workflows/<file>.yml` is a reusable workflow, not an action directory.
+fn is_workflow_relative(relative: &str) -> bool {
+    let mut parts = relative.split('/');
+    let Some(github) = parts.next() else {
+        return false;
+    };
+    let Some(workflows) = parts.next() else {
+        return false;
+    };
+    let Some(file) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    github.eq_ignore_ascii_case(".github")
+        && workflows.eq_ignore_ascii_case("workflows")
+        && valid_workflow_file(file)
+}
+
+/// Repository root for a file at `<root>/.github/workflows/<file>`.
+pub fn repository_root(workflow_file: &Path) -> Option<PathBuf> {
+    let workflows = workflow_file.parent()?;
+    if !file_name_eq(workflows, "workflows") {
+        return None;
+    }
+    let github = workflows.parent()?;
+    if !file_name_eq(github, ".github") {
+        return None;
+    }
+    github.parent().map(Path::to_path_buf)
+}
+
+fn file_name_eq(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+}
+
+/// `action.yml` or `action.yaml` inside `root/relative`.
+///
+/// An empty `relative` is the repository root. Exact `action.yml` wins, then
+/// exact `action.yaml`, then a case-insensitive match. `Ok(None)` when the
+/// directory or the action file is absent.
+pub fn locate_action(root: &Path, relative: &str) -> Result<Option<PathBuf>, ScanError> {
+    let dir = join_relative(root, relative);
+    if dir.is_file() && is_action_file_name_os(dir.file_name()) {
+        return Ok(Some(dir));
+    }
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let entries = fs::read_dir(&dir).map_err(|_| ScanError::directory(&dir))?;
+    let mut exact_yml = None;
+    let mut exact_yaml = None;
+    let mut folded_yml = None;
+    let mut folded_yaml = None;
+    for entry in entries {
+        let entry = entry.map_err(|_| ScanError::directory(&dir))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(text) = name.to_str() else {
+            continue;
+        };
+        if text == "action.yml" {
+            exact_yml = Some(path);
+        } else if text == "action.yaml" {
+            exact_yaml = Some(path);
+        } else if folded_yml.is_none() && text.eq_ignore_ascii_case("action.yml") {
+            folded_yml = Some(path);
+        } else if folded_yaml.is_none() && text.eq_ignore_ascii_case("action.yaml") {
+            folded_yaml = Some(path);
+        }
+    }
+    Ok(exact_yml.or(exact_yaml).or(folded_yml).or(folded_yaml))
+}
+
+fn is_action_file_name_os(name: Option<&std::ffi::OsStr>) -> bool {
+    name.and_then(|name| name.to_str())
+        .is_some_and(is_action_file_name)
+}
+
+fn join_relative(root: &Path, relative: &str) -> PathBuf {
+    let mut path = root.to_path_buf();
+    for part in relative.split('/') {
+        if !part.is_empty() && part != "." && part != ".." {
+            path.push(part);
+        }
+    }
+    path
+}
+
+/// Read one action file. Invalid YAML names the file and the line.
+pub fn load_action(path: &Path) -> Result<ParsedAction, ScanError> {
+    let text = fs::read_to_string(path).map_err(|_| ScanError::file(path))?;
+    parse_action(path, &text)
+}
+
+/// Parse action YAML. Invalid YAML names the file and the line.
+pub fn parse_action(path: &Path, text: &str) -> Result<ParsedAction, ScanError> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let events = collect_events(text).map_err(|line| ScanError::yaml(path, line))?;
+    let root = document_root(&events).map_err(|line| ScanError::yaml(path, line))?;
+    Ok(action_from(path, root.as_ref()))
+}
+
+fn action_from(path: &Path, root: Option<&Node>) -> ParsedAction {
+    let empty = ParsedAction {
+        path: path.to_path_buf(),
+        using: String::new(),
+        steps: Vec::new(),
+    };
+    let Some(Node::Mapping { entries, .. }) = root else {
+        return empty;
+    };
+    let Some(runs) = entry_last(entries, "runs") else {
+        return empty;
+    };
+    let Node::Mapping { entries, .. } = &runs.value else {
+        return ParsedAction {
+            path: path.to_path_buf(),
+            using: String::new(),
+            steps: Vec::new(),
+        };
+    };
+    let using = entry_last(entries, "using")
+        .and_then(|item| scalar_text(&item.value))
+        .map(|text| trim_breaks(text).trim().to_string())
+        .unwrap_or_default();
+    let steps = entry_last(entries, "steps")
+        .map(|item| action_steps(&item.value))
+        .unwrap_or_default();
+    ParsedAction {
+        path: path.to_path_buf(),
+        using,
+        steps,
+    }
+}
+
+fn action_steps(node: &Node) -> Vec<ActionStep> {
+    match node {
+        Node::Sequence { items, .. } => items
+            .iter()
+            .filter_map(|item| match item {
+                Node::Mapping { entries, .. } => Some(action_step_from(entries)),
+                _ => None,
+            })
+            .collect(),
+        Node::Mapping { entries, .. } => vec![action_step_from(entries)],
+        _ => Vec::new(),
+    }
+}
+
+fn action_step_from(entries: &[Entry]) -> ActionStep {
+    let name = entry_last(entries, "name").and_then(|item| {
+        let text = scalar_text(&item.value)?;
+        let text = first_content_line(text);
+        if text.is_empty() || scalar_is_empty(&text) {
+            None
+        } else {
+            Some((text, item.line))
+        }
+    });
+    let run = entry_last(entries, "run").and_then(|item| {
+        let text = scalar_text(&item.value)?;
+        let text = trim_breaks(text);
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some((text, item.line))
+        }
+    });
+    let (name, name_line) = match name {
+        Some((text, line)) => (text, Some(line)),
+        None => (String::new(), None),
+    };
+    let (run_text, run_line) = match run {
+        Some((text, line)) => (text, Some(line)),
+        None => (String::new(), None),
+    };
+    ActionStep {
+        name,
+        name_line,
+        run_text,
+        run_line,
+        local_action: local_action_of(entries),
+    }
 }
 
 fn first_content_line(text: &str) -> String {
@@ -3490,5 +3790,137 @@ jobs:
 
         let bom = "\u{feff}jobs:\n  lint:\n    steps:\n      - run: cargo test\n";
         assert_eq!(flat_steps(bom), vec![pair("cargo test", 4)]);
+    }
+
+    #[test]
+    fn local_action_uses_are_recorded_on_steps() {
+        let text = "\
+jobs:
+  build:
+    steps:
+      - uses: ./.github/actions/lint
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: ./.github/workflows/lint.yml
+      - uses: docker://alpine
+      - uses: ./.github/actions/../actions/./lint
+      - uses: ./.github\\actions\\lint
+      - uses: ./.github/actions/lint/action.yml
+      - uses: ./
+      - uses: ./../outside
+      - uses: .\\.github\\workflows\\lint.yml
+      - USES: \"./.github/actions/lint\"
+";
+        let job = must_scan("repo/.github/workflows/ci.yml", text)
+            .jobs
+            .remove(0);
+        let recorded: Vec<Option<(&str, &str, usize)>> = job
+            .steps
+            .iter()
+            .map(|step| {
+                step.local_action
+                    .as_ref()
+                    .map(|action| (action.spec.as_str(), action.relative.as_str(), action.line))
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            vec![
+                Some(("./.github/actions/lint", ".github/actions/lint", 4)),
+                None,
+                None,
+                None,
+                Some((
+                    "./.github/actions/../actions/./lint",
+                    ".github/actions/lint",
+                    9
+                )),
+                Some(("./.github\\actions\\lint", ".github/actions/lint", 10)),
+                Some((
+                    "./.github/actions/lint/action.yml",
+                    ".github/actions/lint",
+                    11
+                )),
+                Some(("./", "", 12)),
+                None,
+                None,
+                Some(("./.github/actions/lint", ".github/actions/lint", 15)),
+            ]
+        );
+        assert_eq!(job.steps[1].name, "Checkout");
+        assert_eq!(job.steps[10].line, 15);
+    }
+
+    #[test]
+    fn parse_action_reads_composite_steps_and_ignores_other_runners() {
+        let composite = parse_action(
+            Path::new("action.yml"),
+            "name: Lint\ndescription: Format\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: cargo fmt --check\n",
+        )
+        .unwrap();
+        assert_eq!(composite.using, "composite");
+        assert_eq!(composite.steps.len(), 1);
+        assert_eq!(composite.steps[0].run_text, "cargo fmt --check");
+        assert_eq!(composite.steps[0].run_line, Some(7));
+
+        let reordered = parse_action(
+            Path::new("action.yml"),
+            "RUNS:\n  STEPS:\n    - name: prettier\n      shell: bash\n      run: echo ok\n  USING: \" Composite \"\n",
+        )
+        .unwrap();
+        assert_eq!(reordered.using, "Composite");
+        assert_eq!(reordered.steps[0].name, "prettier");
+        assert_eq!(reordered.steps[0].name_line, Some(3));
+        assert_eq!(reordered.steps[0].run_line, Some(5));
+
+        let flow = parse_action(
+            Path::new("action.yaml"),
+            "runs: {using: composite, steps: [{run: cargo clippy -- -D warnings, shell: bash}]}\n",
+        )
+        .unwrap();
+        assert_eq!(flow.using, "composite");
+        assert_eq!(flow.steps[0].run_line, Some(1));
+        assert!(flow.steps[0].run_text.contains("clippy"));
+
+        let crlf = parse_action(
+            Path::new("action.yml"),
+            "runs:\r\n  using: composite\r\n  steps:\r\n    - run: cargo fmt --check\r\n",
+        )
+        .unwrap();
+        assert_eq!(crlf.steps[0].run_line, Some(4));
+
+        let bom = parse_action(
+            Path::new("action.yml"),
+            "\u{feff}runs:\n  using: node20\n  main: index.js\n",
+        )
+        .unwrap();
+        assert_eq!(bom.using, "node20");
+        assert!(bom.steps.is_empty());
+
+        let docker = parse_action(
+            Path::new("action.yml"),
+            "runs:\n  using: docker\n  image: Dockerfile\n  steps:\n    - run: cargo fmt --check\n",
+        )
+        .unwrap();
+        assert_eq!(docker.using, "docker");
+        assert_eq!(docker.steps.len(), 1);
+
+        let empty = parse_action(Path::new("action.yml"), "").unwrap();
+        assert!(empty.using.is_empty());
+        assert!(empty.steps.is_empty());
+
+        let broken = parse_action(Path::new("action.yml"), "runs: [\nSECRET\n");
+        let err = broken.expect_err("invalid yaml");
+        assert!(err.to_string().contains("invalid YAML"));
+        assert!(!err.to_string().contains("SECRET"));
+
+        let nested = parse_action(
+            Path::new("action.yml"),
+            "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n",
+        )
+        .unwrap();
+        let inner = nested.steps[0].local_action.as_ref().unwrap();
+        assert_eq!(inner.relative, ".github/actions/inner");
+        assert_eq!(inner.line, 4);
     }
 }
