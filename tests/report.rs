@@ -1,5 +1,32 @@
 use std::process::Command;
 
+fn money_micros(text: &str) -> i64 {
+    let negative = text.starts_with('-');
+    let text = text.trim_start_matches('-');
+    let (whole, frac) = text.split_once('.').expect("decimal");
+    assert_eq!(frac.len(), 6, "{text}");
+    let value = whole.parse::<i64>().unwrap() * 1_000_000 + frac.parse::<i64>().unwrap();
+    if negative {
+        -value
+    } else {
+        value
+    }
+}
+
+fn assert_money(value: &serde_json::Value) {
+    let text = value
+        .as_str()
+        .unwrap_or_else(|| panic!("money string: {value}"));
+    let digits = text.trim_start_matches('-');
+    let (whole, frac) = digits.split_once('.').unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        !whole.is_empty() && whole.chars().all(|c| c.is_ascii_digit()),
+        "{text}"
+    );
+    assert_eq!(frac.len(), 6, "{text}");
+    assert!(frac.chars().all(|c| c.is_ascii_digit()), "{text}");
+}
+
 fn report(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ci-bill"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -24,6 +51,9 @@ fn sample_report_matches_snapshot() {
         "stderr:\n{stderr}\nstdout:\n{stdout}"
     );
     assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.contains("2026-09-01 .. 2026-09-30"), "{stdout}");
+    assert!(stdout.contains("example-org/sample-app"), "{stdout}");
+    assert!(stdout.contains("Other products: 0.00\n"), "{stdout}");
     let expected = include_str!("snapshots/report.txt");
     assert_eq!(stdout, expected);
     assert!(!stdout.contains("Sample"), "{stdout}");
@@ -52,13 +82,23 @@ fn sample_json_matches_snapshot_and_fields() {
     let expected = include_str!("snapshots/report.json");
     assert_eq!(stdout, expected);
 
+    assert!(!stdout.contains("0000000001"), "{stdout}");
+    assert!(!stdout.contains("9999999"), "{stdout}");
     let value: serde_json::Value =
         serde_json::from_str(stdout.trim_end()).expect("one json object");
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["currency"], "USD");
-    assert!(value["total_net"].is_number(), "{value}");
+    assert_eq!(value["money_unit"], "USD");
+    assert_eq!(value["total_net"], "284.208000");
+    assert_eq!(value["other_products_net"], "0.000000");
     assert!(value["total_minutes"].is_number(), "{value}");
-    assert_eq!(value["total_minutes"].as_f64(), Some(12208.0));
+    assert_eq!(value["total_minutes"].as_i64(), Some(12208));
+    assert_eq!(value["period"]["from"], "2026-09-01");
+    assert_eq!(value["period"]["to"], "2026-09-30");
+    assert_eq!(
+        value["repositories"],
+        serde_json::json!(["example-org/sample-app"])
+    );
 
     let workflows = value["workflows"].as_array().expect("workflows");
     assert_eq!(workflows.len(), 5);
@@ -77,26 +117,19 @@ fn sample_json_matches_snapshot_and_fields() {
         ]
     );
 
-    let total_net = value["total_net"].as_f64().expect("total_net");
-    assert_eq!(format!("{total_net:.3}"), "284.208");
-    let mut net_sum = 0.0;
+    let total_net = money_micros(value["total_net"].as_str().unwrap());
+    let mut net_sum = 0;
     for workflow in workflows {
-        assert!(workflow["net"].is_number());
-        assert!(workflow["gross"].is_number());
+        assert_money(workflow.get("net").unwrap());
+        assert_money(workflow.get("gross").unwrap());
+        assert_money(workflow.get("discount").unwrap());
         assert!(workflow["minutes"].is_number());
-        assert!(workflow["share"].is_number());
-        let net = workflow["net"].as_f64().expect("net");
-        net_sum += net;
-        let share = workflow["share"].as_f64().expect("share");
-        let expected_share = if total_net == 0.0 {
-            0.0
-        } else {
-            net / total_net * 100.0
-        };
-        assert_eq!(share.to_bits(), expected_share.to_bits(), "{workflow}");
+        assert_money(workflow.get("share").unwrap());
+        assert_eq!(workflow["repository"], "example-org/sample-app");
+        net_sum += money_micros(workflow["net"].as_str().unwrap());
         for sku in workflow["skus"].as_array().expect("skus") {
             assert!(sku["sku"].is_string());
-            assert!(sku["net"].is_number());
+            assert_money(sku.get("net").unwrap());
             assert!(sku["minutes"].is_number());
             assert!(sku.get("gross").is_none());
         }
@@ -107,11 +140,11 @@ fn sample_json_matches_snapshot_and_fields() {
             assert!(finding["message"].is_string());
         }
     }
-    assert_eq!(net_sum.to_bits(), total_net.to_bits());
+    assert_eq!(net_sum, total_net);
 
     let lint = &workflows[0];
-    assert_eq!(format!("{:.3}", lint["net"].as_f64().unwrap()), "230.144");
-    assert_eq!(lint["minutes"].as_f64(), Some(3712.0));
+    assert_eq!(lint["net"], "230.144000");
+    assert_eq!(lint["minutes"].as_i64(), Some(3712));
     assert_eq!(lint["skus"][0]["sku"], "actions_macos");
     assert_eq!(lint["skus"].as_array().unwrap().len(), 1);
     let lint_findings = lint["findings"].as_array().unwrap();
@@ -138,25 +171,18 @@ fn sample_json_matches_snapshot_and_fields() {
 
     assert!(workflows[1]["findings"].as_array().unwrap().is_empty());
     assert_eq!(workflows[1]["skus"][0]["sku"], "actions_linux");
-    assert_eq!(workflows[1]["minutes"].as_f64(), Some(7372.0));
-    assert_eq!(
-        format!("{:.3}", workflows[1]["net"].as_f64().unwrap()),
-        "44.232"
-    );
+    assert_eq!(workflows[1]["minutes"].as_i64(), Some(7372));
+    assert_eq!(workflows[1]["net"], "44.232000");
 
     assert!(workflows[2]["findings"].as_array().unwrap().is_empty());
     assert_eq!(workflows[2]["skus"][0]["sku"], "actions_windows");
-    assert_eq!(workflows[2]["minutes"].as_f64(), Some(772.0));
-    assert_eq!(
-        format!("{:.3}", workflows[2]["net"].as_f64().unwrap()),
-        "7.720"
-    );
+    assert_eq!(workflows[2]["minutes"].as_i64(), Some(772));
+    assert_eq!(workflows[2]["net"], "7.720000");
 
     let docs = &workflows[3];
     assert_eq!(docs["skus"][0]["sku"], "actions_linux");
-    assert_eq!(docs["minutes"].as_f64(), Some(352.0));
-    let docs_net = docs["net"].as_f64().unwrap();
-    assert_eq!(format!("{docs_net:.3}"), "2.112");
+    assert_eq!(docs["minutes"].as_i64(), Some(352));
+    assert_eq!(docs["net"], "2.112000");
     let docs_findings = docs["findings"].as_array().unwrap();
     assert_eq!(docs_findings.len(), 1);
     assert_eq!(docs_findings[0]["id"], "F2");
@@ -172,9 +198,9 @@ fn sample_json_matches_snapshot_and_fields() {
 
     let storage = &workflows[4];
     assert_eq!(storage["path"], "(no workflow)");
-    assert_eq!(storage["net"].as_f64(), Some(0.0));
-    assert_eq!(storage["minutes"].as_f64(), Some(0.0));
-    assert!(storage["gross"].as_f64().unwrap() > 0.0);
+    assert_eq!(storage["net"], "0.000000");
+    assert_eq!(storage["minutes"].as_i64(), Some(0));
+    assert_eq!(storage["gross"], "0.005040");
     assert_eq!(storage["skus"][0]["sku"], "actions_storage");
     assert!(storage["findings"].as_array().unwrap().is_empty());
 

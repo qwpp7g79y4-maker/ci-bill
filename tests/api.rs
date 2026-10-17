@@ -151,9 +151,12 @@ fn fixture_json_reads_pages_and_marks_in_progress() {
     assert!(!text.contains("USD (from net_amount)"), "{text}");
     assert!(!text.contains("Sample"), "{text}");
     let value: serde_json::Value = serde_json::from_str(text.trim_end()).expect("json");
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["currency"], "USD");
-    assert!(value["total_net"].is_number());
+    assert_eq!(value["money_unit"], "USD");
+    assert!(value["total_net"].is_string());
+    assert!(!text.contains("0000000001"), "{text}");
+    assert!(!text.contains("9999999"), "{text}");
     assert!(value["workflows"].is_array());
 
     let runs = value["workflow_runs"].as_array().unwrap();

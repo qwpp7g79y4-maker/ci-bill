@@ -1,11 +1,21 @@
 {
   "currency": "USD",
-  "schema_version": 1,
-  "total_minutes": 12208.0,
-  "total_net": 284.208,
+  "money_unit": "USD",
+  "other_products_net": "0.000000",
+  "period": {
+    "from": "2026-09-01",
+    "to": "2026-09-30"
+  },
+  "repositories": [
+    "example-org/sample-app"
+  ],
+  "schema_version": 2,
+  "total_minutes": 12208,
+  "total_net": "284.208000",
   "unattached_findings": [],
   "workflows": [
     {
+      "discount": "0.000000",
       "findings": [
         {
           "file": "samples/.github/workflows/lint.yml",
@@ -26,50 +36,56 @@
           "message": "lint on macOS"
         }
       ],
-      "gross": 230.144,
-      "minutes": 3712.0,
-      "net": 230.144,
+      "gross": "230.144000",
+      "minutes": 3712,
+      "net": "230.144000",
       "path": ".github/workflows/lint.yml",
-      "share": 80.97731239092495,
+      "repository": "example-org/sample-app",
+      "share": "80.977312",
       "skus": [
         {
-          "minutes": 3712.0,
-          "net": 230.144,
+          "minutes": 3712,
+          "net": "230.144000",
           "sku": "actions_macos"
         }
       ]
     },
     {
+      "discount": "0.000000",
       "findings": [],
-      "gross": 44.23199999999999,
-      "minutes": 7372.0,
-      "net": 44.23199999999999,
+      "gross": "44.232000",
+      "minutes": 7372,
+      "net": "44.232000",
       "path": ".github/workflows/ci.yml",
-      "share": 15.563249451106229,
+      "repository": "example-org/sample-app",
+      "share": "15.563249",
       "skus": [
         {
-          "minutes": 7372.0,
-          "net": 44.23199999999999,
+          "minutes": 7372,
+          "net": "44.232000",
           "sku": "actions_linux"
         }
       ]
     },
     {
+      "discount": "0.000000",
       "findings": [],
-      "gross": 7.720000000000001,
-      "minutes": 772.0,
-      "net": 7.720000000000001,
+      "gross": "7.720000",
+      "minutes": 772,
+      "net": "7.720000",
       "path": ".github/workflows/release.yml",
-      "share": 2.716320441366886,
+      "repository": "example-org/sample-app",
+      "share": "2.716320",
       "skus": [
         {
-          "minutes": 772.0,
-          "net": 7.720000000000001,
+          "minutes": 772,
+          "net": "7.720000",
           "sku": "actions_windows"
         }
       ]
     },
     {
+      "discount": "0.000000",
       "findings": [
         {
           "file": "samples/.github/workflows/docs.yml",
@@ -78,30 +94,33 @@
           "message": "default timeout is 360 minutes"
         }
       ],
-      "gross": 2.112000000000001,
-      "minutes": 352.0,
-      "net": 2.112000000000001,
+      "gross": "2.112000",
+      "minutes": 352,
+      "net": "2.112000",
       "path": ".github/workflows/docs.yml",
-      "share": 0.7431177166019256,
+      "repository": "example-org/sample-app",
+      "share": "0.743118",
       "skus": [
         {
-          "minutes": 352.0,
-          "net": 2.112000000000001,
+          "minutes": 352,
+          "net": "2.112000",
           "sku": "actions_linux"
         }
       ]
     },
     {
+      "discount": "0.005040",
       "findings": [],
-      "gross": 0.00504,
-      "minutes": 0.0,
-      "net": 0.0,
+      "gross": "0.005040",
+      "minutes": 0,
+      "net": "0.000000",
       "path": "(no workflow)",
-      "share": 0.0,
+      "repository": "example-org/sample-app",
+      "share": "0.000000",
       "skus": [
         {
-          "minutes": 0.0,
-          "net": 0.0,
+          "minutes": 0,
+          "net": "0.000000",
           "sku": "actions_storage"
         }
       ]

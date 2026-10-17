@@ -1,85 +1,141 @@
-use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use crate::usage::UsageRow;
+use crate::money::Micros;
+use crate::usage::{is_actions_product, UsageRow};
 
-/// Cost of one SKU inside a workflow.
-#[derive(Debug, Clone, PartialEq)]
+/// Cost of one SKU inside a repository workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkuTotal {
     pub sku: String,
-    pub net: f64,
-    pub gross: f64,
-    pub minutes: f64,
+    pub net: Micros,
+    pub gross: Micros,
+    pub discount: Micros,
+    pub minutes: Micros,
 }
 
-/// Cost of one workflow, with a total per SKU.
-#[derive(Debug, Clone, PartialEq)]
+/// Cost of one repository + workflow path, with a total per SKU.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowTotal {
+    pub repository: String,
     pub workflow_path: String,
-    pub net: f64,
-    pub gross: f64,
-    pub minutes: f64,
+    pub net: Micros,
+    pub gross: Micros,
+    pub discount: Micros,
+    pub minutes: Micros,
     pub skus: Vec<SkuTotal>,
 }
 
-/// Totals per workflow, highest net first. Equal net sorts by path, A to Z.
+/// Actions totals plus the rest of the bill that the report still has to show.
 ///
-/// SKUs under a workflow use the same order, by SKU name when net is equal.
-/// `top` keeps that many workflows; `None` keeps all.
+/// `total_net` and `total_minutes` count product `actions` only. Other products
+/// are summed into `other_products_net` and stay outside the Actions total.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bill {
+    pub total_net: Micros,
+    pub total_minutes: Micros,
+    pub other_products_net: Micros,
+    pub period_from: Option<String>,
+    pub period_to: Option<String>,
+    pub repositories: Vec<String>,
+}
+
+/// Ranked Actions workflows plus the bill those rows came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ranking {
+    pub workflows: Vec<WorkflowTotal>,
+    pub bill: Bill,
+}
+
+/// Totals per repository and workflow path, highest Actions net first.
+///
+/// Equal net sorts by repository, then by path, A to Z. SKUs under a workflow
+/// use the same money order, then SKU name. `top` keeps that many workflows.
+/// The bill totals always cover every Actions row, including ones `top` hides.
+///
 /// Minutes add `quantity` only when `unit_type` is `minutes`, ignoring case.
-/// Other unit types still add to net and gross.
-pub fn rank(rows: &[UsageRow], top: Option<usize>) -> Vec<WorkflowTotal> {
-    let mut totals: HashMap<String, WorkflowAcc> = HashMap::new();
+/// Other unit types still add to net and gross. Product names other than
+/// `actions` (any ASCII case) do not enter the workflow list.
+pub fn rank(rows: &[UsageRow], top: Option<usize>) -> Ranking {
+    let mut totals: HashMap<(String, String), WorkflowAcc> = HashMap::new();
+    let mut bill = Bill {
+        total_net: Micros::ZERO,
+        total_minutes: Micros::ZERO,
+        other_products_net: Micros::ZERO,
+        period_from: None,
+        period_to: None,
+        repositories: Vec::new(),
+    };
+    let mut repositories = BTreeSet::new();
+
     for row in rows {
-        add(totals.entry(row.workflow_path.clone()).or_default(), row);
+        track_date(&mut bill.period_from, &mut bill.period_to, &row.date);
+        if !row.repository.is_empty() {
+            repositories.insert(row.repository.clone());
+        }
+        if !is_actions_product(&row.product) {
+            bill.other_products_net += row.net;
+            continue;
+        }
+        let key = (row.repository.clone(), row.workflow_path.clone());
+        add(totals.entry(key).or_default(), row);
     }
 
     let mut workflows: Vec<WorkflowTotal> = totals.into_iter().map(finish_workflow).collect();
     workflows.sort_by(|left, right| {
-        cmp_net_then_name(
-            left.net,
-            &left.workflow_path,
-            right.net,
-            &right.workflow_path,
-        )
+        right
+            .net
+            .cmp(&left.net)
+            .then_with(|| left.repository.cmp(&right.repository))
+            .then_with(|| left.workflow_path.cmp(&right.workflow_path))
     });
+    for workflow in &workflows {
+        bill.total_net += workflow.net;
+        bill.total_minutes += workflow.minutes;
+    }
     if let Some(limit) = top {
         workflows.truncate(limit);
     }
-    workflows
+    bill.repositories = repositories.into_iter().collect();
+    Ranking { workflows, bill }
 }
 
 #[derive(Default)]
 struct WorkflowAcc {
-    net: f64,
-    gross: f64,
-    minutes: f64,
+    net: Micros,
+    gross: Micros,
+    discount: Micros,
+    minutes: Micros,
     skus: HashMap<String, SkuAcc>,
 }
 
 #[derive(Default)]
 struct SkuAcc {
-    net: f64,
-    gross: f64,
-    minutes: f64,
+    net: Micros,
+    gross: Micros,
+    discount: Micros,
+    minutes: Micros,
 }
 
 fn add(acc: &mut WorkflowAcc, row: &UsageRow) {
     let minutes = if row.unit_type.eq_ignore_ascii_case("minutes") {
         row.quantity
     } else {
-        0.0
+        Micros::ZERO
     };
-    acc.net += row.net_amount;
-    acc.gross += row.gross_amount;
+    acc.net += row.net;
+    acc.gross += row.gross;
+    acc.discount += row.discount;
     acc.minutes += minutes;
     let sku = acc.skus.entry(row.sku.clone()).or_default();
-    sku.net += row.net_amount;
-    sku.gross += row.gross_amount;
+    sku.net += row.net;
+    sku.gross += row.gross;
+    sku.discount += row.discount;
     sku.minutes += minutes;
 }
 
-fn finish_workflow((workflow_path, acc): (String, WorkflowAcc)) -> WorkflowTotal {
+fn finish_workflow(
+    ((repository, workflow_path), acc): ((String, String), WorkflowAcc),
+) -> WorkflowTotal {
     let mut skus: Vec<SkuTotal> = acc
         .skus
         .into_iter()
@@ -87,69 +143,101 @@ fn finish_workflow((workflow_path, acc): (String, WorkflowAcc)) -> WorkflowTotal
             sku,
             net: sku_acc.net,
             gross: sku_acc.gross,
+            discount: sku_acc.discount,
             minutes: sku_acc.minutes,
         })
         .collect();
-    skus.sort_by(|left, right| cmp_net_then_name(left.net, &left.sku, right.net, &right.sku));
+    skus.sort_by(|left, right| {
+        right
+            .net
+            .cmp(&left.net)
+            .then_with(|| left.sku.cmp(&right.sku))
+    });
     WorkflowTotal {
+        repository,
         workflow_path,
         net: acc.net,
         gross: acc.gross,
+        discount: acc.discount,
         minutes: acc.minutes,
         skus,
     }
 }
 
-fn cmp_net_then_name(left_net: f64, left_name: &str, right_net: f64, right_name: &str) -> Ordering {
-    right_net
-        .partial_cmp(&left_net)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| left_name.cmp(right_name))
+fn track_date(min_date: &mut Option<String>, max_date: &mut Option<String>, date: &str) {
+    if date.is_empty() {
+        return;
+    }
+    match min_date {
+        Some(current) if date.as_bytes() < current.as_bytes() => *current = date.to_string(),
+        None => *min_date = Some(date.to_string()),
+        Some(_) => {}
+    }
+    match max_date {
+        Some(current) if date.as_bytes() > current.as_bytes() => *current = date.to_string(),
+        None => *max_date = Some(date.to_string()),
+        Some(_) => {}
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn usd(text: &str) -> Micros {
+        Micros::parse(text).unwrap()
+    }
+
     fn row(
+        repository: &str,
         workflow_path: &str,
         sku: &str,
-        quantity: f64,
+        quantity: &str,
         unit_type: &str,
-        net_amount: f64,
-        gross_amount: f64,
+        net_amount: &str,
+        gross_amount: &str,
     ) -> UsageRow {
         UsageRow {
+            date: "2026-09-01".to_string(),
+            product: "actions".to_string(),
             sku: sku.to_string(),
-            quantity,
+            quantity: usd(quantity),
             unit_type: unit_type.to_string(),
-            net_amount,
-            gross_amount,
+            applied_cost_per_quantity: Micros::ZERO,
+            gross: usd(gross_amount),
+            discount: Micros::ZERO,
+            net: usd(net_amount),
+            username: String::new(),
+            organization: String::new(),
+            repository: repository.to_string(),
             workflow_path: workflow_path.to_string(),
         }
     }
 
-    fn sku(name: &str, net: f64, gross: f64, minutes: f64) -> SkuTotal {
+    fn sku(name: &str, net: &str, gross: &str, minutes: &str) -> SkuTotal {
         SkuTotal {
             sku: name.to_string(),
-            net,
-            gross,
-            minutes,
+            net: usd(net),
+            gross: usd(gross),
+            discount: Micros::ZERO,
+            minutes: usd(minutes),
         }
     }
 
     fn workflow(
         path: &str,
-        net: f64,
-        gross: f64,
-        minutes: f64,
+        net: &str,
+        gross: &str,
+        minutes: &str,
         skus: Vec<SkuTotal>,
     ) -> WorkflowTotal {
         WorkflowTotal {
+            repository: String::new(),
             workflow_path: path.to_string(),
-            net,
-            gross,
-            minutes,
+            net: usd(net),
+            gross: usd(gross),
+            discount: Micros::ZERO,
+            minutes: usd(minutes),
             skus,
         }
     }
@@ -181,68 +269,76 @@ mod tests {
     fn three_workflows() -> Vec<UsageRow> {
         vec![
             row(
+                "",
                 ".github/workflows/release.yml",
                 "actions_storage",
-                100.0,
+                "100",
                 "gigabyte-hours",
-                0.25,
-                1.0,
+                "0.25",
+                "1",
             ),
             row(
+                "",
                 ".github/workflows/release.yml",
                 "actions_linux",
-                1.0,
+                "1",
                 "MINUTES",
-                0.25,
-                0.75,
+                "0.25",
+                "0.75",
             ),
             row(
+                "",
                 ".github/workflows/lint.yml",
                 "actions_linux",
-                100.0,
+                "100",
                 "minutes",
-                2.0,
-                3.0,
+                "2",
+                "3",
             ),
             row(
+                "",
                 ".github/workflows/lint.yml",
                 "actions_linux",
-                50.0,
+                "50",
                 "minutes",
-                1.0,
-                1.0,
+                "1",
+                "1",
             ),
             row(
+                "",
                 ".github/workflows/lint.yml",
                 "actions_storage",
-                8.0,
+                "8",
                 "gigabyte-hours",
-                0.5,
-                0.5,
+                "0.5",
+                "0.5",
             ),
             row(
+                "",
                 ".github/workflows/ci.yml",
                 "actions_linux",
-                20.0,
+                "20",
                 "minutes",
-                1.0,
-                1.0,
+                "1",
+                "1",
             ),
             row(
+                "",
                 ".github/workflows/ci.yml",
                 "actions_storage",
-                2.0,
+                "2",
                 "gigabyte-hours",
-                4.0,
-                4.0,
+                "4",
+                "4",
             ),
             row(
+                "",
                 ".github/workflows/ci.yml",
                 "actions_linux",
-                5.0,
+                "5",
                 "Minutes",
-                0.25,
-                0.25,
+                "0.25",
+                "0.25",
             ),
         ]
     }
@@ -251,32 +347,32 @@ mod tests {
         vec![
             workflow(
                 ".github/workflows/ci.yml",
-                5.25,
-                5.25,
-                25.0,
+                "5.25",
+                "5.25",
+                "25",
                 vec![
-                    sku("actions_storage", 4.0, 4.0, 0.0),
-                    sku("actions_linux", 1.25, 1.25, 25.0),
+                    sku("actions_storage", "4", "4", "0"),
+                    sku("actions_linux", "1.25", "1.25", "25"),
                 ],
             ),
             workflow(
                 ".github/workflows/lint.yml",
-                3.5,
-                4.5,
-                150.0,
+                "3.5",
+                "4.5",
+                "150",
                 vec![
-                    sku("actions_linux", 3.0, 4.0, 150.0),
-                    sku("actions_storage", 0.5, 0.5, 0.0),
+                    sku("actions_linux", "3", "4", "150"),
+                    sku("actions_storage", "0.5", "0.5", "0"),
                 ],
             ),
             workflow(
                 ".github/workflows/release.yml",
-                0.5,
-                1.75,
-                1.0,
+                "0.5",
+                "1.75",
+                "1",
                 vec![
-                    sku("actions_linux", 0.25, 0.75, 1.0),
-                    sku("actions_storage", 0.25, 1.0, 0.0),
+                    sku("actions_linux", "0.25", "0.75", "1"),
+                    sku("actions_storage", "0.25", "1", "0"),
                 ],
             ),
         ]
@@ -284,40 +380,120 @@ mod tests {
 
     #[test]
     fn ranks_three_workflows_and_two_skus() {
-        assert_eq!(rank(&three_workflows(), None), expected_three());
+        let ranking = rank(&three_workflows(), None);
+        assert_eq!(ranking.workflows, expected_three());
+        assert_eq!(ranking.bill.total_net, usd("9.25"));
+        assert_eq!(ranking.bill.total_minutes, usd("176"));
+        assert_eq!(ranking.bill.other_products_net, Micros::ZERO);
+        assert_eq!(ranking.bill.period_from.as_deref(), Some("2026-09-01"));
+        assert_eq!(ranking.bill.period_to.as_deref(), Some("2026-09-01"));
     }
 
     #[test]
-    fn equal_net_sorts_by_path() {
+    fn equal_net_sorts_by_repository_then_path() {
         // b.yml has the higher gross, so path order is not gross order.
         let rows = vec![
-            row("b.yml", "actions_linux", 1.0, "minutes", 5.0, 9.0),
-            row("a.yml", "actions_linux", 2.0, "minutes", 5.0, 1.0),
-            row("c.yml", "actions_storage", 3.0, "gigabyte-hours", 1.0, 1.0),
+            row("", "b.yml", "actions_linux", "1", "minutes", "5", "9"),
+            row("", "a.yml", "actions_linux", "2", "minutes", "5", "1"),
+            row(
+                "",
+                "c.yml",
+                "actions_storage",
+                "3",
+                "gigabyte-hours",
+                "1",
+                "1",
+            ),
         ];
         let ranked = rank(&rows, None);
         assert_eq!(
             ranked
+                .workflows
                 .iter()
                 .map(|item| item.workflow_path.as_str())
                 .collect::<Vec<_>>(),
             vec!["a.yml", "b.yml", "c.yml"]
         );
-        assert_eq!(ranked[0].net, 5.0);
-        assert_eq!(ranked[1].net, 5.0);
-        assert_eq!(ranked[0].minutes, 2.0);
-        assert_eq!(ranked[2].minutes, 0.0);
-        assert_eq!(ranked[2].net, 1.0);
+        assert_eq!(ranked.workflows[0].net, usd("5"));
+        assert_eq!(ranked.workflows[1].net, usd("5"));
+        assert_eq!(ranked.workflows[0].minutes, usd("2"));
+        assert_eq!(ranked.workflows[2].minutes, Micros::ZERO);
+        assert_eq!(ranked.workflows[2].net, usd("1"));
     }
 
     #[test]
-    fn top_n_keeps_highest_net() {
+    fn same_workflow_path_in_two_repositories_stays_two_rows() {
+        let mut first = row(
+            "example-org/alpha",
+            ".github/workflows/ci.yml",
+            "actions_linux",
+            "10",
+            "minutes",
+            "4",
+            "4",
+        );
+        first.date = "2026-09-30".to_string();
+        first.product = "ACTIONS".to_string();
+        let mut second = row(
+            "example-org/beta",
+            ".github/workflows/ci.yml",
+            "actions_linux",
+            "3",
+            "MINUTES",
+            "4",
+            "9",
+        );
+        second.date = "2026-09-01".to_string();
+        second.product = "Actions".to_string();
+        let mut copilot = row(
+            "example-org/beta",
+            ".github/workflows/ci.yml",
+            "copilot_premium_request",
+            "2",
+            "requests",
+            "7",
+            "7",
+        );
+        copilot.product = "Copilot".to_string();
+        copilot.date = String::new();
+
+        let ranking = rank(&[first, second, copilot], None);
+        assert_eq!(ranking.workflows.len(), 2);
+        assert_eq!(ranking.workflows[0].repository, "example-org/alpha");
+        assert_eq!(ranking.workflows[1].repository, "example-org/beta");
+        assert!(ranking
+            .workflows
+            .iter()
+            .all(|item| item.workflow_path == ".github/workflows/ci.yml"));
+        assert_eq!(ranking.workflows[0].net, usd("4"));
+        assert_eq!(ranking.workflows[1].net, usd("4"));
+        assert_eq!(ranking.workflows[0].minutes, usd("10"));
+        assert_eq!(ranking.workflows[1].minutes, usd("3"));
+        assert!(ranking.workflows.iter().all(|item| item.skus.len() == 1));
+        assert_eq!(ranking.bill.total_net, usd("8"));
+        assert_eq!(ranking.bill.total_minutes, usd("13"));
+        assert_eq!(ranking.bill.other_products_net, usd("7"));
+        assert_eq!(ranking.bill.period_from.as_deref(), Some("2026-09-01"));
+        assert_eq!(ranking.bill.period_to.as_deref(), Some("2026-09-30"));
+        assert_eq!(
+            ranking.bill.repositories,
+            vec![
+                "example-org/alpha".to_string(),
+                "example-org/beta".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn top_n_keeps_highest_net_and_full_totals() {
         let rows = three_workflows();
         let expected = expected_three();
-        assert_eq!(rank(&rows, Some(2)), expected[..2]);
-        assert_eq!(rank(&rows, Some(1)), expected[..1]);
-        assert_eq!(rank(&rows, Some(0)), []);
-        assert_eq!(rank(&rows, Some(10)), expected);
-        assert_eq!(rank(&rows, None), expected);
+        assert_eq!(rank(&rows, Some(2)).workflows, expected[..2]);
+        assert_eq!(rank(&rows, Some(1)).workflows, expected[..1]);
+        assert_eq!(rank(&rows, Some(0)).workflows, []);
+        assert_eq!(rank(&rows, Some(10)).workflows, expected);
+        assert_eq!(rank(&rows, None).workflows, expected);
+        assert_eq!(rank(&rows, Some(1)).bill.total_net, usd("9.25"));
+        assert_eq!(rank(&rows, Some(0)).bill.total_minutes, usd("176"));
     }
 }

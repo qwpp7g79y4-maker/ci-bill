@@ -1,5 +1,6 @@
 mod api;
 mod findings;
+mod money;
 mod rank;
 mod report;
 mod usage;
@@ -9,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{error::ErrorKind, Parser, Subcommand};
+
+use crate::money::{DecimalError, Micros};
 
 fn main() -> ExitCode {
     match Cli::try_parse() {
@@ -50,7 +53,7 @@ fn report(
     runs: Option<&Path>,
     top: Option<usize>,
     json: bool,
-    budget: Option<f64>,
+    budget: Option<Micros>,
 ) -> ExitCode {
     let rows = match usage::read_usage(usage_path) {
         Ok(rows) => rows,
@@ -59,12 +62,10 @@ fn report(
             return ExitCode::from(2);
         }
     };
-    let ranked = rank::rank(&rows, None);
-    let total_net: f64 = ranked.iter().map(|item| item.net).sum();
-    let total_minutes: f64 = ranked.iter().map(|item| item.minutes).sum();
+    let ranking = rank::rank(&rows, None);
     let shown = match top {
-        Some(limit) => &ranked[..limit.min(ranked.len())],
-        None => ranked.as_slice(),
+        Some(limit) => &ranking.workflows[..limit.min(ranking.workflows.len())],
+        None => ranking.workflows.as_slice(),
     };
     let found = match workflows {
         Some(dir) => match workflow::scan_dir(dir) {
@@ -88,26 +89,20 @@ fn report(
     };
     let text = if json {
         match api.as_ref() {
-            Some(data) => report::render_json_with_runs(
-                shown,
-                total_net,
-                total_minutes,
-                found.as_deref(),
-                budget,
-                data,
-            ),
-            None => report::render_json(shown, total_net, total_minutes, found.as_deref(), budget),
+            Some(data) => {
+                report::render_json_with_runs(shown, &ranking.bill, found.as_deref(), budget, data)
+            }
+            None => report::render_json(shown, &ranking.bill, found.as_deref(), budget),
         }
     } else {
         match api.as_ref() {
-            Some(data) => {
-                report::render_with_runs(shown, total_net, total_minutes, found.as_deref(), data)
-            }
-            None => report::render(shown, total_net, total_minutes, found.as_deref()),
+            Some(data) => report::render_with_runs(shown, &ranking.bill, found.as_deref(), data),
+            None => report::render(shown, &ranking.bill, found.as_deref()),
         }
     };
     print!("{text}");
-    // The budget is the whole net total, including workflows omitted by --top.
+    // The budget is the Actions net total, including workflows omitted by --top.
+    let total_net = ranking.bill.total_net;
     if let Some(amount) = budget.filter(|amount| total_net > *amount) {
         let line = report::budget_exceeded_line(total_net, amount);
         if json {
@@ -120,11 +115,22 @@ fn report(
     ExitCode::SUCCESS
 }
 
-/// USD budget for the net total. Negative, non-finite, and non-numeric values are a usage error.
-fn parse_budget(raw: &str) -> Result<f64, String> {
-    match raw.parse::<f64>() {
-        Ok(amount) if amount.is_finite() && !amount.is_sign_negative() => Ok(amount),
-        _ => Err("expected a finite USD amount greater than or equal to zero".to_string()),
+const BUDGET_ERROR: &str = "expected a finite USD amount greater than or equal to zero";
+
+/// USD budget for the Actions net total.
+///
+/// Parsed as micro-dollars. A leading minus is rejected, including negative zero.
+/// NaN, infinity, text, and values that need more than 6 decimal places are a usage error.
+fn parse_budget(raw: &str) -> Result<Micros, String> {
+    let text = raw.trim();
+    if text.is_empty() || text.starts_with('-') {
+        return Err(BUDGET_ERROR.to_string());
+    }
+    match Micros::parse(text) {
+        Ok(amount) => Ok(amount),
+        Err(DecimalError::NotANumber | DecimalError::TooManyDecimals) => {
+            Err(BUDGET_ERROR.to_string())
+        }
     }
 }
 
@@ -162,6 +168,6 @@ enum Command {
             value_parser = parse_budget,
             allow_hyphen_values = true
         )]
-        budget: Option<f64>,
+        budget: Option<Micros>,
     },
 }

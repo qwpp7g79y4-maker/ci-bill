@@ -82,7 +82,7 @@ fn unreadable_usage_exits_2() {
     let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bad-number.csv");
     std::fs::write(
         &path,
-        "sku,quantity,unit_type,net_amount,gross_amount,workflow_path\nactions_linux,NOT_A_NUMBER,minutes,1,1,a.yml\n",
+        "date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path\n2026-09-01,actions,actions_linux,NOT_A_NUMBER,minutes,0.006,1,0,1,ada,example-org,example-org/app,a.yml\n",
     )
     .unwrap();
     let output = run(&["report", "--usage", path.to_str().unwrap()]);
