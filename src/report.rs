@@ -65,6 +65,7 @@ pub fn render_json(
     total_net: f64,
     total_minutes: f64,
     findings: Option<&[Finding]>,
+    budget: Option<f64>,
 ) -> String {
     let attached = attach(workflows, findings);
     let workflow_json: Vec<serde_json::Value> = workflows
@@ -77,7 +78,7 @@ pub fn render_json(
         .iter()
         .map(|finding| finding_json(finding))
         .collect();
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "schema_version": 1,
         "currency": "USD",
         "total_net": finite(total_net),
@@ -85,9 +86,22 @@ pub fn render_json(
         "workflows": workflow_json,
         "unattached_findings": unattached,
     });
+    if let Some(amount) = budget {
+        value["budget"] = serde_json::Value::from(amount);
+        value["budget_exceeded"] = serde_json::Value::from(total_net > amount);
+    }
     let mut text = serde_json::to_string_pretty(&value).expect("finite report json");
     text.push('\n');
     text
+}
+
+/// Status line when the net total is above the budget. Amounts use cent rounding.
+pub(crate) fn budget_exceeded_line(total_net: f64, budget: f64) -> String {
+    format!(
+        "Budget exceeded: {} > {}",
+        format_amount(total_net),
+        format_amount(budget)
+    )
 }
 
 struct Attached<'a> {
@@ -450,7 +464,7 @@ mod tests {
                 "default timeout is 360 minutes",
             ),
         ];
-        let text = render_json(&workflows, 2.112, 10.0, Some(&findings));
+        let text = render_json(&workflows, 2.112, 10.0, Some(&findings), None);
         assert!(!text.contains("USD (from net_amount)"), "{text}");
         let value: serde_json::Value = serde_json::from_str(text.trim_end()).expect("json");
         assert_eq!(value["schema_version"], 1);
@@ -504,5 +518,65 @@ mod tests {
         );
         assert_eq!(value["unattached_findings"][0]["line"], 3);
         assert_eq!(value["unattached_findings"].as_array().unwrap().len(), 1);
+        assert!(value.get("budget").is_none(), "{value}");
+        assert!(value.get("budget_exceeded").is_none(), "{value}");
+    }
+
+    #[test]
+    fn budget_exceeded_line_rounds_to_cents() {
+        assert_eq!(
+            budget_exceeded_line(10.0, 9.5),
+            "Budget exceeded: 10.00 > 9.50"
+        );
+        assert_eq!(
+            budget_exceeded_line(0.005, 0.0),
+            "Budget exceeded: 0.01 > 0.00"
+        );
+    }
+
+    #[test]
+    fn json_budget_fields_follow_the_net_total() {
+        let workflows = vec![workflow("a.yml", 10.0, 1.0, "actions_linux")];
+
+        let under = render_json(&workflows, 10.0, 1.0, None, Some(10.125));
+        let under_value: serde_json::Value = serde_json::from_str(under.trim_end()).unwrap();
+        assert_eq!(
+            under_value["budget"].as_f64().unwrap().to_bits(),
+            10.125_f64.to_bits()
+        );
+        assert_eq!(under_value["budget_exceeded"], false);
+        assert!(under_value["budget"].is_number());
+        assert_eq!(under_value["schema_version"], 1);
+        assert_eq!(under_value["currency"], "USD");
+
+        let equal = render_json(&workflows, 10.0, 1.0, None, Some(10.0));
+        let equal_value: serde_json::Value = serde_json::from_str(equal.trim_end()).unwrap();
+        assert_eq!(equal_value["budget_exceeded"], false);
+        assert_eq!(
+            equal_value["budget"].as_f64().unwrap().to_bits(),
+            10.0_f64.to_bits()
+        );
+        assert_eq!(
+            equal_value["total_net"].as_f64().unwrap().to_bits(),
+            10.0_f64.to_bits()
+        );
+
+        let over = render_json(&workflows, 10.0, 1.0, None, Some(9.5));
+        let over_value: serde_json::Value = serde_json::from_str(over.trim_end()).unwrap();
+        assert_eq!(over_value["budget_exceeded"], true);
+        assert_eq!(
+            over_value["budget"].as_f64().unwrap().to_bits(),
+            9.5_f64.to_bits()
+        );
+        assert!(over_value["budget_exceeded"].is_boolean());
+        assert_eq!(over_value["workflows"][0]["net"].as_f64(), Some(10.0));
+
+        let absent = render_json(&workflows, 10.0, 1.0, None, None);
+        let absent_value: serde_json::Value = serde_json::from_str(absent.trim_end()).unwrap();
+        assert!(absent_value.get("budget").is_none(), "{absent_value}");
+        assert!(
+            absent_value.get("budget_exceeded").is_none(),
+            "{absent_value}"
+        );
     }
 }

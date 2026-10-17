@@ -179,4 +179,6 @@ fn sample_json_matches_snapshot_and_fields() {
     assert!(storage["findings"].as_array().unwrap().is_empty());
 
     assert!(value["unattached_findings"].as_array().unwrap().is_empty());
+    assert!(value.get("budget").is_none(), "{value}");
+    assert!(value.get("budget_exceeded").is_none(), "{value}");
 }
