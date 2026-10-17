@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::workflow::{Job, RunsOn, Workflow};
+use crate::workflow::{Job, Matrix, RunsOn, Workflow};
 
 /// Why a workflow or job was flagged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -11,6 +11,8 @@ pub enum FindingKind {
     MissingTimeout,
     /// `pull_request` without `concurrency.cancel-in-progress: true`.
     PullRequestConcurrency,
+    /// Matrix expands to at least six billed jobs, or an axis length is an expression.
+    MatrixJobs,
 }
 
 impl FindingKind {
@@ -20,6 +22,7 @@ impl FindingKind {
             Self::LintOnRunner => "F1",
             Self::MissingTimeout => "F2",
             Self::PullRequestConcurrency => "F3",
+            Self::MatrixJobs => "F4",
         }
     }
 }
@@ -98,6 +101,32 @@ fn note_job(found: &mut Vec<Finding>, path: &Path, job: &Job) {
             "default timeout is 360 minutes",
         );
     }
+    if let Some(matrix) = &job.matrix {
+        if let Some(message) = matrix_message(matrix) {
+            push(found, path, matrix.line, FindingKind::MatrixJobs, &message);
+        }
+    }
+}
+
+/// Six or more concrete jobs, or any expression axis whose lower bound is at least one.
+fn matrix_message(matrix: &Matrix) -> Option<String> {
+    let wide = matrix.jobs >= 6 || (matrix.at_least && matrix.jobs > 0);
+    if !wide {
+        return None;
+    }
+    let noun = if matrix.jobs == 1 { "job" } else { "jobs" };
+    let message = if matrix.at_least {
+        format!(
+            "matrix runs at least {} {noun}; each job is billed in whole minutes",
+            matrix.jobs
+        )
+    } else {
+        format!(
+            "matrix runs {} {noun}; each job is billed in whole minutes",
+            matrix.jobs
+        )
+    };
+    Some(message)
 }
 
 fn job_is_lint(job: &Job) -> bool {
@@ -412,5 +441,229 @@ jobs:
         let f2 = of_kind(&found, FindingKind::MissingTimeout);
         assert_eq!(f2.len(), 1, "{found:?}");
         assert_eq!(f2[0].line, 5);
+    }
+
+    fn matrix_case(yaml: &str) -> (Vec<Finding>, Matrix) {
+        let workflow = scan_yaml(Path::new("fixture.yml"), yaml).expect("valid fixture");
+        let matrix = workflow.jobs[0].matrix.clone().expect("matrix");
+        let found = findings(&[workflow]);
+        (found, matrix)
+    }
+
+    fn f4_message(jobs: u64) -> String {
+        format!("matrix runs {jobs} jobs; each job is billed in whole minutes")
+    }
+
+    fn f4_at_least(jobs: u64) -> String {
+        let noun = if jobs == 1 { "job" } else { "jobs" };
+        format!("matrix runs at least {jobs} {noun}; each job is billed in whole minutes")
+    }
+
+    #[test]
+    fn f4_flags_two_by_three() {
+        let yaml = "jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n";
+        let (found, matrix) = matrix_case(yaml);
+        assert_eq!(matrix.jobs, 6);
+        assert!(!matrix.at_least);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, 6);
+        assert_eq!(f4[0].path, Path::new("fixture.yml"));
+        assert_eq!(f4[0].message, f4_message(6));
+        assert!(!f4[0].message.contains("at least"));
+        assert!(of_kind(&found, FindingKind::MissingTimeout).is_empty());
+        assert!(of_kind(&found, FindingKind::LintOnRunner).is_empty());
+
+        let block = "jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os:\n          - ubuntu-latest\n          - windows-latest\n        node:\n          - 14\n          - 16\n          - 18\n";
+        let (found, matrix) = matrix_case(block);
+        assert_eq!(matrix.jobs, 6);
+        assert!(!matrix.at_least);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, 6);
+        assert_eq!(f4[0].message, f4_message(6));
+
+        let text = crate::report::render(&[], 0.0, 0.0, Some(&found));
+        assert!(
+            text.contains(
+                "F4 fixture.yml:6: matrix runs 6 jobs; each job is billed in whole minutes"
+            ),
+            "{text}"
+        );
+        let json = crate::report::render_json(&[], 0.0, 0.0, Some(&found), None);
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(value["unattached_findings"][0]["id"], "F4");
+        assert_eq!(value["unattached_findings"][0]["line"], 6);
+        assert_eq!(value["unattached_findings"][0]["file"], "fixture.yml");
+        assert_eq!(value["unattached_findings"][0]["message"], f4_message(6));
+    }
+
+    #[test]
+    fn f4_ignores_two_by_two() {
+        let yaml = "jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16]\n";
+        let (found, matrix) = matrix_case(yaml);
+        assert_eq!(matrix.jobs, 4);
+        assert!(!matrix.at_least);
+        assert!(
+            of_kind(&found, FindingKind::MatrixJobs).is_empty(),
+            "{found:?}"
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn f4_ignores_two_by_three_with_one_exclude() {
+        let yaml = "jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude:\n          - os: ubuntu-latest\n            node: 14\n";
+        let (found, matrix) = matrix_case(yaml);
+        assert_eq!(matrix.line, 6);
+        assert_eq!(matrix.jobs, 5);
+        assert!(!matrix.at_least);
+        assert!(
+            of_kind(&found, FindingKind::MatrixJobs).is_empty(),
+            "{found:?}"
+        );
+
+        let flow = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: [{os: ubuntu-latest, node: 14}]\n";
+        let (found, matrix) = matrix_case(flow);
+        assert_eq!(matrix.jobs, 5);
+        assert!(of_kind(&found, FindingKind::MatrixJobs).is_empty());
+    }
+
+    #[test]
+    fn f4_flags_two_by_two_plus_two_new_includes() {
+        let yaml = "jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16]\n        include:\n          - os: macos-latest\n            node: 18\n          - os: macos-latest\n            node: 20\n";
+        let (found, matrix) = matrix_case(yaml);
+        assert_eq!(matrix.jobs, 6);
+        assert!(!matrix.at_least);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, 6);
+        assert_eq!(f4[0].path, Path::new("fixture.yml"));
+        assert_eq!(f4[0].message, f4_message(6));
+
+        let flow = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16]\n        include: [{os: macos-latest, node: 18}, {os: macos-latest, node: 20}]\n";
+        let (found, matrix) = matrix_case(flow);
+        assert_eq!(matrix.jobs, 6);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, 5);
+        assert_eq!(f4[0].message, f4_message(6));
+    }
+
+    #[test]
+    fn f4_expression_axis_says_at_least() {
+        let wide = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        extra: ${{ fromJSON(needs.setup.outputs.extra) }}\n";
+        let (found, matrix) = matrix_case(wide);
+        assert_eq!(matrix.jobs, 6);
+        assert!(matrix.at_least);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, 5);
+        assert_eq!(f4[0].message, f4_at_least(6));
+
+        let rest = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: ${{ fromJSON(needs.setup.outputs.node) }}\n";
+        let (found, matrix) = matrix_case(rest);
+        assert_eq!(matrix.jobs, 2);
+        assert!(matrix.at_least);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, 5);
+        assert_eq!(f4[0].message, f4_at_least(2));
+
+        let quoted = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: \"${{ fromJSON(needs.setup.outputs.node) }}\"\n";
+        let (found, matrix) = matrix_case(quoted);
+        assert_eq!(matrix.jobs, 2);
+        assert!(matrix.at_least);
+        assert_eq!(
+            of_kind(&found, FindingKind::MatrixJobs)[0].message,
+            f4_at_least(2)
+        );
+
+        let only = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        node: ${{ fromJSON(needs.setup.outputs.node) }}\n";
+        let (found, matrix) = matrix_case(only);
+        assert_eq!(matrix.jobs, 1);
+        assert!(matrix.at_least);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].message, f4_at_least(1));
+
+        let list_item = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, \"${{ matrix.extra }}\"]\n        node: [14, 16, 18]\n";
+        let (found, matrix) = matrix_case(list_item);
+        assert_eq!(matrix.jobs, 6);
+        assert!(!matrix.at_least);
+        assert_eq!(
+            of_kind(&found, FindingKind::MatrixJobs)[0].message,
+            f4_message(6)
+        );
+    }
+
+    #[test]
+    fn f4_flow_style_matrix_uses_matrix_line() {
+        let inline = "jobs: {build: {timeout-minutes: 5, strategy: {matrix: {os: [ubuntu-latest, windows-latest], node: [14, 16, 18]}}}}\n";
+        let (found, matrix) = matrix_case(inline);
+        assert_eq!(matrix.jobs, 6);
+        assert!(!matrix.at_least);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, 1);
+        assert_eq!(f4[0].message, f4_message(6));
+
+        let split = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix: {os: [ubuntu-latest, windows-latest], node: [14, 16, 18]}\n";
+        let (found, matrix) = matrix_case(split);
+        assert_eq!(matrix.line, 5);
+        assert_eq!(matrix.jobs, 6);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, 5);
+        assert_eq!(f4[0].path, Path::new("fixture.yml"));
+        assert_eq!(f4[0].message, f4_message(6));
+    }
+
+    #[test]
+    fn f4_expanding_include_and_partial_exclude_keep_real_counts() {
+        let expanded = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        include:\n          - os: ubuntu-latest\n            node: 14\n            npm: 6\n";
+        let (found, matrix) = matrix_case(expanded);
+        assert_eq!(matrix.jobs, 6);
+        assert_eq!(
+            of_kind(&found, FindingKind::MatrixJobs)[0].message,
+            f4_message(6)
+        );
+
+        let partial = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [macos-latest, windows-latest]\n        version: [12, 14, 16]\n        environment: [staging, production]\n        exclude:\n          - os: macos-latest\n            version: 12\n            environment: production\n          - os: windows-latest\n            version: 16\n";
+        let (found, matrix) = matrix_case(partial);
+        assert_eq!(matrix.jobs, 9);
+        assert!(!matrix.at_least);
+        assert_eq!(
+            of_kind(&found, FindingKind::MatrixJobs)[0].message,
+            f4_message(9)
+        );
+
+        let added_back = "jobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16]\n        exclude:\n          - os: ubuntu-latest\n            node: 14\n        include:\n          - os: ubuntu-latest\n            node: 14\n            npm: 6\n";
+        let (found, matrix) = matrix_case(added_back);
+        assert_eq!(matrix.jobs, 4);
+        assert!(of_kind(&found, FindingKind::MatrixJobs).is_empty());
+    }
+
+    #[test]
+    fn f4_only_flags_the_wide_matrix_job() {
+        let yaml = "jobs:\n  small:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16]\n  wide:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n  lint:\n    runs-on: macos-latest\n    strategy:\n      matrix:\n        node: [14, 16, 18, 20, 22, 24]\n";
+        let workflow = scan_yaml(Path::new("fixture.yml"), yaml).expect("valid");
+        assert_eq!(workflow.jobs[0].matrix.as_ref().unwrap().jobs, 4);
+        assert_eq!(workflow.jobs[1].matrix.as_ref().unwrap().jobs, 6);
+        assert_eq!(workflow.jobs[2].matrix.as_ref().unwrap().jobs, 6);
+        let found = findings(&[workflow]);
+        let f4 = of_kind(&found, FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 2, "{found:?}");
+        assert_eq!(f4[0].line, 11);
+        assert_eq!(f4[0].message, f4_message(6));
+        assert_eq!(f4[1].line, 17);
+        assert_eq!(f4[1].message, f4_message(6));
+        let f1 = of_kind(&found, FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 15);
+        assert_eq!(f1[0].message, "lint on macOS");
+        let f2 = of_kind(&found, FindingKind::MissingTimeout);
+        assert_eq!(f2.len(), 1, "{found:?}");
+        assert_eq!(f2[0].line, 14);
     }
 }
