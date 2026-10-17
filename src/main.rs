@@ -6,6 +6,7 @@ mod prices;
 mod rank;
 mod reconcile;
 mod report;
+mod rerun;
 mod usage;
 mod workflow;
 
@@ -121,6 +122,12 @@ fn report(
         None => None,
     };
     let ranked = ranking.workflows.as_slice();
+    let found = findings::append(
+        found,
+        api.as_ref()
+            .map(|data| rerun::findings(data, ranked, &scanned))
+            .unwrap_or_default(),
+    );
     let text = if json {
         match api.as_ref() {
             Some(data) => report::render_json_with_runs(

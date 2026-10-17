@@ -21,12 +21,13 @@ cargo run -- report --usage samples/usage-sample.csv --workflows samples/.github
 - **F1** lint/format job on a macOS or Windows runner
 - **F2** job without `timeout-minutes` (GitHub's default is 360 minutes)
 - **F3** `pull_request` workflow without `concurrency` + `cancel-in-progress: true`
+- **F5** extra execution of the same job inside one workflow run
 
 ## Limits
 
 - Amounts come from the report's `net_amount`; ci-bill does not apply its own prices.
-- The detailed report is aggregated per day, SKU and workflow path. It has no
-  job-level or re-run data, so per-job attribution comes from the YAML only.
+- The detailed report is aggregated per day, SKU, and workflow path. Saved
+  Actions runs (`--runs`) supply each job's minutes and any re-run of that job.
 - Workflow YAML is read in full, including block style, flow style, quotes, anchors, and multiline scripts.
 - Early version, not yet released.
 

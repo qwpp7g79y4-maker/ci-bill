@@ -36,6 +36,8 @@ pub enum FindingKind {
     ActionNotFound,
     /// A composite action calls an action already being expanded.
     ActionCycle,
+    /// Extra execution of the same job inside one workflow run.
+    RerunWaste,
 }
 
 impl FindingKind {
@@ -54,6 +56,7 @@ impl FindingKind {
             Self::InvalidUses => "F11",
             Self::ActionNotFound => "F12",
             Self::ActionCycle => "F13",
+            Self::RerunWaste => "F5",
         }
     }
 }
@@ -563,6 +566,19 @@ pub fn combine(yaml: Option<Vec<Finding>>, invoice: Vec<Finding>) -> Option<Vec<
         None => Vec::new(),
     };
     all.extend(invoice);
+    all.sort_by(cmp_finding);
+    Some(all)
+}
+
+/// Append findings and keep path, line, kind, and message order.
+///
+/// An empty `extra` leaves `base` as it was, including `None`.
+pub fn append(base: Option<Vec<Finding>>, extra: Vec<Finding>) -> Option<Vec<Finding>> {
+    if extra.is_empty() {
+        return base;
+    }
+    let mut all = base.unwrap_or_default();
+    all.extend(extra);
     all.sort_by(cmp_finding);
     Some(all)
 }
