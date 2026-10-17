@@ -38,6 +38,8 @@ pub struct Job {
     pub has_timeout_minutes: bool,
     /// Text of `run` steps, one step per line. Multiline scripts keep their lines.
     pub steps_text: String,
+    /// Steps in document order, for later linking.
+    pub steps: Vec<Step>,
     /// `strategy.matrix`, when the job has one.
     pub matrix: Option<Matrix>,
     /// Job-level `concurrency.cancel-in-progress` cancels in-progress runs.
@@ -46,6 +48,20 @@ pub struct Job {
     pub uses: Option<ReusableCall>,
     /// Job-level `uses:` that is not a reusable workflow call.
     pub invalid_uses: Option<InvalidUses>,
+}
+
+/// One step under `jobs.<id>.steps`.
+///
+/// `name` is the `name` scalar when it has text. Otherwise it is the `uses`
+/// scalar, and otherwise the first non-empty line of `run`. `line` is the
+/// 1-based line of the key that supplied `name`. Those keys match without
+/// ASCII case, and the later key wins. Block and flow styles both count.
+/// A step with none of those keys keeps an empty name and the line of its
+/// first key, or the line of the step itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    pub name: String,
+    pub line: usize,
 }
 
 /// A job calling a reusable workflow.
@@ -291,9 +307,13 @@ enum Node {
         line: usize,
     },
     Sequence {
+        /// 1-based line of the sequence start.
+        line: usize,
         items: Vec<Node>,
     },
     Mapping {
+        /// 1-based line of the mapping start.
+        line: usize,
         entries: Vec<Entry>,
         duplicates: Vec<DuplicateKey>,
     },
@@ -399,7 +419,7 @@ impl Cursor<'_> {
             }
             items.push(self.parse_node(anchors, building, depth + 1)?);
         }
-        let node = Node::Sequence { items };
+        let node = Node::Sequence { line, items };
         self.finish_anchor(anchors, building, anchor, &node);
         Ok(node)
     }
@@ -438,6 +458,7 @@ impl Cursor<'_> {
         }
         let (entries, duplicates) = resolve_merge(raw);
         let node = Node::Mapping {
+            line,
             entries,
             duplicates,
         };
@@ -524,13 +545,14 @@ fn collect_duplicates(node: &Node, out: &mut Vec<DuplicateKey>) {
         Node::Mapping {
             entries,
             duplicates,
+            ..
         } => {
             out.extend(duplicates.iter().cloned());
             for item in entries {
                 collect_duplicates(&item.value, out);
             }
         }
-        Node::Sequence { items } => {
+        Node::Sequence { items, .. } => {
             for item in items {
                 collect_duplicates(item, out);
             }
@@ -572,6 +594,14 @@ fn merge_node(out: &mut Vec<Entry>, seen: &mut HashSet<String>, node: &Node) {
 
 fn entry<'a>(entries: &'a [Entry], key: &str) -> Option<&'a Entry> {
     entries.iter().find(|item| item.key == key)
+}
+
+/// Later key wins. `steps`, `name`, `uses`, and `run` match without ASCII case.
+fn entry_last<'a>(entries: &'a [Entry], key: &str) -> Option<&'a Entry> {
+    entries
+        .iter()
+        .rev()
+        .find(|item| item.key.eq_ignore_ascii_case(key))
 }
 
 fn workflow_from(path: &Path, root: Option<&Node>) -> Workflow {
@@ -804,6 +834,7 @@ fn note_jobs(workflow: &mut Workflow, node: &Node) {
             runs_on: None,
             has_timeout_minutes: false,
             steps_text: String::new(),
+            steps: Vec::new(),
             matrix: None,
             cancel_in_progress: false,
             uses: None,
@@ -840,8 +871,9 @@ fn fill_job(job: &mut Job, entries: &[Entry]) {
             }
         }
     }
-    if let Some(item) = entry(entries, "steps") {
+    if let Some(item) = entry_last(entries, "steps") {
         job.steps_text = step_runs(&item.value);
+        job.steps = steps_in(&item.value);
     }
     if let Some(item) = entry(entries, "strategy") {
         job.matrix = matrix_from(&item.value);
@@ -1157,7 +1189,7 @@ fn step_runs(node: &Node) -> String {
         let Node::Mapping { entries, .. } = item else {
             continue;
         };
-        let Some(run) = entry(entries, "run") else {
+        let Some(run) = entry_last(entries, "run") else {
             continue;
         };
         let Some(text) = scalar_text(&run.value) else {
@@ -1169,6 +1201,96 @@ fn step_runs(node: &Node) -> String {
         }
     }
     runs.join("\n")
+}
+
+fn steps_in(node: &Node) -> Vec<Step> {
+    match node {
+        Node::Scalar { value, .. } if scalar_is_empty(value) => Vec::new(),
+        other => {
+            let mut steps = Vec::new();
+            collect_steps(other, &mut steps, 0);
+            steps
+        }
+    }
+}
+
+fn scalar_is_empty(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || value == "~" || value.eq_ignore_ascii_case("null")
+}
+
+fn collect_steps(node: &Node, out: &mut Vec<Step>, depth: usize) {
+    if depth > MAX_NODE_DEPTH {
+        out.push(Step {
+            name: String::new(),
+            line: node_line(node),
+        });
+        return;
+    }
+    match node {
+        Node::Sequence { items, .. } => {
+            for item in items {
+                collect_steps(item, out, depth + 1);
+            }
+        }
+        Node::Mapping { entries, line, .. } => out.push(step_from_entries(entries, *line)),
+        Node::Scalar { value, line } => {
+            let name = if scalar_is_empty(value) {
+                String::new()
+            } else {
+                first_content_line(value)
+            };
+            out.push(Step { name, line: *line });
+        }
+    }
+}
+
+fn step_from_entries(entries: &[Entry], line: usize) -> Step {
+    if let Some(step) = step_from_key(entries, "name") {
+        return step;
+    }
+    if let Some(step) = step_from_key(entries, "uses") {
+        return step;
+    }
+    if let Some(step) = step_from_key(entries, "run") {
+        return step;
+    }
+    Step {
+        name: String::new(),
+        line: entries.first().map_or(line, |item| item.line),
+    }
+}
+
+fn step_from_key(entries: &[Entry], key: &str) -> Option<Step> {
+    let item = entry_last(entries, key)?;
+    let text = scalar_text(&item.value)?;
+    if scalar_is_empty(text) {
+        return None;
+    }
+    let name = first_content_line(text);
+    if name.is_empty() {
+        return None;
+    }
+    Some(Step {
+        name,
+        line: item.line,
+    })
+}
+
+fn first_content_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn node_line(node: &Node) -> usize {
+    match node {
+        Node::Scalar { line, .. } | Node::Sequence { line, .. } | Node::Mapping { line, .. } => {
+            *line
+        }
+    }
 }
 
 fn scalar_text(node: &Node) -> Option<&str> {
@@ -1273,7 +1395,7 @@ fn note_axis_definition(line: usize, name: &str, node: &Node, axes: &mut Vec<Mat
 
 fn note_include_runners(node: &Node, axes: &mut Vec<MatrixAxis>) {
     match node {
-        Node::Sequence { items } => {
+        Node::Sequence { items, .. } => {
             for item in items {
                 note_include_row(item, axes);
             }
@@ -1321,7 +1443,7 @@ fn note_axis(
 /// One label set per list item. A nested list is one multi-label runner.
 fn axis_label_sets(node: &Node) -> Vec<Vec<String>> {
     match node {
-        Node::Sequence { items } => items.iter().filter_map(runner_label_set).collect(),
+        Node::Sequence { items, .. } => items.iter().filter_map(runner_label_set).collect(),
         Node::Scalar { value, .. } if value.is_empty() || is_github_expression(value) => Vec::new(),
         other => runner_label_set(other).into_iter().collect(),
     }
@@ -1335,7 +1457,7 @@ fn runner_label_set(node: &Node) -> Option<Vec<String>> {
             }
             vec![value.clone()]
         }
-        Node::Sequence { items } => items
+        Node::Sequence { items, .. } => items
             .iter()
             .filter_map(|item| match item {
                 Node::Scalar { value, .. } if !value.is_empty() && !is_github_expression(value) => {
@@ -2961,5 +3083,412 @@ jobs:
         assert_eq!(matrix.jobs, 3);
         assert!(matrix.jobs_hi.is_none());
         assert!(!matrix.at_least);
+    }
+
+    fn flat_steps(text: &str) -> Vec<(String, usize)> {
+        let workflow = must_scan("steps.yml", text);
+        workflow
+            .jobs
+            .iter()
+            .flat_map(|job| job.steps.iter().map(|step| (step.name.clone(), step.line)))
+            .collect()
+    }
+
+    fn pair(name: &str, line: usize) -> (String, usize) {
+        (name.to_string(), line)
+    }
+
+    #[test]
+    fn sample_files_keep_step_names_and_lines() {
+        let workflows = scan_dir(&sample_dir()).unwrap();
+        let lint = &by_name(&workflows, "lint.yml").jobs[0];
+        assert_eq!(
+            lint.steps_text,
+            "cargo fmt --check\ncargo clippy -- -D warnings"
+        );
+        assert_eq!(
+            lint.steps
+                .iter()
+                .map(|step| (step.name.as_str(), step.line))
+                .collect::<Vec<_>>(),
+            vec![
+                ("actions/checkout@v4", 10),
+                ("cargo fmt --check", 11),
+                ("cargo clippy -- -D warnings", 12),
+            ]
+        );
+        let ci = &by_name(&workflows, "ci.yml").jobs[0];
+        assert_eq!(
+            ci.steps
+                .iter()
+                .map(|step| (step.name.as_str(), step.line))
+                .collect::<Vec<_>>(),
+            vec![("actions/checkout@v4", 12), ("cargo test", 13)]
+        );
+        let docs = &by_name(&workflows, "docs.yml").jobs[0];
+        assert_eq!(
+            docs.steps
+                .iter()
+                .map(|step| (step.name.as_str(), step.line))
+                .collect::<Vec<_>>(),
+            vec![("actions/checkout@v4", 7), ("cargo doc --no-deps", 8)]
+        );
+        let release = &by_name(&workflows, "release.yml").jobs[0];
+        assert_eq!(
+            release
+                .steps
+                .iter()
+                .map(|step| (step.name.as_str(), step.line))
+                .collect::<Vec<_>>(),
+            vec![("actions/checkout@v4", 10), ("cargo build --release", 11)]
+        );
+    }
+
+    #[test]
+    fn block_steps_keep_name_uses_and_run_lines() {
+        let text = "\
+jobs:
+  lint:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: say \"hi\"
+        run: echo hi
+      - uses: ./tools/lint
+  test:
+    steps:
+      - run: cargo test
+";
+        assert_eq!(
+            flat_steps(text),
+            vec![
+                pair("Checkout", 4),
+                pair("say \"hi\"", 6),
+                pair("./tools/lint", 8),
+                pair("cargo test", 11),
+            ]
+        );
+        let workflow = must_scan("steps.yml", text);
+        assert_eq!(workflow.jobs[0].steps_text, "echo hi");
+        assert_eq!(workflow.jobs[1].steps_text, "cargo test");
+    }
+
+    #[test]
+    fn multiline_run_keeps_the_first_line_and_the_run_key_line() {
+        let text = "\
+jobs:
+  lint:
+    steps:
+      - run: |
+          echo one
+          echo two
+      - name: Script
+        run: |
+          cargo test -- --test-threads=1
+          echo done
+      - name: |
+          Lint the tree
+          carefully
+        run: cargo fmt --check
+      - run: |
+          # lint
+          cargo fmt --check
+      - run: |
+
+          echo one
+      - run: >
+          echo one
+          echo two
+";
+        assert_eq!(
+            flat_steps(text),
+            vec![
+                pair("echo one", 4),
+                pair("Script", 7),
+                pair("Lint the tree", 11),
+                pair("# lint", 15),
+                pair("echo one", 18),
+                pair("echo one echo two", 21),
+            ]
+        );
+        let workflow = must_scan("steps.yml", text);
+        assert_eq!(
+            workflow.jobs[0].steps_text,
+            "echo one\necho two\ncargo test -- --test-threads=1\necho done\ncargo fmt --check\n# lint\ncargo fmt --check\n\necho one\necho one echo two"
+        );
+    }
+
+    #[test]
+    fn step_without_a_name_uses_uses_then_the_first_run_line() {
+        let text = "\
+jobs:
+  lint:
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test
+      - run: cargo test
+        uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        run: npm test
+";
+        assert_eq!(
+            flat_steps(text),
+            vec![
+                pair("actions/checkout@v4", 4),
+                pair("cargo test", 5),
+                pair("actions/checkout@v4", 7),
+                pair("actions/setup-node@v4", 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn flow_steps_keep_key_lines() {
+        let inline = "jobs: {lint: {steps: [{name: Checkout, uses: actions/checkout@v4}, {run: cargo test}]}}\n";
+        assert_eq!(
+            flat_steps(inline),
+            vec![pair("Checkout", 1), pair("cargo test", 1)]
+        );
+
+        let split = "\
+jobs:
+  lint:
+    steps: [{name: Lint, run: cargo fmt --check}, {uses: actions/checkout@v4}]
+";
+        assert_eq!(
+            flat_steps(split),
+            vec![pair("Lint", 3), pair("actions/checkout@v4", 3)]
+        );
+
+        let mixed = "\
+jobs:
+  lint:
+    steps:
+      - {name: Lint, run: cargo fmt --check}
+      - run: |
+          echo one
+          echo two
+";
+        assert_eq!(
+            flat_steps(mixed),
+            vec![pair("Lint", 4), pair("echo one", 5)]
+        );
+
+        let quoted = "\
+jobs:
+  lint:
+    steps: [{run: \"echo one\\necho two\"}]
+";
+        assert_eq!(flat_steps(quoted), vec![pair("echo one", 3)]);
+        assert_eq!(
+            must_scan("steps.yml", quoted).jobs[0].steps_text,
+            "echo one\necho two"
+        );
+    }
+
+    #[test]
+    fn crlf_steps_keep_the_same_lines() {
+        let text = "\
+jobs:
+  lint:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - run: |
+          echo one
+          echo two
+";
+        assert_eq!(flat_steps(&crlf(text)), flat_steps(text));
+        assert_eq!(
+            flat_steps(&crlf(text)),
+            vec![pair("Checkout", 4), pair("echo one", 6)]
+        );
+    }
+
+    #[test]
+    fn later_keys_choose_the_step_name_and_its_line() {
+        let ordered = "\
+jobs:
+  lint:
+    steps:
+      - run: cargo test
+        name: Run the suite
+      - run: echo hidden
+        uses: actions/checkout@v4
+      - name: First
+        name: Second
+        run: cargo test
+";
+        assert_eq!(
+            flat_steps(ordered),
+            vec![
+                pair("Run the suite", 5),
+                pair("actions/checkout@v4", 7),
+                pair("Second", 9),
+            ]
+        );
+
+        let capitals = "\
+jobs:
+  lint:
+    STEPS:
+      - RUN: cargo test
+        NAME: Suite
+";
+        assert_eq!(flat_steps(&crlf(capitals)), vec![pair("Suite", 5)]);
+        assert_eq!(
+            must_scan("steps.yml", capitals).jobs[0].steps_text,
+            "cargo test"
+        );
+
+        let replaced = "\
+jobs:
+  lint:
+    steps:
+      - run: cargo test
+    STEPS:
+      - run: echo later
+";
+        assert_eq!(flat_steps(replaced), vec![pair("echo later", 6)]);
+    }
+
+    #[test]
+    fn empty_and_missing_step_fields_stay_addressable() {
+        let missing = "\
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+";
+        assert!(flat_steps(missing).is_empty());
+        assert!(flat_steps("jobs:\n  lint:\n    steps: []\n").is_empty());
+        assert!(flat_steps("jobs:\n  lint:\n    steps:\n").is_empty());
+        assert!(flat_steps("jobs:\n  lint:\n    steps: null\n").is_empty());
+        assert!(flat_steps("jobs:\n  lint:\n    steps: ~\n").is_empty());
+
+        let blanks = "\
+jobs:
+  lint:
+    steps:
+      - name: \"\"
+        run: cargo test
+      - name: \"  \"
+        uses: actions/setup-node@v4
+      - name:
+        run: echo hi
+      - name: null
+        run: echo null-name
+      - name: ~
+        uses: actions/checkout@v4
+      - id: setup
+      -
+      - {}
+      - run: echo kept
+";
+        assert_eq!(
+            flat_steps(blanks),
+            vec![
+                pair("cargo test", 5),
+                pair("actions/setup-node@v4", 7),
+                pair("echo hi", 9),
+                pair("echo null-name", 11),
+                pair("actions/checkout@v4", 13),
+                pair("", 14),
+                pair("", 16),
+                pair("", 16),
+                pair("echo kept", 17),
+            ]
+        );
+
+        let scalar = "\
+jobs:
+  lint:
+    steps: cargo test
+";
+        assert_eq!(flat_steps(scalar), vec![pair("cargo test", 3)]);
+
+        let mapping = "\
+jobs:
+  lint:
+    steps:
+      name: Only
+      run: cargo test
+";
+        assert_eq!(flat_steps(mapping), vec![pair("Only", 4)]);
+
+        let nested = "\
+jobs:
+  lint:
+    steps:
+      -
+        - run: echo inner
+";
+        assert_eq!(flat_steps(nested), vec![pair("echo inner", 5)]);
+    }
+
+    #[test]
+    fn capital_step_keys_keep_lines() {
+        let text = "\
+jobs:
+  lint:
+    Steps:
+      - NAME: Checkout
+        USES: actions/checkout@v4
+      - RUN: |
+          echo one
+          echo two
+";
+        assert_eq!(
+            flat_steps(text),
+            vec![pair("Checkout", 4), pair("echo one", 6)]
+        );
+        assert_eq!(
+            must_scan("steps.yml", text).jobs[0].steps_text,
+            "echo one\necho two"
+        );
+        assert_eq!(flat_steps(&crlf(text)), flat_steps(text));
+    }
+
+    #[test]
+    fn anchors_keep_the_step_source_line() {
+        let inherited = "\
+defaults: &defaults
+  steps:
+    - run: cargo test
+jobs:
+  test:
+    <<: *defaults
+";
+        assert_eq!(flat_steps(inherited), vec![pair("cargo test", 3)]);
+
+        let overridden = "\
+defaults: &defaults
+  steps:
+    - run: cargo test
+jobs:
+  test:
+    <<: *defaults
+    steps:
+      - name: Real
+        run: cargo fmt --check
+";
+        assert_eq!(flat_steps(overridden), vec![pair("Real", 8)]);
+
+        let merged_step = "\
+checkout: &checkout
+  name: Checkout
+  uses: actions/checkout@v4
+jobs:
+  test:
+    steps:
+      - <<: *checkout
+      - run: cargo test
+";
+        assert_eq!(
+            flat_steps(merged_step),
+            vec![pair("Checkout", 2), pair("cargo test", 8)]
+        );
+
+        let bom = "\u{feff}jobs:\n  lint:\n    steps:\n      - run: cargo test\n";
+        assert_eq!(flat_steps(bom), vec![pair("cargo test", 4)]);
     }
 }

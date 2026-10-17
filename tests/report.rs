@@ -168,13 +168,40 @@ fn sample_json_matches_snapshot_and_fields() {
         lint_findings[2]["file"],
         "samples/.github/workflows/lint.yml"
     );
+    assert_eq!(
+        lint["steps"],
+        serde_json::json!([
+            {"line": 10, "name": "actions/checkout@v4"},
+            {"line": 11, "name": "cargo fmt --check"},
+            {"line": 12, "name": "cargo clippy -- -D warnings"}
+        ])
+    );
+    for step in lint["steps"].as_array().unwrap() {
+        assert_eq!(step.as_object().unwrap().len(), 2, "{step}");
+        assert!(step["line"].is_number());
+        assert!(step["name"].is_string());
+    }
 
     assert!(workflows[1]["findings"].as_array().unwrap().is_empty());
+    assert_eq!(
+        workflows[1]["steps"],
+        serde_json::json!([
+            {"line": 12, "name": "actions/checkout@v4"},
+            {"line": 13, "name": "cargo test"}
+        ])
+    );
     assert_eq!(workflows[1]["skus"][0]["sku"], "actions_linux");
     assert_eq!(workflows[1]["minutes"].as_i64(), Some(7372));
     assert_eq!(workflows[1]["net"], "44.232000");
 
     assert!(workflows[2]["findings"].as_array().unwrap().is_empty());
+    assert_eq!(
+        workflows[2]["steps"],
+        serde_json::json!([
+            {"line": 10, "name": "actions/checkout@v4"},
+            {"line": 11, "name": "cargo build --release"}
+        ])
+    );
     assert_eq!(workflows[2]["skus"][0]["sku"], "actions_windows");
     assert_eq!(workflows[2]["minutes"].as_i64(), Some(772));
     assert_eq!(workflows[2]["net"], "7.720000");
@@ -195,6 +222,13 @@ fn sample_json_matches_snapshot_and_fields() {
         docs_findings[0]["message"],
         "default timeout is 360 minutes"
     );
+    assert_eq!(
+        docs["steps"],
+        serde_json::json!([
+            {"line": 7, "name": "actions/checkout@v4"},
+            {"line": 8, "name": "cargo doc --no-deps"}
+        ])
+    );
 
     let storage = &workflows[4];
     assert_eq!(storage["path"], "(no workflow)");
@@ -203,6 +237,7 @@ fn sample_json_matches_snapshot_and_fields() {
     assert_eq!(storage["gross"], "0.005040");
     assert_eq!(storage["skus"][0]["sku"], "actions_storage");
     assert!(storage["findings"].as_array().unwrap().is_empty());
+    assert_eq!(storage["steps"], serde_json::json!([]));
 
     assert!(value["unattached_findings"].as_array().unwrap().is_empty());
     assert!(value.get("budget").is_none(), "{value}");

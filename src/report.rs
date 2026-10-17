@@ -123,15 +123,19 @@ fn render_report(
 /// `workflows` lists only the rows `--top` keeps. When that limit omits
 /// workflows, `outside_top` holds their count, their net, and the same
 /// workflow objects, findings included. `unattached_findings` is only
-/// findings with no usage row.
+/// findings with no usage row. Every workflow object has `steps`, an array
+/// of `{name, line}` from the scanned file with the same
+/// `.github/workflows/<file>` name, in job order. A workflow with no scanned
+/// file has an empty `steps` array.
 pub fn render_json(
     workflows: &[WorkflowTotal],
     bill: &Bill,
     findings: Option<&[Finding]>,
     budget: Option<Micros>,
     top: Option<usize>,
+    scanned: &[crate::workflow::Workflow],
 ) -> String {
-    render_json_report(workflows, bill, findings, budget, None, top)
+    render_json_report(workflows, bill, findings, budget, None, top, scanned)
 }
 
 /// JSON report plus `workflow_runs` and `in_progress`.
@@ -145,8 +149,9 @@ pub fn render_json_with_runs(
     budget: Option<Micros>,
     api: &ApiData,
     top: Option<usize>,
+    scanned: &[crate::workflow::Workflow],
 ) -> String {
-    render_json_report(workflows, bill, findings, budget, Some(api), top)
+    render_json_report(workflows, bill, findings, budget, Some(api), top, scanned)
 }
 
 fn render_json_report(
@@ -156,6 +161,7 @@ fn render_json_report(
     budget: Option<Micros>,
     api: Option<&ApiData>,
     top: Option<usize>,
+    scanned: &[crate::workflow::Workflow],
 ) -> String {
     let limit = shown_limit(workflows.len(), top);
     let attached = attach(workflows, findings);
@@ -166,7 +172,7 @@ fn render_json_report(
     let shown_json: Vec<serde_json::Value> = shown
         .iter()
         .zip(shown_findings)
-        .map(|(workflow, found)| workflow_json(workflow, bill.total_net, found))
+        .map(|(workflow, found)| workflow_json(workflow, bill.total_net, found, scanned))
         .collect();
     let unattached: Vec<serde_json::Value> = attached
         .unattached
@@ -194,7 +200,7 @@ fn render_json_report(
         let outside: Vec<serde_json::Value> = omitted
             .iter()
             .zip(omitted_findings)
-            .map(|(workflow, found)| workflow_json(workflow, bill.total_net, found))
+            .map(|(workflow, found)| workflow_json(workflow, bill.total_net, found, scanned))
             .collect();
         value["outside_top"] = serde_json::json!({
             "count": omitted.len(),
@@ -332,6 +338,7 @@ fn workflow_json(
     workflow: &WorkflowTotal,
     total_net: Micros,
     findings: &[&Finding],
+    scanned: &[crate::workflow::Workflow],
 ) -> serde_json::Value {
     let skus: Vec<serde_json::Value> = workflow
         .skus
@@ -345,6 +352,7 @@ fn workflow_json(
         })
         .collect();
     let found: Vec<serde_json::Value> = findings.iter().copied().map(finding_json).collect();
+    let steps = step_values(&steps_for(scanned, &workflow.workflow_path));
     serde_json::json!({
         "repository": workflow.repository,
         "path": workflow.workflow_path,
@@ -355,6 +363,51 @@ fn workflow_json(
         "share": percent_fixed(workflow.net, total_net, 6),
         "skus": skus,
         "findings": found,
+        "steps": steps,
+    })
+}
+
+fn step_values(steps: &[crate::workflow::Step]) -> Vec<serde_json::Value> {
+    steps
+        .iter()
+        .map(|step| {
+            serde_json::json!({
+                "name": step.name,
+                "line": step.line,
+            })
+        })
+        .collect()
+}
+
+/// Steps from every scanned file whose name is `.github/workflows/<file>`
+/// for this usage path. Matching ignores ASCII case. Jobs stay in file order.
+fn steps_for(
+    scanned: &[crate::workflow::Workflow],
+    workflow_path: &str,
+) -> Vec<crate::workflow::Step> {
+    let mut steps = Vec::new();
+    for workflow in scanned {
+        let Some(file_name) = workflow.path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.is_empty() || !same_workflow_file(workflow_path, file_name) {
+            continue;
+        }
+        for job in &workflow.jobs {
+            steps.extend(job.steps.iter().cloned());
+        }
+    }
+    steps
+}
+
+fn same_workflow_file(workflow_path: &str, file_name: &str) -> bool {
+    let key = format!(".github/workflows/{file_name}");
+    let normalized = workflow_path.replace('\\', "/");
+    if normalized.eq_ignore_ascii_case(&key) {
+        return true;
+    }
+    normalized.char_indices().any(|(index, separator)| {
+        separator == '/' && normalized[index + 1..].eq_ignore_ascii_case(&key)
     })
 }
 
@@ -1004,6 +1057,7 @@ mod tests {
             Some(&findings),
             None,
             None,
+            &[],
         );
         assert!(!text.contains("USD (from net_amount)"), "{text}");
         assert!(!text.contains("0000000001"), "{text}");
@@ -1073,7 +1127,7 @@ mod tests {
         let workflows = vec![workflow("a.yml", "10", "1", "actions_linux")];
         let totals = bill("10", "1");
 
-        let under = render_json(&workflows, &totals, None, Some(usd("10.125")), None);
+        let under = render_json(&workflows, &totals, None, Some(usd("10.125")), None, &[]);
         let under_value: serde_json::Value = serde_json::from_str(under.trim_end()).unwrap();
         assert_eq!(under_value["budget"], "10.125000");
         assert_eq!(under_value["budget_exceeded"], false);
@@ -1082,20 +1136,20 @@ mod tests {
         assert_eq!(under_value["currency"], "USD");
         assert_eq!(under_value["money_unit"], "USD");
 
-        let equal = render_json(&workflows, &totals, None, Some(usd("10")), None);
+        let equal = render_json(&workflows, &totals, None, Some(usd("10")), None, &[]);
         let equal_value: serde_json::Value = serde_json::from_str(equal.trim_end()).unwrap();
         assert_eq!(equal_value["budget_exceeded"], false);
         assert_eq!(equal_value["budget"], "10.000000");
         assert_eq!(equal_value["total_net"], "10.000000");
 
-        let over = render_json(&workflows, &totals, None, Some(usd("9.5")), None);
+        let over = render_json(&workflows, &totals, None, Some(usd("9.5")), None, &[]);
         let over_value: serde_json::Value = serde_json::from_str(over.trim_end()).unwrap();
         assert_eq!(over_value["budget_exceeded"], true);
         assert_eq!(over_value["budget"], "9.500000");
         assert!(over_value["budget_exceeded"].is_boolean());
         assert_eq!(over_value["workflows"][0]["net"], "10.000000");
 
-        let absent = render_json(&workflows, &totals, None, None, None);
+        let absent = render_json(&workflows, &totals, None, None, None, &[]);
         let absent_value: serde_json::Value = serde_json::from_str(absent.trim_end()).unwrap();
         assert!(absent_value.get("budget").is_none(), "{absent_value}");
         assert!(
@@ -1247,7 +1301,15 @@ mod tests {
     #[test]
     fn json_puts_in_progress_jobs_outside_the_counted_list() {
         let api = sample_api();
-        let text = render_json_with_runs(&[], &bill("0", "0"), None, Some(usd("1.5")), &api, None);
+        let text = render_json_with_runs(
+            &[],
+            &bill("0", "0"),
+            None,
+            Some(usd("1.5")),
+            &api,
+            None,
+            &[],
+        );
         let value: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
         assert_eq!(value["schema_version"], 2);
         assert_eq!(value["money_unit"], "USD");
@@ -1322,7 +1384,7 @@ mod tests {
         assert!(text.contains("Period: (none)\n"), "{text}");
         assert!(text.contains("Repositories: (none)\n"), "{text}");
 
-        let json = render_json(&[], &bill("0", "0"), None, None, None);
+        let json = render_json(&[], &bill("0", "0"), None, None, None, &[]);
         let value: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
         assert!(value.get("workflow_runs").is_none(), "{value}");
         assert!(value.get("in_progress").is_none(), "{value}");
@@ -1468,11 +1530,11 @@ mod tests {
         )];
         let totals = bill("12.116", "3");
         let full = render(&workflows, &totals, Some(&findings), None);
-        let full_json = render_json(&workflows, &totals, Some(&findings), None, None);
+        let full_json = render_json(&workflows, &totals, Some(&findings), None, None, &[]);
         for limit in [3_usize, 4, 100] {
             let text = render(&workflows, &totals, Some(&findings), Some(limit));
             assert_eq!(text, full, "top {limit}");
-            let json = render_json(&workflows, &totals, Some(&findings), None, Some(limit));
+            let json = render_json(&workflows, &totals, Some(&findings), None, Some(limit), &[]);
             assert_eq!(json, full_json, "top {limit}");
         }
         assert!(!full.contains("Workflows without usage"), "{full}");
@@ -1572,6 +1634,7 @@ mod tests {
                 Some(&findings),
                 None,
                 Some(1),
+                &[],
             )
             .trim_end(),
         )
@@ -1626,6 +1689,7 @@ mod tests {
             Some(&findings),
             Some(usd("1")),
             Some(1),
+            &[],
         );
         assert!(!text.contains("0000000001"), "{text}");
         let value: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
@@ -1654,7 +1718,7 @@ mod tests {
         assert_eq!(value["budget"], "1.000000");
         assert_eq!(value["budget_exceeded"], true);
 
-        let zero = render_json(&workflows, &totals, Some(&findings), None, Some(0));
+        let zero = render_json(&workflows, &totals, Some(&findings), None, Some(0), &[]);
         let zero_value: serde_json::Value = serde_json::from_str(zero.trim_end()).unwrap();
         assert!(zero_value["workflows"].as_array().unwrap().is_empty());
         assert_eq!(zero_value["outside_top"]["count"], 3);
@@ -1708,6 +1772,7 @@ mod tests {
             None,
             &api,
             Some(1),
+            &[],
         );
         let value: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
         assert_eq!(value["outside_top"]["count"], 1);
@@ -1717,5 +1782,64 @@ mod tests {
             value["outside_top"]["workflows"][0]["findings"][0]["line"],
             4
         );
+    }
+
+    #[test]
+    fn json_steps_follow_the_workflow_file_and_survive_top() {
+        let lint = crate::workflow::scan_yaml(
+            std::path::Path::new("repo/.github/workflows/lint.yml"),
+            "jobs:\n  lint:\n    steps:\n      - name: Lint\n        run: |\n          echo one\n          echo two\n      - uses: actions/checkout@v4\n",
+        )
+        .unwrap();
+        let docs = crate::workflow::scan_yaml(
+            std::path::Path::new("repo/.github/workflows/docs.yml"),
+            "jobs:\n  docs:\n    steps:\n      - run: cargo doc --no-deps\n",
+        )
+        .unwrap();
+        let scanned = [lint, docs];
+        let workflows = vec![
+            named("example-org/alpha", ".github/workflows/lint.yml", "10"),
+            named("example-org/beta", ".GitHub/Workflows/Lint.YML", "10"),
+            named("example-org/app", ".github/workflows/docs.yml", "2"),
+            named("example-org/app", "(no workflow)", "0"),
+        ];
+        let text = render(&workflows, &bill("22", "4"), None, None);
+        assert!(!text.contains("echo one"), "{text}");
+        assert!(!text.contains("actions/checkout@v4"), "{text}");
+        assert!(text.contains("Workflow"), "{text}");
+        assert!(!text.contains("steps"), "{text}");
+
+        let json = render_json(&workflows, &bill("22", "4"), None, None, Some(1), &scanned);
+        let value: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
+        let lint_steps = serde_json::json!([
+            {"name": "Lint", "line": 4},
+            {"name": "actions/checkout@v4", "line": 8}
+        ]);
+        assert_eq!(value["workflows"][0]["steps"], lint_steps);
+        assert_eq!(value["workflows"][0]["path"], ".github/workflows/lint.yml");
+        let outside = value["outside_top"]["workflows"].as_array().unwrap();
+        assert_eq!(outside[0]["steps"], lint_steps);
+        assert_eq!(outside[0]["path"], ".GitHub/Workflows/Lint.YML");
+        assert_eq!(
+            outside[1]["steps"],
+            serde_json::json!([{"name": "cargo doc --no-deps", "line": 4}])
+        );
+        assert_eq!(outside[1]["path"], ".github/workflows/docs.yml");
+        assert_eq!(outside[2]["steps"], serde_json::json!([]));
+        assert_eq!(outside[2]["path"], "(no workflow)");
+
+        let slash = named("example-org/app", ".github\\workflows\\docs.yml", "2");
+        let slash_json = render_json(&[slash], &bill("2", "1"), None, None, None, &scanned);
+        let slash_value: serde_json::Value = serde_json::from_str(slash_json.trim_end()).unwrap();
+        assert_eq!(
+            slash_value["workflows"][0]["steps"][0]["name"],
+            "cargo doc --no-deps"
+        );
+        assert_eq!(slash_value["workflows"][0]["steps"][0]["line"], 4);
+
+        let bare = render_json(&workflows, &bill("22", "4"), None, None, None, &[]);
+        let bare_value: serde_json::Value = serde_json::from_str(bare.trim_end()).unwrap();
+        assert_eq!(bare_value["workflows"][0]["steps"], serde_json::json!([]));
+        assert!(!bare.contains("echo one"), "{bare}");
     }
 }

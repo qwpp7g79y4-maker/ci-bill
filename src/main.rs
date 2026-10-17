@@ -63,27 +63,30 @@ fn report(
         }
     };
     let ranking = rank::rank(&rows, None);
-    let yaml = match workflows {
+    let scanned = match workflows {
         Some(dir) => match workflow::scan_dir(dir) {
-            Ok(scanned) => {
-                let result = match runs {
-                    Some(cache) => findings::findings_with_cache(&scanned, Some(cache)),
-                    None => Ok(findings::findings(&scanned)),
-                };
-                match result {
-                    Ok(items) => Some(items),
-                    Err(err) => {
-                        eprintln!("ci-bill: {}: {err}", err.path.display());
-                        return ExitCode::from(2);
-                    }
-                }
-            }
+            Ok(scanned) => scanned,
             Err(err) => {
                 eprintln!("ci-bill: {}: {err}", err.path.display());
                 return ExitCode::from(2);
             }
         },
-        None => None,
+        None => Vec::new(),
+    };
+    let yaml = if workflows.is_some() {
+        let result = match runs {
+            Some(cache) => findings::findings_with_cache(&scanned, Some(cache)),
+            None => Ok(findings::findings(&scanned)),
+        };
+        match result {
+            Ok(items) => Some(items),
+            Err(err) => {
+                eprintln!("ci-bill: {}: {err}", err.path.display());
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
     };
     // CSV net stays the total. A mismatched unit price is reported, not applied.
     let found = findings::combine(yaml, findings::invoice_findings(usage_path, &rows));
@@ -107,8 +110,16 @@ fn report(
                 budget,
                 data,
                 top,
+                &scanned,
             ),
-            None => report::render_json(ranked, &ranking.bill, found.as_deref(), budget, top),
+            None => report::render_json(
+                ranked,
+                &ranking.bill,
+                found.as_deref(),
+                budget,
+                top,
+                &scanned,
+            ),
         }
     } else {
         match api.as_ref() {

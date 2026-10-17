@@ -1264,7 +1264,7 @@ jobs:
             ),
             "{text}"
         );
-        let json = crate::report::render_json(&[], &bill, Some(&found), None, None);
+        let json = crate::report::render_json(&[], &bill, Some(&found), None, None, &[]);
         let value: serde_json::Value = serde_json::from_str(&json).expect("json");
         assert_eq!(value["unattached_findings"][0]["id"], "F4");
         assert_eq!(value["unattached_findings"][0]["line"], 6);
@@ -2860,7 +2860,15 @@ jobs:
         let ranking = rank(rows, None);
         let text = render(&ranking.workflows, &ranking.bill, Some(found), None);
         let json: serde_json::Value = serde_json::from_str(
-            render_json(&ranking.workflows, &ranking.bill, Some(found), None, None).trim_end(),
+            render_json(
+                &ranking.workflows,
+                &ranking.bill,
+                Some(found),
+                None,
+                None,
+                &[],
+            )
+            .trim_end(),
         )
         .expect("json report");
         (text, json)

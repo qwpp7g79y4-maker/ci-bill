@@ -48,6 +48,20 @@
           "net": "230.144000",
           "sku": "actions_macos"
         }
+      ],
+      "steps": [
+        {
+          "line": 10,
+          "name": "actions/checkout@v4"
+        },
+        {
+          "line": 11,
+          "name": "cargo fmt --check"
+        },
+        {
+          "line": 12,
+          "name": "cargo clippy -- -D warnings"
+        }
       ]
     },
     {
@@ -65,6 +79,16 @@
           "net": "44.232000",
           "sku": "actions_linux"
         }
+      ],
+      "steps": [
+        {
+          "line": 12,
+          "name": "actions/checkout@v4"
+        },
+        {
+          "line": 13,
+          "name": "cargo test"
+        }
       ]
     },
     {
@@ -81,6 +105,16 @@
           "minutes": 772,
           "net": "7.720000",
           "sku": "actions_windows"
+        }
+      ],
+      "steps": [
+        {
+          "line": 10,
+          "name": "actions/checkout@v4"
+        },
+        {
+          "line": 11,
+          "name": "cargo build --release"
         }
       ]
     },
@@ -106,6 +140,16 @@
           "net": "2.112000",
           "sku": "actions_linux"
         }
+      ],
+      "steps": [
+        {
+          "line": 7,
+          "name": "actions/checkout@v4"
+        },
+        {
+          "line": 8,
+          "name": "cargo doc --no-deps"
+        }
       ]
     },
     {
@@ -123,7 +167,8 @@
           "net": "0.000000",
           "sku": "actions_storage"
         }
-      ]
+      ],
+      "steps": []
     }
   ]
 }
