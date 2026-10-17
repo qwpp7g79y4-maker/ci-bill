@@ -6,6 +6,7 @@ use crate::findings::Finding;
 use crate::job_cost::bill_job;
 use crate::money::{percent_fixed, Micros};
 use crate::rank::{Bill, WorkflowTotal};
+use crate::reconcile::{self, Amount, CostMethod, Reconciliation, WorkflowCost};
 
 /// Text report. Money is rounded to cents here. Totals are sums of raw micros.
 ///
@@ -23,13 +24,30 @@ use crate::rank::{Bill, WorkflowTotal};
 /// A callee finding with `workflow_path` set and no repository is listed on
 /// that caller. Its file and line stay on the callee.
 /// A finding with no usage row is listed under "Workflows without usage".
+#[cfg(test)]
 pub fn render(
     workflows: &[WorkflowTotal],
     bill: &Bill,
     findings: Option<&[Finding]>,
     top: Option<usize>,
 ) -> String {
-    render_report(workflows, bill, findings, None, top)
+    render_report(workflows, bill, findings, None, top, &[])
+}
+
+/// Text report with saved runs and scanned workflow files.
+///
+/// Each shown workflow lists measured list price, the CSV invoice, and the
+/// difference, then one line per reconciled job. Jobs hidden by `--top` stay
+/// out of this table; their amounts are in the JSON object.
+pub fn render_text(
+    workflows: &[WorkflowTotal],
+    bill: &Bill,
+    findings: Option<&[Finding]>,
+    api: Option<&ApiData>,
+    top: Option<usize>,
+    scanned: &[crate::workflow::Workflow],
+) -> String {
+    render_report(workflows, bill, findings, api, top, scanned)
 }
 
 /// Text report plus saved Actions runs and jobs.
@@ -40,6 +58,7 @@ pub fn render(
 /// minutes and the runner list price. A job with no completion time is
 /// listed under "In progress" and bills nothing. A job on the latest attempt
 /// that started before the run started is an inherited copy and costs 0.00.
+#[cfg(test)]
 pub fn render_with_runs(
     workflows: &[WorkflowTotal],
     bill: &Bill,
@@ -47,7 +66,7 @@ pub fn render_with_runs(
     api: &ApiData,
     top: Option<usize>,
 ) -> String {
-    render_report(workflows, bill, findings, Some(api), top)
+    render_report(workflows, bill, findings, Some(api), top, &[])
 }
 
 fn render_report(
@@ -56,9 +75,11 @@ fn render_report(
     findings: Option<&[Finding]>,
     api: Option<&ApiData>,
     top: Option<usize>,
+    scanned: &[crate::workflow::Workflow],
 ) -> String {
     let limit = shown_limit(workflows.len(), top);
     let attached = attach(workflows, findings);
+    let recon = reconcile::reconcile(workflows, api, scanned);
     let shown = &workflows[..limit];
     let omitted = &workflows[limit..];
     let shown_findings = &attached.by_workflow[..limit];
@@ -98,9 +119,12 @@ fn render_report(
         },
         widths,
     );
-    for (rows, found) in blocks.iter().zip(shown_findings) {
+    for (index, (rows, found)) in blocks.iter().zip(shown_findings).enumerate() {
         for row in rows {
             emit_row(&mut out, row, widths);
+        }
+        for line in reconcile::text_lines(&recon.workflows[index]) {
+            let _ = writeln!(out, "{line}");
         }
         for finding in found {
             let _ = writeln!(out, "  {}", finding_text(finding));
@@ -174,6 +198,7 @@ fn render_json_report(
 ) -> String {
     let limit = shown_limit(workflows.len(), top);
     let attached = attach(workflows, findings);
+    let recon = reconcile::reconcile(workflows, api, scanned);
     let shown = &workflows[..limit];
     let omitted = &workflows[limit..];
     let shown_findings = &attached.by_workflow[..limit];
@@ -181,7 +206,10 @@ fn render_json_report(
     let shown_json: Vec<serde_json::Value> = shown
         .iter()
         .zip(shown_findings)
-        .map(|(workflow, found)| workflow_json(workflow, bill.total_net, found, scanned))
+        .zip(&recon.workflows)
+        .map(|((workflow, found), cost)| {
+            workflow_json(workflow, bill.total_net, found, scanned, cost)
+        })
         .collect();
     let unattached: Vec<serde_json::Value> = attached
         .unattached
@@ -201,7 +229,7 @@ fn render_json_report(
         "unattached_findings": unattached,
     });
     if let Some(api) = api {
-        let (runs, in_progress) = api_json(api);
+        let (runs, in_progress) = api_json(api, &recon);
         value["workflow_runs"] = runs;
         value["in_progress"] = in_progress;
     }
@@ -209,7 +237,10 @@ fn render_json_report(
         let outside: Vec<serde_json::Value> = omitted
             .iter()
             .zip(omitted_findings)
-            .map(|(workflow, found)| workflow_json(workflow, bill.total_net, found, scanned))
+            .zip(&recon.workflows[limit..])
+            .map(|((workflow, found), cost)| {
+                workflow_json(workflow, bill.total_net, found, scanned, cost)
+            })
             .collect();
         value["outside_top"] = serde_json::json!({
             "count": omitted.len(),
@@ -348,6 +379,7 @@ fn workflow_json(
     total_net: Micros,
     findings: &[&Finding],
     scanned: &[crate::workflow::Workflow],
+    cost: &WorkflowCost,
 ) -> serde_json::Value {
     let skus: Vec<serde_json::Value> = workflow
         .skus
@@ -373,7 +405,34 @@ fn workflow_json(
         "skus": skus,
         "findings": found,
         "steps": steps,
+        "measured": amount_json(&cost.measured),
+        "invoice": amount_json(&cost.invoice),
+        "difference": amount_json(&cost.difference),
+        "job_costs": job_cost_values(&cost.jobs),
     })
+}
+
+fn amount_json(amount: &Amount) -> serde_json::Value {
+    serde_json::json!({
+        "amount": amount.micros.to_decimal_string(),
+        "method": amount.method.as_str(),
+    })
+}
+
+fn job_cost_values(jobs: &[crate::reconcile::JobCost]) -> Vec<serde_json::Value> {
+    jobs.iter()
+        .map(|job| {
+            serde_json::json!({
+                "amount": job.amount.micros.to_decimal_string(),
+                "file": job.file,
+                "job_id": job.job_id,
+                "line": job.line,
+                "method": job.amount.method.as_str(),
+                "name": job.name,
+                "sku": job.sku,
+            })
+        })
+        .collect()
 }
 
 fn step_values(steps: &[crate::workflow::Step]) -> Vec<serde_json::Value> {
@@ -750,10 +809,10 @@ fn copy_suffix(api: &ApiData, job: &Job) -> String {
     }
 }
 
-fn api_json(api: &ApiData) -> (serde_json::Value, serde_json::Value) {
+fn api_json(api: &ApiData, recon: &Reconciliation) -> (serde_json::Value, serde_json::Value) {
     let mut runs: Vec<serde_json::Value> = sorted_runs(api)
         .into_iter()
-        .map(|run| run_json(run, counted_job_values(api, run.id)))
+        .map(|run| run_json(run, counted_job_values(api, recon, run.id)))
         .collect();
     let known: std::collections::HashSet<u64> = api.runs.iter().map(|run| run.id).collect();
     let mut missing: Vec<u64> = Vec::new();
@@ -772,14 +831,14 @@ fn api_json(api: &ApiData) -> (serde_json::Value, serde_json::Value) {
             "event": null,
             "conclusion": null,
             "run_started_at": null,
-            "jobs": counted_job_values(api, run_id),
+            "jobs": counted_job_values(api, recon, run_id),
         }));
     }
     runs.sort_by(|left, right| run_sort_key(left).cmp(&run_sort_key(right)));
     let in_progress: Vec<serde_json::Value> = in_progress_jobs(api)
         .into_iter()
         .map(|job| {
-            let mut value = job_json(api, job, false);
+            let mut value = job_json(api, recon, job, false);
             value["workflow_path"] =
                 serde_json::Value::from(displayed_run_path_for_id(api, job.run_id));
             value["message"] = serde_json::Value::from(IN_PROGRESS);
@@ -792,7 +851,11 @@ fn api_json(api: &ApiData) -> (serde_json::Value, serde_json::Value) {
     )
 }
 
-fn counted_job_values(api: &ApiData, run_id: u64) -> Vec<serde_json::Value> {
+fn counted_job_values(
+    api: &ApiData,
+    recon: &Reconciliation,
+    run_id: u64,
+) -> Vec<serde_json::Value> {
     let mut jobs: Vec<&Job> = finished_jobs(api)
         .into_iter()
         .filter(|job| job.run_id == run_id)
@@ -809,7 +872,7 @@ fn counted_job_values(api: &ApiData, run_id: u64) -> Vec<serde_json::Value> {
             .then(left.id.cmp(&right.id))
     });
     jobs.into_iter()
-        .map(|job| job_json(api, job, true))
+        .map(|job| job_json(api, recon, job, true))
         .collect()
 }
 
@@ -850,7 +913,7 @@ fn run_sort_key(value: &serde_json::Value) -> (&str, u64, u64, u64) {
     )
 }
 
-fn job_json(api: &ApiData, job: &Job, counts: bool) -> serde_json::Value {
+fn job_json(api: &ApiData, recon: &Reconciliation, job: &Job, counts: bool) -> serde_json::Value {
     let inherited = api.is_inherited_copy(job);
     let mut value = serde_json::json!({
         "id": job.id,
@@ -873,6 +936,13 @@ fn job_json(api: &ApiData, job: &Job, counts: bool) -> serde_json::Value {
         None => serde_json::Value::Null,
     };
     value["list_price"] = serde_json::Value::String(bill.list_price.to_decimal_string());
+    value["list_price_method"] = serde_json::Value::from(CostMethod::ListPrice.as_str());
+    let priced = recon.job(job.id).cloned().unwrap_or(Amount {
+        micros: bill.list_price,
+        method: CostMethod::ListPrice,
+    });
+    value["invoice"] = serde_json::Value::String(priced.micros.to_decimal_string());
+    value["method"] = serde_json::Value::from(priced.method.as_str());
     value["usd_per_minute"] = match bill.usd_per_minute {
         Some(rate) => serde_json::Value::String(rate.to_decimal_string()),
         None => serde_json::Value::Null,
@@ -1273,6 +1343,7 @@ mod tests {
                 WorkflowRun {
                     id: 1002,
                     path: ".github/workflows/lint.yml".to_string(),
+                    repository: None,
                     run_attempt: 2,
                     run_number: 41,
                     event: "pull_request".to_string(),
@@ -1282,6 +1353,7 @@ mod tests {
                 WorkflowRun {
                     id: 1001,
                     path: ".github/workflows/ci.yml".to_string(),
+                    repository: None,
                     run_attempt: 1,
                     run_number: 40,
                     event: "push".to_string(),
@@ -1979,6 +2051,7 @@ mod tests {
                 id: 1,
                 path: "octocat/octo-repo/.github/workflows/ci.yml@refs/heads/feature/foo"
                     .to_string(),
+                repository: None,
                 run_attempt: 2,
                 run_number: 4,
                 event: "push".to_string(),

@@ -15,6 +15,10 @@
   "unattached_findings": [],
   "workflows": [
     {
+      "difference": {
+        "amount": "230.144000",
+        "method": "yaml_weight"
+      },
       "discount": "0.000000",
       "findings": [
         {
@@ -37,6 +41,25 @@
         }
       ],
       "gross": "230.144000",
+      "invoice": {
+        "amount": "230.144000",
+        "method": "yaml_weight"
+      },
+      "job_costs": [
+        {
+          "amount": "230.144000",
+          "file": "samples/.github/workflows/lint.yml",
+          "job_id": null,
+          "line": 8,
+          "method": "yaml_weight",
+          "name": "lint",
+          "sku": "actions_macos"
+        }
+      ],
+      "measured": {
+        "amount": "0.000000",
+        "method": "list_price"
+      },
       "minutes": 3712,
       "net": "230.144000",
       "path": ".github/workflows/lint.yml",
@@ -65,9 +88,32 @@
       ]
     },
     {
+      "difference": {
+        "amount": "44.232000",
+        "method": "yaml_weight"
+      },
       "discount": "0.000000",
       "findings": [],
       "gross": "44.232000",
+      "invoice": {
+        "amount": "44.232000",
+        "method": "yaml_weight"
+      },
+      "job_costs": [
+        {
+          "amount": "44.232000",
+          "file": "samples/.github/workflows/ci.yml",
+          "job_id": null,
+          "line": 9,
+          "method": "yaml_weight",
+          "name": "test",
+          "sku": "actions_linux"
+        }
+      ],
+      "measured": {
+        "amount": "0.000000",
+        "method": "list_price"
+      },
       "minutes": 7372,
       "net": "44.232000",
       "path": ".github/workflows/ci.yml",
@@ -92,9 +138,32 @@
       ]
     },
     {
+      "difference": {
+        "amount": "7.720000",
+        "method": "yaml_weight"
+      },
       "discount": "0.000000",
       "findings": [],
       "gross": "7.720000",
+      "invoice": {
+        "amount": "7.720000",
+        "method": "yaml_weight"
+      },
+      "job_costs": [
+        {
+          "amount": "7.720000",
+          "file": "samples/.github/workflows/release.yml",
+          "job_id": null,
+          "line": 7,
+          "method": "yaml_weight",
+          "name": "build-windows",
+          "sku": "actions_windows"
+        }
+      ],
+      "measured": {
+        "amount": "0.000000",
+        "method": "list_price"
+      },
       "minutes": 772,
       "net": "7.720000",
       "path": ".github/workflows/release.yml",
@@ -119,6 +188,10 @@
       ]
     },
     {
+      "difference": {
+        "amount": "2.112000",
+        "method": "yaml_weight"
+      },
       "discount": "0.000000",
       "findings": [
         {
@@ -129,6 +202,25 @@
         }
       ],
       "gross": "2.112000",
+      "invoice": {
+        "amount": "2.112000",
+        "method": "yaml_weight"
+      },
+      "job_costs": [
+        {
+          "amount": "2.112000",
+          "file": "samples/.github/workflows/docs.yml",
+          "job_id": null,
+          "line": 5,
+          "method": "yaml_weight",
+          "name": "docs",
+          "sku": "actions_linux"
+        }
+      ],
+      "measured": {
+        "amount": "0.000000",
+        "method": "list_price"
+      },
       "minutes": 352,
       "net": "2.112000",
       "path": ".github/workflows/docs.yml",
@@ -153,9 +245,22 @@
       ]
     },
     {
+      "difference": {
+        "amount": "0.000000",
+        "method": "list_price"
+      },
       "discount": "0.005040",
       "findings": [],
       "gross": "0.005040",
+      "invoice": {
+        "amount": "0.000000",
+        "method": "list_price"
+      },
+      "job_costs": [],
+      "measured": {
+        "amount": "0.000000",
+        "method": "list_price"
+      },
       "minutes": 0,
       "net": "0.000000",
       "path": "(no workflow)",

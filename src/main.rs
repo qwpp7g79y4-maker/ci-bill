@@ -4,6 +4,7 @@ mod job_cost;
 mod money;
 mod prices;
 mod rank;
+mod reconcile;
 mod report;
 mod usage;
 mod workflow;
@@ -141,12 +142,14 @@ fn report(
             ),
         }
     } else {
-        match api.as_ref() {
-            Some(data) => {
-                report::render_with_runs(ranked, &ranking.bill, found.as_deref(), data, top)
-            }
-            None => report::render(ranked, &ranking.bill, found.as_deref(), top),
-        }
+        report::render_text(
+            ranked,
+            &ranking.bill,
+            found.as_deref(),
+            api.as_ref(),
+            top,
+            &scanned,
+        )
     };
     print!("{text}");
     // The budget is the Actions net total, including workflows omitted by --top.

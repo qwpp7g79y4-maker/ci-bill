@@ -28,7 +28,11 @@ pub const UNKNOWN_WORKFLOW: &str = "(unknown workflow)";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowRun {
     pub id: u64,
+    /// Linked workflow path: `@ref` and an `owner/repo/` prefix are removed.
     pub path: String,
+    /// `owner/repo` taken from the raw run path before linking. `None` when
+    /// the path has no two-segment prefix in front of `.github/workflows`.
+    pub repository: Option<String>,
     pub run_attempt: u64,
     pub run_number: u64,
     pub event: String,
@@ -142,6 +146,32 @@ pub fn linked_workflow_path(raw: &str) -> String {
     let without_ref = without_ref.trim().trim_matches('\r');
     let slashed = without_ref.replace('\\', "/");
     strip_owner_repo_prefix(&slashed)
+}
+
+/// `owner/repo` from a raw Actions run path, before `@ref` and the workflow prefix are removed.
+///
+/// The prefix counts only when exactly two segments sit in front of
+/// `.github/workflows`. Any other shape has no repository.
+pub fn repository_from_run_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_matches('\u{feff}').trim_matches('\r');
+    let without_ref = trimmed
+        .split_once('@')
+        .map(|(path, _reference)| path)
+        .unwrap_or(trimmed);
+    let slashed = without_ref.trim().trim_matches('\r').replace('\\', "/");
+    let linked = strip_owner_repo_prefix(&slashed);
+    let prefix = slashed.trim_end_matches('/');
+    let linked = linked.trim_start_matches('/');
+    let rest = prefix.strip_suffix(linked)?.trim_end_matches('/');
+    if rest.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() == 2 {
+        Some(format!("{}/{}", parts[0], parts[1]))
+    } else {
+        None
+    }
 }
 
 /// Both paths refer to the same workflow file after linking.
@@ -353,9 +383,11 @@ fn parse_runs(text: &str) -> Result<Vec<WorkflowRun>, ()> {
 
 fn parse_run(value: &Value) -> Result<WorkflowRun, ()> {
     let object = value.as_object().ok_or(())?;
+    let raw_path = require_string(object, "path")?;
     Ok(WorkflowRun {
         id: require_u64(object, "id")?,
-        path: linked_workflow_path(&require_string(object, "path")?),
+        path: linked_workflow_path(&raw_path),
+        repository: repository_from_run_path(&raw_path),
         run_attempt: require_u64(object, "run_attempt")?,
         run_number: require_u64(object, "run_number")?,
         event: require_string(object, "event")?,
@@ -733,6 +765,7 @@ mod tests {
                 WorkflowRun {
                     id: 1001,
                     path: ".github/workflows/ci.yml".to_string(),
+                    repository: None,
                     run_attempt: 1,
                     run_number: 40,
                     event: "push".to_string(),
@@ -742,6 +775,7 @@ mod tests {
                 WorkflowRun {
                     id: 1002,
                     path: ".github/workflows/lint.yml".to_string(),
+                    repository: None,
                     run_attempt: 2,
                     run_number: 41,
                     event: "pull_request".to_string(),
@@ -751,6 +785,7 @@ mod tests {
                 WorkflowRun {
                     id: 1003,
                     path: ".github/workflows/release.yml".to_string(),
+                    repository: None,
                     run_attempt: 1,
                     run_number: 7,
                     event: "release".to_string(),
@@ -1494,6 +1529,18 @@ mod tests {
         assert_eq!(path(2), ".github/workflows/ci.yml");
         assert_eq!(path(3), ".github/workflows/lint.yml");
         assert_eq!(path(4), ".github/workflows/release.yml");
+        let repository = |id: u64| {
+            data.runs
+                .iter()
+                .find(|run| run.id == id)
+                .unwrap()
+                .repository
+                .clone()
+        };
+        assert_eq!(repository(1), None);
+        assert_eq!(repository(2), None);
+        assert_eq!(repository(3).as_deref(), Some("octocat/octo-repo"));
+        assert_eq!(repository(4).as_deref(), Some("octocat/octo-repo"));
         assert!(data
             .runs
             .iter()
@@ -1527,6 +1574,7 @@ mod tests {
         let data = read_dir(&dir).unwrap();
         let by_id = |id: u64| data.runs.iter().find(|run| run.id == id).unwrap();
         assert_eq!(by_id(8).path, ".GitHub/Workflows/CI.yml");
+        assert_eq!(by_id(8).repository.as_deref(), Some("OWNER/REPO"));
         assert!(by_id(8).links_to(".github/workflows/ci.yml"));
         assert!(by_id(8).conclusion.is_none());
         assert_eq!(by_id(8).run_attempt, 1);

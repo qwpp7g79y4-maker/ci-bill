@@ -154,6 +154,7 @@ mod tests {
             runs: vec![WorkflowRun {
                 id: job.run_id,
                 path: ".github/workflows/ci.yml".to_string(),
+                repository: None,
                 run_attempt: job.run_attempt,
                 run_number: 1,
                 event: "push".to_string(),
@@ -618,6 +619,7 @@ mod tests {
             runs: vec![WorkflowRun {
                 id: 1,
                 path: ".github/workflows/ci.yml".to_string(),
+                repository: None,
                 run_attempt: 2,
                 run_number: 4,
                 event: "push".to_string(),
