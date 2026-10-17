@@ -145,7 +145,8 @@ mod tests {
     use std::path::Path;
 
     fn analyze(yaml: &str) -> Vec<Finding> {
-        findings(&[scan_yaml(Path::new("fixture.yml"), yaml)])
+        let workflow = scan_yaml(Path::new("fixture.yml"), yaml).expect("valid fixture");
+        findings(&[workflow])
     }
 
     fn of_kind(found: &[Finding], kind: FindingKind) -> Vec<&Finding> {
@@ -320,5 +321,96 @@ jobs:
             "{found:?}"
         );
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn f1_f2_f3_apply_to_flow_style() {
+        let flagged = "on: {pull_request: {}}\njobs: {lint: {runs-on: macos-latest, steps: [{run: cargo fmt --check}]}}\n";
+        let found = analyze(flagged);
+        let f1 = of_kind(&found, FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 2);
+        assert_eq!(f1[0].message, "lint on macOS");
+        let f2 = of_kind(&found, FindingKind::MissingTimeout);
+        assert_eq!(f2.len(), 1, "{found:?}");
+        assert_eq!(f2[0].line, 2);
+        assert_eq!(f2[0].message, "default timeout is 360 minutes");
+        let f3 = of_kind(&found, FindingKind::PullRequestConcurrency);
+        assert_eq!(f3.len(), 1, "{found:?}");
+        assert_eq!(f3[0].line, 1);
+        assert_eq!(
+            f3[0].message,
+            "pull_request without concurrency cancel-in-progress"
+        );
+
+        let windows = "on: [push, pull_request]\njobs: {lint: {runs-on: windows-latest, timeout-minutes: 5, steps: [{run: cargo clippy -- -D warnings}]}}\n";
+        let found = analyze(windows);
+        let f1 = of_kind(&found, FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 2);
+        assert_eq!(f1[0].message, "lint on Windows");
+        assert_eq!(
+            of_kind(&found, FindingKind::PullRequestConcurrency).len(),
+            1,
+            "{found:?}"
+        );
+        assert_eq!(
+            of_kind(&found, FindingKind::PullRequestConcurrency)[0].line,
+            1
+        );
+        assert!(
+            of_kind(&found, FindingKind::MissingTimeout).is_empty(),
+            "{found:?}"
+        );
+
+        let clean = "on: {pull_request: {}}\nconcurrency: {group: ci, cancel-in-progress: true}\njobs: {test: {runs-on: ubuntu-latest, timeout-minutes: 5, steps: [{run: cargo test}]}}\n";
+        let found = analyze(clean);
+        assert!(found.is_empty(), "{found:?}");
+
+        let ubuntu_lint = "on: push\njobs: {lint: {runs-on: ubuntu-latest, timeout-minutes: 1, steps: [{run: cargo fmt --check}]}}\n";
+        let found = analyze(ubuntu_lint);
+        assert!(found.is_empty(), "{found:?}");
+
+        let map_runner = "jobs:\n  lint:\n    runs-on: {group: large, labels: [self-hosted, macos]}\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n";
+        let found = analyze(map_runner);
+        let f1 = of_kind(&found, FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 3);
+        assert_eq!(f1[0].message, "lint on macOS");
+        assert!(
+            of_kind(&found, FindingKind::MissingTimeout).is_empty(),
+            "{found:?}"
+        );
+
+        let block_map = "jobs:\n  prettier:\n    runs-on:\n      group: large\n      labels:\n        - self-hosted\n        - windows\n    timeout-minutes: 5\n    steps:\n      - run: npx prettier --check .\n";
+        let found = analyze(block_map);
+        let f1 = of_kind(&found, FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 3);
+        assert_eq!(f1[0].message, "lint on Windows");
+
+        let merged = "defaults: &defaults\n  runs-on: ubuntu-latest\n  timeout-minutes: 10\n  steps:\n    - run: cargo test\non: pull_request\njobs:\n  lint:\n    <<: *defaults\n    runs-on: macos-latest\n    steps:\n      - run: cargo clippy -- -D warnings\n";
+        let found = analyze(merged);
+        let f1 = of_kind(&found, FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 10);
+        assert_eq!(f1[0].message, "lint on macOS");
+        assert!(
+            of_kind(&found, FindingKind::MissingTimeout).is_empty(),
+            "{found:?}"
+        );
+        let f3 = of_kind(&found, FindingKind::PullRequestConcurrency);
+        assert_eq!(f3.len(), 1, "{found:?}");
+        assert_eq!(f3[0].line, 6);
+
+        let inherited = "defaults: &defaults\n  name: clippy\n  runs-on: macos-latest\njobs:\n  build:\n    <<: *defaults\n";
+        let found = analyze(inherited);
+        let f1 = of_kind(&found, FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 3);
+        assert_eq!(f1[0].message, "lint on macOS");
+        let f2 = of_kind(&found, FindingKind::MissingTimeout);
+        assert_eq!(f2.len(), 1, "{found:?}");
+        assert_eq!(f2[0].line, 5);
     }
 }

@@ -1,11 +1,15 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
-/// One workflow file, scanned with a block-style indentation reader.
+use yaml_rust2::parser::{MarkedEventReceiver, Parser};
+use yaml_rust2::scanner::Marker;
+use yaml_rust2::Event;
+
+/// One workflow file.
 ///
-/// Line numbers are 1-based positions in the file. Comments and blank lines
-/// are ignored and do not shift the numbers of the lines that remain.
-/// Structure this scanner does not understand is skipped.
+/// Line numbers are 1-based positions of keys in the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workflow {
     pub path: PathBuf,
@@ -36,7 +40,7 @@ pub struct Job {
 pub struct RunsOn {
     /// Line of the `runs-on` key.
     pub line: usize,
-    /// Value as written, for example `ubuntu-latest` or `[self-hosted, macos]`.
+    /// Runner text, for example `ubuntu-latest` or `[self-hosted, macos]`.
     pub value: String,
     pub labels: Vec<String>,
 }
@@ -52,6 +56,7 @@ pub struct ScanError {
 enum ScanErrorKind {
     Directory,
     File,
+    Yaml { line: usize },
 }
 
 impl std::fmt::Display for ScanError {
@@ -59,6 +64,7 @@ impl std::fmt::Display for ScanError {
         match self.kind {
             ScanErrorKind::Directory => write!(f, "cannot read directory"),
             ScanErrorKind::File => write!(f, "cannot read file"),
+            ScanErrorKind::Yaml { line } => write!(f, "line {line}: invalid YAML"),
         }
     }
 }
@@ -79,13 +85,19 @@ impl ScanError {
             kind: ScanErrorKind::File,
         }
     }
+
+    fn yaml(path: &Path, line: usize) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            kind: ScanErrorKind::Yaml { line: line.max(1) },
+        }
+    }
 }
 
 /// Read `*.yml` and `*.yaml` files directly in `dir`, in path order.
 ///
 /// Nested directories are not walked. An unreadable directory or file is an
-/// error. A file whose YAML is not a workflow still returns a [`Workflow`]
-/// with whatever top-level fields were recognized.
+/// error. Invalid YAML is an error that names the file and the line.
 pub fn scan_dir(dir: &Path) -> Result<Vec<Workflow>, ScanError> {
     let entries = fs::read_dir(dir).map_err(|_| ScanError::directory(dir))?;
     let mut paths = Vec::new();
@@ -101,15 +113,20 @@ pub fn scan_dir(dir: &Path) -> Result<Vec<Workflow>, ScanError> {
     let mut workflows = Vec::with_capacity(paths.len());
     for path in paths {
         let text = fs::read_to_string(&path).map_err(|_| ScanError::file(&path))?;
-        workflows.push(scan_yaml(&path, &text));
+        workflows.push(scan_yaml(&path, &text)?);
     }
     Ok(workflows)
 }
 
-/// Scan one workflow document. Never panics on malformed text.
-pub fn scan_yaml(path: &Path, text: &str) -> Workflow {
+/// Scan one workflow document.
+///
+/// Invalid YAML returns an error with the 1-based line and without the
+/// document text. Every other input returns a workflow.
+pub fn scan_yaml(path: &Path, text: &str) -> Result<Workflow, ScanError> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    interpret(path, &preprocess(text))
+    let events = collect_events(text).map_err(|line| ScanError::yaml(path, line))?;
+    let root = document_root(&events).map_err(|line| ScanError::yaml(path, line))?;
+    Ok(workflow_from(path, root.as_ref()))
 }
 
 fn is_workflow_file(path: &Path) -> bool {
@@ -118,549 +135,342 @@ fn is_workflow_file(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"))
 }
 
-struct Line {
-    number: usize,
-    indent: usize,
-    key: Option<String>,
-    value: Option<String>,
-    is_list: bool,
-    block_text: Option<String>,
+const MAX_NODE_DEPTH: usize = 128;
+
+struct Collector {
+    events: Vec<(Event, Marker)>,
 }
 
-struct Block {
-    key_indent: usize,
-    content_indent: Option<usize>,
-    text: String,
-    started: bool,
+impl MarkedEventReceiver for Collector {
+    fn on_event(&mut self, ev: Event, mark: Marker) {
+        self.events.push((ev, mark));
+    }
 }
 
-/// A `:` separates a key only when the next character is whitespace, `[`, `{`,
-/// or the end of the line. That leaves `http://` and `${{ }}` expressions intact.
-fn split_colon(body: &str) -> Option<(&str, &str)> {
-    let bytes = body.as_bytes();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b'"' && !in_single {
-            in_double = !in_double;
-            index += 1;
+fn collect_events(text: &str) -> Result<Vec<(Event, Marker)>, usize> {
+    let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut collector = Collector { events: Vec::new() };
+        let mut parser = Parser::new_from_str(text);
+        match parser.load(&mut collector, true) {
+            Ok(()) => Ok(collector.events),
+            Err(err) => Err(err.marker().line().max(1)),
+        }
+    }));
+    match caught {
+        Ok(result) => result,
+        Err(_) => Err(1),
+    }
+}
+
+#[derive(Clone)]
+enum Node {
+    Scalar { value: String, line: usize },
+    Sequence { items: Vec<Node> },
+    Mapping { entries: Vec<Entry> },
+}
+
+#[derive(Clone)]
+struct Entry {
+    key: String,
+    line: usize,
+    value: Node,
+}
+
+struct Cursor<'a> {
+    events: &'a [(Event, Marker)],
+    index: usize,
+}
+
+fn document_root(events: &[(Event, Marker)]) -> Result<Option<Node>, usize> {
+    let mut cursor = Cursor { events, index: 0 };
+    let mut chosen = None;
+    while cursor.index < events.len() {
+        let is_document = matches!(events[cursor.index].0, Event::DocumentStart);
+        if !is_document {
+            cursor.index += 1;
             continue;
         }
-        if byte == b'\'' && !in_double {
-            if in_single && bytes.get(index + 1) == Some(&b'\'') {
-                index += 2;
-                continue;
-            }
-            in_single = !in_single;
-            index += 1;
-            continue;
-        }
-        if byte == b':' && !in_single && !in_double {
-            let next = bytes.get(index + 1).copied();
-            let separates =
-                next.is_none_or(|next| next.is_ascii_whitespace() || next == b'[' || next == b'{');
-            if separates {
-                return Some((&body[..index], &body[index + 1..]));
-            }
-        }
-        index += 1;
-    }
-    None
-}
-
-fn unquote(value: &str) -> &str {
-    let value = value.trim();
-    let bytes = value.as_bytes();
-    if bytes.len() >= 2 {
-        let first = bytes[0];
-        let last = bytes[bytes.len() - 1];
-        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-            return &value[1..value.len() - 1];
-        }
-    }
-    value
-}
-
-fn normalize_key(raw: &str) -> Option<String> {
-    let key = unquote(raw.trim());
-    if key.is_empty() || key.chars().any(char::is_whitespace) {
-        None
-    } else {
-        Some(key.to_string())
-    }
-}
-
-fn split_key_value(body: &str) -> Option<(String, Option<String>)> {
-    let (key_raw, value_raw) = split_colon(body)?;
-    let key = normalize_key(key_raw)?;
-    let value = value_raw.trim();
-    if value.is_empty() {
-        Some((key, None))
-    } else {
-        Some((key, Some(value.to_string())))
-    }
-}
-
-fn strip_inline_comment(content: &str) -> &str {
-    let bytes = content.as_bytes();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b'"' && !in_single {
-            in_double = !in_double;
-            index += 1;
-            continue;
-        }
-        if byte == b'\'' && !in_double {
-            if in_single && bytes.get(index + 1) == Some(&b'\'') {
-                index += 2;
-                continue;
-            }
-            in_single = !in_single;
-            index += 1;
-            continue;
-        }
-        if byte == b'#'
-            && !in_single
-            && !in_double
-            && (index == 0 || bytes[index - 1].is_ascii_whitespace())
-        {
-            return content[..index].trim_end();
-        }
-        index += 1;
-    }
-    content.trim_end()
-}
-
-fn is_block_scalar(value: &str) -> bool {
-    let value = value.trim();
-    let rest = if let Some(rest) = value.strip_prefix('|') {
-        rest
-    } else if let Some(rest) = value.strip_prefix('>') {
-        rest
-    } else {
-        return false;
-    };
-    let rest = rest.strip_prefix(['+', '-']).unwrap_or(rest);
-    rest.chars().all(|c| c.is_ascii_digit())
-}
-
-fn is_ignorable(raw: &str) -> bool {
-    let trimmed = raw.trim();
-    trimmed.is_empty() || trimmed.starts_with('#')
-}
-
-fn space_indent(raw: &str) -> Option<usize> {
-    let mut count = 0;
-    for character in raw.chars() {
-        if character == ' ' {
-            count += 1;
-        } else if character == '\t' {
-            return None;
-        } else {
+        cursor.index += 1;
+        if cursor.index >= events.len() {
             break;
         }
+        let boundary = matches!(
+            events[cursor.index].0,
+            Event::DocumentEnd | Event::StreamEnd
+        );
+        if boundary {
+            continue;
+        }
+        let mut anchors = HashMap::new();
+        let mut building = Vec::new();
+        let node = cursor.parse_node(&mut anchors, &mut building, 0)?;
+        if chosen.is_none() && matches!(node, Node::Mapping { .. }) {
+            chosen = Some(node);
+        }
     }
-    Some(count)
+    Ok(chosen)
 }
 
-fn parse_content(number: usize, indent: usize, content: &str) -> Option<Line> {
-    let (is_list, body) = match content.strip_prefix('-') {
-        Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
-            (true, rest.trim_start())
+impl Cursor<'_> {
+    fn parse_node(
+        &mut self,
+        anchors: &mut HashMap<usize, Node>,
+        building: &mut Vec<usize>,
+        depth: usize,
+    ) -> Result<Node, usize> {
+        if self.index >= self.events.len() {
+            return Err(1);
         }
-        _ => (false, content),
-    };
-    if let Some((key, value)) = split_key_value(body) {
-        return Some(Line {
-            number,
-            indent,
-            key: Some(key),
-            value,
-            is_list,
-            block_text: None,
-        });
+        let line = self.events[self.index].1.line().max(1);
+        if depth > MAX_NODE_DEPTH {
+            return Err(line);
+        }
+        let event = self.events[self.index].0.clone();
+        self.index += 1;
+        match event {
+            Event::Scalar(value, _, anchor, _) => {
+                let node = Node::Scalar { value, line };
+                self.store_anchor(anchors, anchor, &node);
+                Ok(node)
+            }
+            Event::SequenceStart(anchor, _) => {
+                self.parse_sequence(anchors, building, depth, anchor, line)
+            }
+            Event::MappingStart(anchor, _) => {
+                self.parse_mapping(anchors, building, depth, anchor, line)
+            }
+            Event::Alias(id) => {
+                if building.contains(&id) {
+                    return Err(line);
+                }
+                anchors.get(&id).cloned().ok_or(line)
+            }
+            _ => Err(line),
+        }
     }
-    if is_list {
-        let value = if body.is_empty() {
-            None
-        } else {
-            Some(unquote(body).trim().to_string())
+
+    fn parse_sequence(
+        &mut self,
+        anchors: &mut HashMap<usize, Node>,
+        building: &mut Vec<usize>,
+        depth: usize,
+        anchor: usize,
+        line: usize,
+    ) -> Result<Node, usize> {
+        self.push_anchor(building, anchor, line)?;
+        let mut items = Vec::new();
+        loop {
+            if self.index >= self.events.len() {
+                return Err(line);
+            }
+            if matches!(self.events[self.index].0, Event::SequenceEnd) {
+                self.index += 1;
+                break;
+            }
+            items.push(self.parse_node(anchors, building, depth + 1)?);
+        }
+        let node = Node::Sequence { items };
+        self.finish_anchor(anchors, building, anchor, &node);
+        Ok(node)
+    }
+
+    fn parse_mapping(
+        &mut self,
+        anchors: &mut HashMap<usize, Node>,
+        building: &mut Vec<usize>,
+        depth: usize,
+        anchor: usize,
+        line: usize,
+    ) -> Result<Node, usize> {
+        self.push_anchor(building, anchor, line)?;
+        let mut raw = Vec::new();
+        loop {
+            if self.index >= self.events.len() {
+                return Err(line);
+            }
+            if matches!(self.events[self.index].0, Event::MappingEnd) {
+                self.index += 1;
+                break;
+            }
+            let key = self.parse_node(anchors, building, depth + 1)?;
+            let value = self.parse_node(anchors, building, depth + 1)?;
+            if let Node::Scalar {
+                value: key_text,
+                line: key_line,
+            } = key
+            {
+                raw.push(Entry {
+                    key: key_text,
+                    line: key_line,
+                    value,
+                });
+            }
+        }
+        let node = Node::Mapping {
+            entries: resolve_merge(raw),
         };
-        return Some(Line {
-            number,
-            indent,
-            key: None,
-            value,
-            is_list: true,
-            block_text: None,
-        });
+        self.finish_anchor(anchors, building, anchor, &node);
+        Ok(node)
     }
-    None
-}
 
-fn append_block_line(block: &mut Block, text: &str) {
-    if block.started {
-        block.text.push('\n');
-    }
-    block.started = true;
-    block.text.push_str(text.trim_end());
-}
-
-/// Inside `|` or `>`, `#` is script text. The block ends at the next content
-/// line that is indented less than the script body.
-fn keep_block_line(block: &mut Block, raw: &str) -> bool {
-    if raw.trim().is_empty() {
-        if block.started {
-            block.text.push('\n');
+    fn push_anchor(
+        &self,
+        building: &mut Vec<usize>,
+        anchor: usize,
+        line: usize,
+    ) -> Result<(), usize> {
+        if anchor == 0 {
+            return Ok(());
         }
-        return true;
-    }
-    if raw.trim_start_matches(' ').starts_with('\t') {
-        append_block_line(block, raw.trim());
-        return true;
-    }
-    let Some(indent) = space_indent(raw) else {
-        return false;
-    };
-    if let Some(content_indent) = block.content_indent {
-        if indent >= content_indent && content_indent <= raw.len() {
-            append_block_line(block, &raw[content_indent..]);
-            return true;
+        if building.contains(&anchor) {
+            return Err(line);
         }
-        return false;
+        building.push(anchor);
+        Ok(())
     }
-    if indent > block.key_indent {
-        block.content_indent = Some(indent);
-        append_block_line(block, &raw[indent..]);
-        return true;
+
+    fn finish_anchor(
+        &self,
+        anchors: &mut HashMap<usize, Node>,
+        building: &mut Vec<usize>,
+        anchor: usize,
+        node: &Node,
+    ) {
+        self.store_anchor(anchors, anchor, node);
+        if anchor != 0 {
+            building.pop();
+        }
     }
-    false
+
+    fn store_anchor(&self, anchors: &mut HashMap<usize, Node>, anchor: usize, node: &Node) {
+        if anchor != 0 {
+            anchors.insert(anchor, node.clone());
+        }
+    }
 }
 
-fn attach_block(lines: &mut [Line], block: Block) {
-    let Some(last) = lines.last_mut() else {
-        return;
-    };
-    let text = block.text.trim_end_matches(['\r', '\n']);
-    if !text.is_empty() {
-        last.block_text = Some(text.to_string());
+fn resolve_merge(entries: Vec<Entry>) -> Vec<Entry> {
+    let mut explicit = Vec::new();
+    let mut merges = Vec::new();
+    let mut seen = HashSet::new();
+    for item in entries {
+        if item.key == "<<" {
+            merges.push(item.value);
+            continue;
+        }
+        if seen.insert(item.key.clone()) {
+            explicit.push(item);
+        }
     }
+    for value in merges {
+        merge_node(&mut explicit, &mut seen, &value);
+    }
+    explicit
 }
 
-fn preprocess(text: &str) -> Vec<Line> {
-    let raw_lines: Vec<&str> = text.split('\n').collect();
-    let mut lines = Vec::new();
-    let mut block: Option<Block> = None;
-    let mut index = 0;
-    while index < raw_lines.len() {
-        let number = index + 1;
-        let raw = raw_lines[index]
-            .strip_suffix('\r')
-            .unwrap_or(raw_lines[index]);
-        if block.is_some() {
-            let keep = block
-                .as_mut()
-                .is_some_and(|open| keep_block_line(open, raw));
-            if keep {
-                index += 1;
-                continue;
+fn merge_node(out: &mut Vec<Entry>, seen: &mut HashSet<String>, node: &Node) {
+    match node {
+        Node::Mapping { entries, .. } => {
+            for item in entries {
+                if item.key == "<<" {
+                    merge_node(out, seen, &item.value);
+                } else if seen.insert(item.key.clone()) {
+                    out.push(item.clone());
+                }
             }
-            if let Some(finished) = block.take() {
-                attach_block(&mut lines, finished);
+        }
+        Node::Sequence { items, .. } => {
+            for item in items {
+                merge_node(out, seen, item);
             }
-            continue;
         }
-
-        index += 1;
-        if is_ignorable(raw) {
-            continue;
-        }
-        let Some(indent) = space_indent(raw) else {
-            continue;
-        };
-        if indent > raw.len() {
-            continue;
-        }
-        let content = strip_inline_comment(&raw[indent..]);
-        if content.is_empty() {
-            continue;
-        }
-        let Some(mut parsed) = parse_content(number, indent, content) else {
-            continue;
-        };
-        let opens_block = parsed.value.as_deref().is_some_and(is_block_scalar);
-        if opens_block {
-            parsed.value = None;
-        }
-        lines.push(parsed);
-        if opens_block {
-            block = Some(Block {
-                key_indent: indent,
-                content_indent: None,
-                text: String::new(),
-                started: false,
-            });
-        }
+        Node::Scalar { .. } => {}
     }
-    if let Some(finished) = block.take() {
-        attach_block(&mut lines, finished);
-    }
-    lines
 }
 
-struct Frame {
-    indent: isize,
-    key: String,
+fn entry<'a>(entries: &'a [Entry], key: &str) -> Option<&'a Entry> {
+    entries.iter().find(|item| item.key == key)
 }
 
-struct Context {
-    parent_key: String,
-    parent_is_root: bool,
-    on_is_root: bool,
-    jobs_are_root: bool,
-    concurrency_is_root: bool,
-    parent_is_job: bool,
-    in_steps: bool,
-    in_runs_on: bool,
-    job_name: Option<String>,
-}
-
-fn root_section_index(stack: &[Frame], name: &str) -> Option<usize> {
-    stack.iter().enumerate().find_map(|(index, frame)| {
-        if index > 0 && frame.key == name && stack[index - 1].key.is_empty() {
-            Some(index)
-        } else {
-            None
-        }
-    })
-}
-
-fn in_job_runs_on(stack: &[Frame], jobs_at: Option<usize>) -> bool {
-    let Some(jobs_at) = jobs_at else {
-        return false;
+fn workflow_from(path: &Path, root: Option<&Node>) -> Workflow {
+    let mut workflow = Workflow {
+        path: path.to_path_buf(),
+        on_line: None,
+        has_pull_request: false,
+        cancel_in_progress: false,
+        jobs: Vec::new(),
     };
-    let Some(after_job) = stack.get(jobs_at + 2..) else {
-        return false;
+    let Some(Node::Mapping { entries, .. }) = root else {
+        return workflow;
     };
-    match after_job {
-        [frame] if frame.key == "runs-on" => true,
-        [runs_on, labels] if runs_on.key == "runs-on" && labels.key == "labels" => true,
-        _ => false,
-    }
-}
-
-fn context_for(stack: &[Frame]) -> Context {
-    let parent_key = stack
-        .last()
-        .map(|frame| frame.key.clone())
-        .unwrap_or_default();
-    let jobs_at = root_section_index(stack, "jobs");
-    let job_name = jobs_at.and_then(|index| {
-        stack.get(index + 1).and_then(|frame| {
-            if frame.key.is_empty() || frame.key == "-" {
-                None
-            } else {
-                Some(frame.key.clone())
-            }
-        })
-    });
-    Context {
-        parent_is_root: stack.len() == 1,
-        on_is_root: root_section_index(stack, "on").is_some(),
-        jobs_are_root: jobs_at.is_some(),
-        concurrency_is_root: root_section_index(stack, "concurrency").is_some(),
-        parent_is_job: jobs_at.is_some_and(|index| stack.len() == index + 2),
-        in_steps: jobs_at.is_some_and(|index| {
-            stack
-                .iter()
-                .skip(index + 2)
-                .any(|frame| frame.key == "steps")
-        }),
-        in_runs_on: in_job_runs_on(stack, jobs_at),
-        parent_key,
-        job_name,
-    }
-}
-
-fn split_top_level(inner: &str, separator: char) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut braces: usize = 0;
-    let mut brackets: usize = 0;
-    let mut in_single = false;
-    let mut in_double = false;
-    for (index, character) in inner.char_indices() {
-        if character == '"' && !in_single {
-            in_double = !in_double;
-            continue;
-        }
-        if character == '\'' && !in_double {
-            in_single = !in_single;
-            continue;
-        }
-        if in_single || in_double {
-            continue;
-        }
-        match character {
-            '{' => braces += 1,
-            '}' => braces = braces.saturating_sub(1),
-            '[' => brackets += 1,
-            ']' => brackets = brackets.saturating_sub(1),
-            _ if character == separator && braces == 0 && brackets == 0 => {
-                parts.push(&inner[start..index]);
-                start = index + character.len_utf8();
-            }
+    for item in entries {
+        match item.key.as_str() {
+            "on" => note_on(&mut workflow, item),
+            "concurrency" => note_concurrency(&mut workflow, &item.value),
+            "jobs" => note_jobs(&mut workflow, &item.value),
             _ => {}
         }
     }
-    parts.push(&inner[start..]);
-    parts
+    workflow
 }
 
-fn parse_flow_seq(value: &str) -> Option<Vec<String>> {
-    let value = value.trim();
-    let inner = value.strip_prefix('[')?.strip_suffix(']')?;
-    let mut items = Vec::new();
-    for part in split_top_level(inner, ',') {
-        let part = part.trim();
-        if !part.is_empty() {
-            items.push(unquote(part).to_string());
-        }
+fn note_on(workflow: &mut Workflow, item: &Entry) {
+    if workflow.on_line.is_none() {
+        workflow.on_line = Some(item.line);
     }
-    Some(items)
-}
-
-fn parse_flow_map(value: &str) -> Option<Vec<(String, String)>> {
-    let value = value.trim();
-    let inner = value.strip_prefix('{')?.strip_suffix('}')?;
-    let mut entries = Vec::new();
-    for part in split_top_level(inner, ',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let (key_raw, raw_value) = split_colon(part)?;
-        let key = normalize_key(key_raw)?;
-        entries.push((key, raw_value.trim().to_string()));
-    }
-    Some(entries)
-}
-
-fn value_has_pull_request(value: &str) -> bool {
-    let value = value.trim();
-    if value.starts_with('[') {
-        return parse_flow_seq(value)
-            .is_some_and(|items| items.iter().any(|item| item == "pull_request"));
-    }
-    if value.starts_with('{') {
-        return parse_flow_map(value)
-            .is_some_and(|entries| entries.iter().any(|(key, _)| key == "pull_request"));
-    }
-    unquote(value) == "pull_request"
-}
-
-fn is_true(value: &str) -> bool {
-    unquote(value).eq_ignore_ascii_case("true")
-}
-
-fn labels_from_inline(value: &str) -> Vec<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Vec::new();
-    }
-    if value.starts_with('[') {
-        return parse_flow_seq(value).unwrap_or_default();
-    }
-    if value.starts_with('{') {
-        return parse_flow_map(value)
-            .and_then(|entries| {
-                entries
-                    .into_iter()
-                    .find(|(key, _)| key == "labels")
-                    .map(|(_, raw)| raw)
-            })
-            .and_then(|raw| parse_flow_seq(&raw))
-            .unwrap_or_default();
-    }
-    vec![unquote(value).to_string()]
-}
-
-fn runs_on_value(raw: &str, labels: &[String]) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        if labels.is_empty() {
-            String::new()
-        } else {
-            format!("[{}]", labels.join(", "))
-        }
-    } else if trimmed.starts_with('[') || trimmed.starts_with('{') {
-        trimmed.to_string()
-    } else {
-        unquote(trimmed).to_string()
-    }
-}
-
-fn line_body(line: &Line) -> String {
-    if let Some(text) = &line.block_text {
-        text.clone()
-    } else {
-        line.value
-            .as_deref()
-            .map(|value| unquote(value).to_string())
-            .unwrap_or_default()
-    }
-}
-
-fn job_mut<'a>(jobs: &'a mut [Job], name: &str) -> Option<&'a mut Job> {
-    jobs.iter_mut().rev().find(|job| job.name == name)
-}
-
-fn note_pull_request(workflow: &mut Workflow, line: &Line) {
-    let key_matches = line.key.as_deref() == Some("pull_request");
-    let list_matches = line.is_list
-        && line
-            .value
-            .as_deref()
-            .is_some_and(|value| unquote(value) == "pull_request");
-    if key_matches || list_matches {
+    if has_pull_request(&item.value) {
         workflow.has_pull_request = true;
     }
 }
 
-fn note_root(workflow: &mut Workflow, line: &Line) {
-    match line.key.as_deref() {
-        Some("on") if !line.is_list => {
-            if workflow.on_line.is_none() {
-                workflow.on_line = Some(line.number);
-            }
-            if line.value.as_deref().is_some_and(value_has_pull_request) {
-                workflow.has_pull_request = true;
-            }
-        }
-        Some("concurrency")
-            if !line.is_list
-                && line
-                    .value
-                    .as_deref()
-                    .is_some_and(|value| flow_flag_is_true(value, "cancel-in-progress")) =>
-        {
-            workflow.cancel_in_progress = true;
-        }
-        _ => {}
+fn has_pull_request(node: &Node) -> bool {
+    match node {
+        Node::Scalar { value, .. } => value == "pull_request",
+        Node::Sequence { items, .. } => items
+            .iter()
+            .any(|item| matches!(item, Node::Scalar { value, .. } if value == "pull_request")),
+        Node::Mapping { entries, .. } => entries.iter().any(|item| item.key == "pull_request"),
     }
 }
 
-fn flow_flag_is_true(value: &str, wanted: &str) -> bool {
-    parse_flow_map(value).is_some_and(|entries| {
-        entries
-            .iter()
-            .any(|(key, raw)| key == wanted && is_true(raw))
-    })
+fn note_concurrency(workflow: &mut Workflow, node: &Node) {
+    let Node::Mapping { entries, .. } = node else {
+        return;
+    };
+    let enabled = entry(entries, "cancel-in-progress").is_some_and(|item| is_true(&item.value));
+    if enabled {
+        workflow.cancel_in_progress = true;
+    }
+}
+
+fn is_true(node: &Node) -> bool {
+    match node {
+        Node::Scalar { value, .. } => value.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
+fn note_jobs(workflow: &mut Workflow, node: &Node) {
+    let Node::Mapping { entries, .. } = node else {
+        return;
+    };
+    for item in entries {
+        if !is_job_name(&item.key) {
+            continue;
+        }
+        let mut job = Job {
+            name: item.key.clone(),
+            line: item.line,
+            display_name: None,
+            runs_on: None,
+            has_timeout_minutes: false,
+            steps_text: String::new(),
+        };
+        if let Node::Mapping { entries, .. } = &item.value {
+            fill_job(&mut job, entries);
+        }
+        workflow.jobs.push(job);
+    }
 }
 
 fn is_job_name(name: &str) -> bool {
@@ -672,165 +482,138 @@ fn is_job_name(name: &str) -> bool {
     chars.all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
 }
 
-fn start_job(workflow: &mut Workflow, line: &Line) {
-    let Some(name) = line.key.clone() else {
-        return;
-    };
-    workflow.jobs.push(Job {
-        name,
-        line: line.number,
-        display_name: None,
-        runs_on: None,
-        has_timeout_minutes: false,
-        steps_text: String::new(),
-    });
+fn fill_job(job: &mut Job, entries: &[Entry]) {
+    if let Some(item) = entry(entries, "runs-on") {
+        job.runs_on = Some(runs_on_from(item.line, &item.value));
+    }
+    if entry(entries, "timeout-minutes").is_some() {
+        job.has_timeout_minutes = true;
+    }
+    if let Some(item) = entry(entries, "name") {
+        if let Some(text) = scalar_text(&item.value) {
+            let text = trim_breaks(text);
+            if !text.is_empty() {
+                job.display_name = Some(text);
+            }
+        }
+    }
+    if let Some(item) = entry(entries, "steps") {
+        job.steps_text = step_runs(&item.value);
+    }
 }
 
-fn note_job_field(job: &mut Job, line: &Line) {
-    match line.key.as_deref() {
-        Some("runs-on") if job.runs_on.is_none() => {
-            let raw = line.value.clone().unwrap_or_default();
-            let labels = labels_from_inline(&raw);
-            let value = runs_on_value(&raw, &labels);
-            job.runs_on = Some(RunsOn {
-                line: line.number,
-                value,
+fn runs_on_from(line: usize, node: &Node) -> RunsOn {
+    match node {
+        Node::Scalar { value, .. } => {
+            let labels = if value.is_empty() {
+                Vec::new()
+            } else {
+                vec![value.clone()]
+            };
+            RunsOn {
+                line,
+                value: value.clone(),
                 labels,
-            });
-        }
-        Some("timeout-minutes") => job.has_timeout_minutes = true,
-        Some("name") if job.display_name.is_none() => {
-            let body = line_body(line);
-            if !body.is_empty() {
-                job.display_name = Some(body);
             }
         }
-        _ => {}
-    }
-}
-
-fn note_runs_on_child(runs_on: &mut RunsOn, line: &Line) {
-    if !runs_on.value.is_empty() {
-        return;
-    }
-    if line.is_list {
-        let body = line_body(line);
-        let label = body.trim();
-        if !label.is_empty() && !label.starts_with('[') && !label.starts_with('{') {
-            runs_on.labels.push(label.to_string());
+        Node::Sequence { items, .. } => {
+            let labels = scalar_list(items);
+            RunsOn {
+                line,
+                value: bracket_list(&labels),
+                labels,
+            }
         }
-        return;
-    }
-    if line.key.as_deref() == Some("labels") {
-        if let Some(value) = line.value.as_deref() {
-            if let Some(labels) = parse_flow_seq(value) {
-                runs_on.labels.extend(labels);
+        Node::Mapping { entries, .. } => {
+            let labels = labels_of(entries);
+            RunsOn {
+                line,
+                value: mapping_runs_on_value(entries, &labels),
+                labels,
             }
         }
     }
 }
 
-fn note_run_step(job: &mut Job, line: &Line) {
-    if line.key.as_deref() != Some("run") {
-        return;
-    }
-    let text = line_body(line);
-    if text.is_empty() {
-        return;
-    }
-    if !job.steps_text.is_empty() {
-        job.steps_text.push('\n');
-    }
-    job.steps_text.push_str(&text);
+fn scalar_list(items: &[Node]) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Node::Scalar { value, .. } if !value.is_empty() => Some(value.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
-fn apply_line(workflow: &mut Workflow, line: &Line, context: &Context) {
-    if context.parent_is_root {
-        note_root(workflow, line);
-    }
-    if context.on_is_root && context.parent_key == "on" {
-        note_pull_request(workflow, line);
-    }
-    if context.concurrency_is_root
-        && context.parent_key == "concurrency"
-        && line.key.as_deref() == Some("cancel-in-progress")
-        && is_true(&line_body(line))
-    {
-        workflow.cancel_in_progress = true;
-    }
-    if context.jobs_are_root
-        && context.parent_key == "jobs"
-        && !line.is_list
-        && line.key.as_deref().is_some_and(is_job_name)
-    {
-        start_job(workflow, line);
-    }
-    if context.parent_is_job {
-        if let Some(name) = &context.job_name {
-            if let Some(job) = job_mut(&mut workflow.jobs, name) {
-                note_job_field(job, line);
-            }
-        }
-    }
-    if context.in_runs_on {
-        if let Some(name) = &context.job_name {
-            if let Some(job) = job_mut(&mut workflow.jobs, name) {
-                if let Some(runs_on) = &mut job.runs_on {
-                    note_runs_on_child(runs_on, line);
-                }
-            }
-        }
-    }
-    if context.in_steps {
-        if let Some(name) = &context.job_name {
-            if let Some(job) = job_mut(&mut workflow.jobs, name) {
-                note_run_step(job, line);
-            }
-        }
-    }
-}
-
-fn interpret(path: &Path, lines: &[Line]) -> Workflow {
-    let mut workflow = Workflow {
-        path: path.to_path_buf(),
-        on_line: None,
-        has_pull_request: false,
-        cancel_in_progress: false,
-        jobs: Vec::new(),
+fn labels_of(entries: &[Entry]) -> Vec<String> {
+    let Some(item) = entry(entries, "labels") else {
+        return Vec::new();
     };
-    let mut stack = vec![Frame {
-        indent: -1,
-        key: String::new(),
-    }];
-    for line in lines {
-        while stack.len() > 1
-            && stack
-                .last()
-                .is_some_and(|frame| frame.indent >= line.indent as isize)
-        {
-            stack.pop();
-        }
-        if stack.is_empty() {
-            stack.push(Frame {
-                indent: -1,
-                key: String::new(),
-            });
-        }
-        let context = context_for(&stack);
-        apply_line(&mut workflow, line, &context);
-        stack.push(Frame {
-            indent: line.indent as isize,
-            key: line.key.clone().unwrap_or_else(|| "-".to_string()),
-        });
+    match &item.value {
+        Node::Scalar { value, .. } if !value.is_empty() => vec![value.clone()],
+        Node::Sequence { items, .. } => scalar_list(items),
+        _ => Vec::new(),
     }
-    for job in &mut workflow.jobs {
-        if let Some(runs_on) = &mut job.runs_on {
-            if runs_on.value.is_empty() && !runs_on.labels.is_empty() {
-                runs_on.value = format!("[{}]", runs_on.labels.join(", "));
-            }
+}
+
+fn mapping_runs_on_value(entries: &[Entry], labels: &[String]) -> String {
+    let group = entry(entries, "group").and_then(|item| match &item.value {
+        Node::Scalar { value, .. } if !value.is_empty() => Some(value.as_str()),
+        _ => None,
+    });
+    let labels_are_list =
+        entry(entries, "labels").is_some_and(|item| matches!(item.value, Node::Sequence { .. }));
+    let labels_text = if labels.is_empty() {
+        None
+    } else if labels_are_list || labels.len() != 1 {
+        Some(bracket_list(labels))
+    } else {
+        Some(labels[0].clone())
+    };
+    match (group, labels_text) {
+        (Some(group), Some(labels)) => format!("{{group: {group}, labels: {labels}}}"),
+        (Some(group), None) => format!("{{group: {group}}}"),
+        (None, Some(labels)) => labels,
+        (None, None) => "{}".to_string(),
+    }
+}
+
+fn bracket_list(labels: &[String]) -> String {
+    format!("[{}]", labels.join(", "))
+}
+
+fn step_runs(node: &Node) -> String {
+    let Node::Sequence { items, .. } = node else {
+        return String::new();
+    };
+    let mut runs = Vec::new();
+    for item in items {
+        let Node::Mapping { entries, .. } = item else {
+            continue;
+        };
+        let Some(run) = entry(entries, "run") else {
+            continue;
+        };
+        let Some(text) = scalar_text(&run.value) else {
+            continue;
+        };
+        let text = trim_breaks(text);
+        if !text.is_empty() {
+            runs.push(text);
         }
     }
-    workflow
+    runs.join("\n")
+}
+
+fn scalar_text(node: &Node) -> Option<&str> {
+    match node {
+        Node::Scalar { value, .. } => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn trim_breaks(text: &str) -> String {
+    text.trim_end_matches(['\n', '\r']).to_string()
 }
 
 #[cfg(test)]
@@ -855,6 +638,10 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn must_scan(name: &str, text: &str) -> Workflow {
+        scan_yaml(Path::new(name), text).unwrap_or_else(|err| panic!("{name}: {err}"))
     }
 
     #[test]
@@ -952,7 +739,7 @@ jobs:
     steps:
       - run: cargo test
 "#;
-        let workflow = scan_yaml(Path::new("lint-like.yml"), fixture);
+        let workflow = must_scan("lint-like.yml", fixture);
         assert_eq!(workflow.on_line, Some(5));
         assert!(workflow.has_pull_request);
         assert!(!workflow.cancel_in_progress);
@@ -985,8 +772,8 @@ jobs:
 
     #[test]
     fn quoted_and_block_runs_on_lists() {
-        let quoted = scan_yaml(
-            Path::new("quoted.yml"),
+        let quoted = must_scan(
+            "quoted.yml",
             "jobs:\n  lint:\n    runs-on: [\"self-hosted\", \"macos\"]\n",
         );
         let runs_on = quoted.jobs[0].runs_on.as_ref().unwrap();
@@ -996,8 +783,8 @@ jobs:
             vec!["self-hosted".to_string(), "macos".to_string()]
         );
 
-        let blocked = scan_yaml(
-            Path::new("block.yml"),
+        let blocked = must_scan(
+            "block.yml",
             r#"jobs:
   lint:
     runs-on:
@@ -1023,47 +810,288 @@ jobs:
 
     #[test]
     fn inline_triggers_and_concurrency() {
-        let pull_request = scan_yaml(Path::new("on.yml"), "on: [push, pull_request]\n");
+        let pull_request = must_scan("on.yml", "on: [push, pull_request]\n");
         assert_eq!(pull_request.on_line, Some(1));
         assert!(pull_request.has_pull_request);
         assert!(!pull_request.cancel_in_progress);
 
-        let other = scan_yaml(Path::new("on.yml"), "on: [push, pull_request_target]\n");
+        let other = must_scan("on.yml", "on: [push, pull_request_target]\n");
         assert!(!other.has_pull_request);
 
-        let scalar = scan_yaml(Path::new("on.yml"), "on: pull_request\n");
+        let scalar = must_scan("on.yml", "on: pull_request\n");
+        assert_eq!(scalar.on_line, Some(1));
         assert!(scalar.has_pull_request);
 
-        let mapping = scan_yaml(
-            Path::new("on.yml"),
+        let mapping = must_scan(
+            "on.yml",
             "on: {push: null, pull_request: {types: [opened]}}\nconcurrency: {group: ci, cancel-in-progress: true}\n",
         );
+        assert_eq!(mapping.on_line, Some(1));
         assert!(mapping.has_pull_request);
         assert!(mapping.cancel_in_progress);
     }
 
     #[test]
-    fn unknown_structure_is_skipped() {
-        let samples = [
-            "",
-            "::::\n{{\n",
-            "jobs: [\n",
-            "jobs:\n  - just-a-list\n",
-            "\tjobs:\n\t\tlint:\n",
-            "on: {{{{pull_request:\n",
-            "jobs:\n  good:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n  :::\n    not: [valid\n",
-        ];
-        for text in samples {
-            let workflow = scan_yaml(Path::new("odd.yml"), text);
-            let _ = (
-                workflow.on_line,
-                workflow.has_pull_request,
-                workflow.cancel_in_progress,
-                workflow.jobs.len(),
-            );
-        }
-        let workflow = scan_yaml(
-            Path::new("odd.yml"),
+    fn flow_jobs_keep_key_lines() {
+        let inline = must_scan("flow.yml", "jobs: {lint: {runs-on: macos-latest}}\n");
+        assert_eq!(inline.jobs.len(), 1);
+        assert_eq!(inline.jobs[0].name, "lint");
+        assert_eq!(inline.jobs[0].line, 1);
+        let runs_on = inline.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(runs_on.line, 1);
+        assert_eq!(runs_on.value, "macos-latest");
+        assert_eq!(runs_on.labels, vec!["macos-latest".to_string()]);
+
+        let split = must_scan(
+            "flow.yml",
+            "jobs: {\n  lint: {\n    runs-on: macos-latest\n  }\n}\n",
+        );
+        assert_eq!(split.jobs[0].line, 2);
+        assert_eq!(split.jobs[0].runs_on.as_ref().unwrap().line, 3);
+        assert_eq!(
+            split.jobs[0].runs_on.as_ref().unwrap().value,
+            "macos-latest"
+        );
+    }
+
+    #[test]
+    fn trigger_forms_keep_key_lines() {
+        let sequence = must_scan("on.yml", "on: [push, pull_request]\n");
+        assert_eq!(sequence.on_line, Some(1));
+        assert!(sequence.has_pull_request);
+
+        let quoted = must_scan("on.yml", "on: [\"push\", \"pull_request\"]\n");
+        assert_eq!(quoted.on_line, Some(1));
+        assert!(quoted.has_pull_request);
+
+        let scalar = must_scan("on.yml", "\u{feff}on: pull_request\n");
+        assert_eq!(scalar.on_line, Some(1));
+        assert!(scalar.has_pull_request);
+
+        let mapping = must_scan("on.yml", "on: {pull_request: {}}\n");
+        assert_eq!(mapping.on_line, Some(1));
+        assert!(mapping.has_pull_request);
+        assert!(!mapping.cancel_in_progress);
+
+        let disabled = must_scan(
+            "on.yml",
+            "on: {pull_request: {}}\nconcurrency: {cancel-in-progress: false}\n",
+        );
+        assert!(disabled.has_pull_request);
+        assert!(!disabled.cancel_in_progress);
+
+        let quoted_true = must_scan(
+            "on.yml",
+            "on: pull_request\nconcurrency:\n  cancel-in-progress: \"true\"\n",
+        );
+        assert_eq!(quoted_true.on_line, Some(1));
+        assert!(quoted_true.cancel_in_progress);
+    }
+
+    #[test]
+    fn quoted_keys_and_values_keep_lines() {
+        let workflow = must_scan(
+            "quoted.yml",
+            "on: \"pull_request\"\njobs:\n  \"lint\":\n    \"runs-on\": \"macos-latest\"\n    steps:\n      - run: \"cargo fmt --check\"\n",
+        );
+        assert_eq!(workflow.on_line, Some(1));
+        assert!(workflow.has_pull_request);
+        assert_eq!(workflow.jobs[0].name, "lint");
+        assert_eq!(workflow.jobs[0].line, 3);
+        let runs_on = workflow.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(runs_on.line, 4);
+        assert_eq!(runs_on.value, "macos-latest");
+        assert_eq!(runs_on.labels, vec!["macos-latest".to_string()]);
+        assert_eq!(workflow.jobs[0].steps_text, "cargo fmt --check");
+
+        let single = must_scan(
+            "quoted.yml",
+            "jobs:\n  'lint':\n    runs-on: 'windows-latest'\n    steps:\n      - 'run': 'cargo test'\n",
+        );
+        assert_eq!(single.jobs[0].line, 2);
+        assert_eq!(single.jobs[0].runs_on.as_ref().unwrap().line, 3);
+        assert_eq!(
+            single.jobs[0].runs_on.as_ref().unwrap().value,
+            "windows-latest"
+        );
+        assert_eq!(single.jobs[0].steps_text, "cargo test");
+    }
+
+    #[test]
+    fn runs_on_scalar_list_and_map_keep_lines() {
+        let scalar = must_scan("runs.yml", "jobs:\n  test:\n    runs-on: ubuntu-latest\n");
+        let scalar_runs = scalar.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(scalar.jobs[0].line, 2);
+        assert_eq!(scalar_runs.line, 3);
+        assert_eq!(scalar_runs.value, "ubuntu-latest");
+        assert_eq!(scalar_runs.labels, vec!["ubuntu-latest".to_string()]);
+
+        let flow_list = must_scan(
+            "runs.yml",
+            "jobs:\n  lint:\n    runs-on: [self-hosted, macos]\n",
+        );
+        let flow_runs = flow_list.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(flow_runs.line, 3);
+        assert_eq!(flow_runs.value, "[self-hosted, macos]");
+        assert_eq!(
+            flow_runs.labels,
+            vec!["self-hosted".to_string(), "macos".to_string()]
+        );
+
+        let flow_map = must_scan(
+            "runs.yml",
+            "jobs:\n  lint:\n    runs-on: {group: large, labels: [self-hosted, macos]}\n",
+        );
+        let map_runs = flow_map.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(flow_map.jobs[0].line, 2);
+        assert_eq!(map_runs.line, 3);
+        assert_eq!(
+            map_runs.value,
+            "{group: large, labels: [self-hosted, macos]}"
+        );
+        assert_eq!(
+            map_runs.labels,
+            vec!["self-hosted".to_string(), "macos".to_string()]
+        );
+
+        let block_map = must_scan(
+            "runs.yml",
+            "jobs:\n  lint:\n    runs-on:\n      group: large\n      labels:\n        - self-hosted\n        - windows\n",
+        );
+        let block_runs = block_map.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(block_runs.line, 3);
+        assert_eq!(
+            block_runs.value,
+            "{group: large, labels: [self-hosted, windows]}"
+        );
+        assert_eq!(
+            block_runs.labels,
+            vec!["self-hosted".to_string(), "windows".to_string()]
+        );
+
+        let label_scalar = must_scan(
+            "runs.yml",
+            "jobs:\n  lint:\n    runs-on: {group: large, labels: macos-latest}\n",
+        );
+        let label_runs = label_scalar.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(label_runs.line, 3);
+        assert_eq!(label_runs.value, "{group: large, labels: macos-latest}");
+        assert_eq!(label_runs.labels, vec!["macos-latest".to_string()]);
+
+        let group_only = must_scan("runs.yml", "jobs:\n  test:\n    runs-on: {group: large}\n");
+        let group_runs = group_only.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(group_runs.line, 3);
+        assert_eq!(group_runs.value, "{group: large}");
+        assert!(group_runs.labels.is_empty());
+    }
+
+    #[test]
+    fn multiline_run_keeps_script_lines() {
+        let workflow = must_scan(
+            "run.yml",
+            "jobs:\n  lint:\n    steps:\n      - run: |\n          echo one\n          echo two\n      - run: cargo fmt --check\n",
+        );
+        assert_eq!(workflow.jobs[0].line, 2);
+        assert_eq!(
+            workflow.jobs[0].steps_text,
+            "echo one\necho two\ncargo fmt --check"
+        );
+    }
+
+    #[test]
+    fn anchors_and_merge_keys_keep_source_lines() {
+        let overridden = must_scan(
+            "anchor.yml",
+            "defaults: &defaults\n  runs-on: ubuntu-latest\n  timeout-minutes: 10\n  steps:\n    - run: cargo test\non: pull_request\njobs:\n  lint:\n    <<: *defaults\n    runs-on: macos-latest\n    steps:\n      - run: cargo clippy -- -D warnings\n  test:\n    <<: *defaults\n",
+        );
+        assert_eq!(overridden.on_line, Some(6));
+        assert!(overridden.has_pull_request);
+        assert!(!overridden.cancel_in_progress);
+        assert_eq!(overridden.jobs.len(), 2);
+
+        let lint = &overridden.jobs[0];
+        assert_eq!(lint.name, "lint");
+        assert_eq!(lint.line, 8);
+        assert!(lint.has_timeout_minutes);
+        let lint_runs = lint.runs_on.as_ref().unwrap();
+        assert_eq!(lint_runs.line, 10);
+        assert_eq!(lint_runs.value, "macos-latest");
+        assert_eq!(lint_runs.labels, vec!["macos-latest".to_string()]);
+        assert_eq!(lint.steps_text, "cargo clippy -- -D warnings");
+
+        let test = &overridden.jobs[1];
+        assert_eq!(test.name, "test");
+        assert_eq!(test.line, 13);
+        assert!(test.has_timeout_minutes);
+        let test_runs = test.runs_on.as_ref().unwrap();
+        assert_eq!(test_runs.line, 2);
+        assert_eq!(test_runs.value, "ubuntu-latest");
+        assert_eq!(test.steps_text, "cargo test");
+
+        let inherited = must_scan(
+            "anchor.yml",
+            "defaults: &defaults\n  runs-on: macos-latest\n  steps:\n    - run: |\n        cargo fmt --check\njobs:\n  lint:\n    <<: *defaults\n",
+        );
+        assert_eq!(inherited.jobs[0].line, 7);
+        let runs_on = inherited.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(runs_on.line, 2);
+        assert_eq!(runs_on.value, "macos-latest");
+        assert_eq!(inherited.jobs[0].steps_text, "cargo fmt --check");
+        assert!(!inherited.jobs[0].has_timeout_minutes);
+
+        let explicit_first = must_scan(
+            "anchor.yml",
+            "defaults: &defaults\n  runs-on: ubuntu-latest\njobs:\n  lint:\n    runs-on: windows-latest\n    <<: *defaults\n",
+        );
+        let runs_on = explicit_first.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(explicit_first.jobs[0].line, 4);
+        assert_eq!(runs_on.line, 5);
+        assert_eq!(runs_on.value, "windows-latest");
+
+        let sequence = must_scan(
+            "anchor.yml",
+            "linux: &linux\n  runs-on: ubuntu-latest\n  timeout-minutes: 5\nextra: &extra\n  steps:\n    - run: cargo test\njobs:\n  test:\n    <<: [*linux, *extra]\n",
+        );
+        assert_eq!(sequence.jobs[0].line, 8);
+        assert!(sequence.jobs[0].has_timeout_minutes);
+        assert_eq!(sequence.jobs[0].runs_on.as_ref().unwrap().line, 2);
+        assert_eq!(
+            sequence.jobs[0].runs_on.as_ref().unwrap().value,
+            "ubuntu-latest"
+        );
+        assert_eq!(sequence.jobs[0].steps_text, "cargo test");
+
+        let earlier_wins = must_scan(
+            "anchor.yml",
+            "first: &first\n  runs-on: macos-latest\nsecond: &second\n  runs-on: ubuntu-latest\njobs:\n  lint:\n    <<: [*first, *second]\n",
+        );
+        let runs_on = earlier_wins.jobs[0].runs_on.as_ref().unwrap();
+        assert_eq!(earlier_wins.jobs[0].line, 6);
+        assert_eq!(runs_on.line, 2);
+        assert_eq!(runs_on.value, "macos-latest");
+
+        let named = must_scan(
+            "anchor.yml",
+            "defaults: &defaults\n  name: clippy\n  runs-on: macos-latest\n  timeout-minutes: 5\njobs:\n  build:\n    <<: *defaults\n",
+        );
+        assert_eq!(named.jobs[0].name, "build");
+        assert_eq!(named.jobs[0].line, 6);
+        assert_eq!(named.jobs[0].display_name.as_deref(), Some("clippy"));
+        assert_eq!(named.jobs[0].runs_on.as_ref().unwrap().line, 3);
+        assert!(named.jobs[0].has_timeout_minutes);
+    }
+
+    #[test]
+    fn odd_but_valid_yaml_returns_a_workflow() {
+        let empty = must_scan("odd.yml", "");
+        assert!(empty.jobs.is_empty());
+        assert_eq!(empty.on_line, None);
+
+        let listed = must_scan("odd.yml", "jobs:\n  - just-a-list\n");
+        assert!(listed.jobs.is_empty());
+
+        let workflow = must_scan(
+            "odd.yml",
             "jobs:\n  good:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n  :::\n",
         );
         assert_eq!(workflow.jobs.len(), 1);
@@ -1073,6 +1101,70 @@ jobs:
             "ubuntu-latest"
         );
         assert_eq!(workflow.jobs[0].steps_text, "echo ok");
+    }
+
+    #[test]
+    fn invalid_yaml_reports_line_without_content() {
+        let cases = [
+            ("broken-colons.yml", "::::\n{{\n", 3),
+            ("broken-flow.yml", "jobs: [\n", 2),
+            ("broken-tabs.yml", "\tjobs:\n\t\tlint:\n", 2),
+            ("broken-braces.yml", "on: {{{{pull_request:\n", 2),
+            ("broken-alias.yml", "a: &a\n  b: *a\n", 2),
+            (
+                "broken-missing.yml",
+                "jobs:\n  lint:\n    <<: *missing\n",
+                3,
+            ),
+        ];
+        for (name, text, line) in cases {
+            let err = scan_yaml(Path::new(name), text).expect_err(name);
+            assert_eq!(err.path, Path::new(name), "{name}");
+            assert_eq!(
+                err.to_string(),
+                format!("line {line}: invalid YAML"),
+                "{name}"
+            );
+            assert!(!err.to_string().contains("pull_request"), "{name}: {err}");
+            assert!(!err.to_string().contains("jobs"), "{name}: {err}");
+            assert!(!err.to_string().contains("lint"), "{name}: {err}");
+            assert!(!err.to_string().contains("missing"), "{name}: {err}");
+            assert!(!err.to_string().contains('*'), "{name}: {err}");
+        }
+
+        let dir = scratch("invalid-yaml");
+        let secret = "SECRET_TOKEN_XYZ";
+        fs::write(dir.join("ok.yml"), "name: Ok\n").unwrap();
+        fs::write(
+            dir.join("broken.yml"),
+            format!("name: Demo\njobs: [\n  {secret}\n"),
+        )
+        .unwrap();
+        let err = scan_dir(&dir).unwrap_err();
+        assert_eq!(err.path, dir.join("broken.yml"));
+        assert_eq!(err.to_string(), "line 4: invalid YAML");
+        assert!(!err.to_string().contains(secret), "{err}");
+    }
+
+    #[test]
+    fn arbitrary_text_does_not_panic() {
+        let samples = [
+            "",
+            "jobs:\n  - just-a-list\n",
+            "jobs:\n  good:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n  :::\n",
+            "::::\n{{\n",
+            "jobs: [\n",
+            "\tjobs:\n\t\tlint:\n",
+            "on: {{{{pull_request:\n",
+            "\0\0\0",
+            "\"unterminated",
+            "a: &a\n  b: *a\n",
+            "jobs:\n  lint:\n    <<: *missing\n",
+            &"[".repeat(64),
+        ];
+        for text in samples {
+            let _ = scan_yaml(Path::new("odd.yml"), text);
+        }
     }
 
     #[test]

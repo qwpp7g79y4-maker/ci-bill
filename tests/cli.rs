@@ -150,6 +150,40 @@ fn sample_usage_exits_0() {
 }
 
 #[test]
+fn invalid_workflow_yaml_exits_2_without_content() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("invalid-workflow-yaml");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let secret = "SECRET_TOKEN_XYZ";
+    std::fs::write(
+        dir.join("broken.yml"),
+        format!("name: Demo\njobs: [\n  {secret}\n"),
+    )
+    .unwrap();
+
+    let output = run(&[
+        "report",
+        "--usage",
+        "samples/usage-sample.csv",
+        "--workflows",
+        dir.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let err = stderr(&output);
+    assert!(err.contains("broken.yml"), "{err}");
+    assert!(err.contains("line 4"), "{err}");
+    assert!(err.contains("invalid YAML"), "{err}");
+    assert!(!err.contains(secret), "{err}");
+    assert!(!stdout(&output).contains(secret), "{}", stdout(&output));
+}
+
+#[test]
 fn missing_usage_exits_3() {
     let output = run(&["report"]);
     assert_eq!(

@@ -27,7 +27,7 @@ cargo run -- report --usage samples/usage-sample.csv --workflows samples/.github
 - Amounts come from the report's `net_amount`; ci-bill does not apply its own prices.
 - The detailed report is aggregated per day, SKU and workflow path. It has no
   job-level or re-run data, so per-job attribution comes from the YAML only.
-- Block-style YAML only; unusual layouts are skipped, not guessed.
+- Workflow YAML is read in full, including block style, flow style, quotes, anchors, and multiline scripts.
 - Early version, not yet released.
 
 ## Exit codes
