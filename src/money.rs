@@ -262,7 +262,7 @@ pub fn percent_fixed(net: Micros, total: Micros, digits: u32) -> String {
     format_fixed(div_half_away(num, den), digits as usize)
 }
 
-fn div_half_away(num: i128, den: i128) -> i128 {
+pub(crate) fn div_half_away(num: i128, den: i128) -> i128 {
     let quot = num / den;
     let rem = num % den;
     if rem != 0 && rem.abs() * 2 >= den.abs() {

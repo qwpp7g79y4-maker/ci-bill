@@ -1,0 +1,47 @@
+Actions runner prices
+Retrieved: 2026-10-17
+Effective from: 2026-01-01
+Currency: USD per minute
+Sources:
+  https://docs.github.com/en/billing/reference/actions-runner-pricing
+  https://docs.github.com/en/billing/reference/product-and-sku-names
+  https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+  https://docs.github.com/en/actions/reference/runners/larger-runners
+
+SKU                               USD/min  Billed on public
+actions_linux                    0.006000  no
+actions_linux_16_core            0.042000  yes
+actions_linux_16_core_arm        0.026000  yes
+actions_linux_2_core_advanced    0.006000  yes
+actions_linux_2_core_arm         0.005000  yes
+actions_linux_32_core            0.082000  yes
+actions_linux_32_core_arm        0.050000  yes
+actions_linux_4_core             0.012000  yes
+actions_linux_4_core_arm         0.008000  yes
+actions_linux_4_core_gpu         0.052000  yes
+actions_linux_64_core            0.162000  yes
+actions_linux_64_core_arm        0.098000  yes
+actions_linux_8_core             0.022000  yes
+actions_linux_8_core_arm         0.014000  yes
+actions_linux_96_core            0.252000  yes
+actions_linux_arm                0.005000  no
+actions_linux_slim               0.002000  no
+actions_macos                    0.062000  no
+actions_macos_l                  0.077000  yes
+actions_macos_xl                 0.102000  yes
+actions_windows                  0.010000  no
+actions_windows_16_core          0.082000  yes
+actions_windows_16_core_arm      0.050000  yes
+actions_windows_2_core_arm       0.008000  yes
+actions_windows_32_core          0.162000  yes
+actions_windows_32_core_arm      0.098000  yes
+actions_windows_4_core           0.022000  yes
+actions_windows_4_core_arm       0.014000  yes
+actions_windows_4_core_gpu       0.102000  yes
+actions_windows_64_core          0.322000  yes
+actions_windows_64_core_arm      0.194000  yes
+actions_windows_8_core           0.042000  yes
+actions_windows_8_core_arm       0.026000  yes
+actions_windows_96_core          0.552000  yes
+actions_windows_arm              0.010000  no
+self_hosted                      0.000000  no

@@ -1,6 +1,7 @@
 mod api;
 mod findings;
 mod money;
+mod prices;
 mod rank;
 mod report;
 mod usage;
@@ -30,6 +31,23 @@ fn main() -> ExitCode {
                 top,
                 json,
                 budget,
+            ),
+            Command::Prices {
+                json,
+                runner_map,
+                label,
+                sku,
+                usage,
+                repository,
+                workflow,
+            } => show_prices(
+                json,
+                runner_map.as_deref(),
+                label.as_deref(),
+                sku.as_deref(),
+                usage.as_deref(),
+                repository.as_deref(),
+                workflow.as_deref(),
             ),
         },
         Err(err) => usage_exit(err),
@@ -163,6 +181,28 @@ fn parse_budget(raw: &str) -> Result<Micros, String> {
     }
 }
 
+fn show_prices(
+    json: bool,
+    runner_map: Option<&Path>,
+    label: Option<&str>,
+    sku: Option<&str>,
+    usage: Option<&Path>,
+    repository: Option<&str>,
+    workflow: Option<&str>,
+) -> ExitCode {
+    match prices::render(json, runner_map, label, sku, usage, repository, workflow) {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            let code = err.exit_code();
+            eprintln!("ci-bill: {err}");
+            ExitCode::from(code)
+        }
+    }
+}
+
 /// Rank workflow costs from a GitHub detailed usage report.
 #[derive(Debug, Parser)]
 #[command(name = "ci-bill", version, about)]
@@ -199,5 +239,29 @@ enum Command {
             allow_hyphen_values = true
         )]
         budget: Option<Micros>,
+    },
+    /// Show Actions runner prices and the minute rate for a label or SKU.
+    Prices {
+        /// Print one JSON object instead of the text table.
+        #[arg(long)]
+        json: bool,
+        /// CSV of `label,sku` rows. Matching labels use this SKU instead of the built-in map.
+        #[arg(long, value_name = "CSV")]
+        runner_map: Option<PathBuf>,
+        /// Runner label or list, for example `ubuntu-latest` or `[self-hosted, macos]`.
+        #[arg(long, value_name = "LABEL")]
+        label: Option<String>,
+        /// Actions SKU. With `--label`, it must be the SKU that label resolves to.
+        #[arg(long, value_name = "SKU")]
+        sku: Option<String>,
+        /// Detailed usage report. Own rows for the workflow and SKU replace the table rate.
+        #[arg(long, value_name = "CSV")]
+        usage: Option<PathBuf>,
+        /// Repository (`owner/repo`) that owns the usage rows.
+        #[arg(long, value_name = "OWNER/REPO")]
+        repository: Option<String>,
+        /// Workflow path inside the usage report.
+        #[arg(long, value_name = "PATH")]
+        workflow: Option<String>,
     },
 }

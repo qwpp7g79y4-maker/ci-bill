@@ -1,0 +1,228 @@
+{
+  "retrieved": "2026-10-17",
+  "effective_from": "2026-01-01",
+  "sources": [
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://docs.github.com/en/billing/reference/product-and-sku-names",
+    "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+    "https://docs.github.com/en/actions/reference/runners/larger-runners"
+  ],
+  "skus": [
+    {
+      "sku": "actions_linux",
+      "docs_sku": "actions_linux",
+      "usd_per_minute": "0.006",
+      "billed_on_public": false
+    },
+    {
+      "sku": "actions_linux_16_core",
+      "docs_sku": "linux_16_core",
+      "usd_per_minute": "0.042",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_16_core_arm",
+      "docs_sku": "linux_16_core_arm",
+      "usd_per_minute": "0.026",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_2_core_advanced",
+      "docs_sku": "linux_2_core_advanced",
+      "usd_per_minute": "0.006",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_2_core_arm",
+      "docs_sku": "linux_2_core_arm",
+      "usd_per_minute": "0.005",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_32_core",
+      "docs_sku": "linux_32_core",
+      "usd_per_minute": "0.082",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_32_core_arm",
+      "docs_sku": "linux_32_core_arm",
+      "usd_per_minute": "0.050",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_4_core",
+      "docs_sku": "linux_4_core",
+      "usd_per_minute": "0.012",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_4_core_arm",
+      "docs_sku": "linux_4_core_arm",
+      "usd_per_minute": "0.008",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_4_core_gpu",
+      "docs_sku": "linux_4_core_gpu",
+      "usd_per_minute": "0.052",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_64_core",
+      "docs_sku": "linux_64_core",
+      "usd_per_minute": "0.162",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_64_core_arm",
+      "docs_sku": "linux_64_core_arm",
+      "usd_per_minute": "0.098",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_8_core",
+      "docs_sku": "linux_8_core",
+      "usd_per_minute": "0.022",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_8_core_arm",
+      "docs_sku": "linux_8_core_arm",
+      "usd_per_minute": "0.014",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_96_core",
+      "docs_sku": "linux_96_core",
+      "usd_per_minute": "0.252",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_linux_arm",
+      "docs_sku": "actions_linux_arm",
+      "usd_per_minute": "0.005",
+      "billed_on_public": false
+    },
+    {
+      "sku": "actions_linux_slim",
+      "docs_sku": "actions_linux_slim",
+      "usd_per_minute": "0.002",
+      "billed_on_public": false
+    },
+    {
+      "sku": "actions_macos",
+      "docs_sku": "actions_macos",
+      "usd_per_minute": "0.062",
+      "billed_on_public": false
+    },
+    {
+      "sku": "actions_macos_l",
+      "docs_sku": "macos_l",
+      "usd_per_minute": "0.077",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_macos_xl",
+      "docs_sku": "macos_xl",
+      "usd_per_minute": "0.102",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows",
+      "docs_sku": "actions_windows",
+      "usd_per_minute": "0.010",
+      "billed_on_public": false
+    },
+    {
+      "sku": "actions_windows_16_core",
+      "docs_sku": "windows_16_core",
+      "usd_per_minute": "0.082",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_16_core_arm",
+      "docs_sku": "windows_16_core_arm",
+      "usd_per_minute": "0.050",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_2_core_arm",
+      "docs_sku": "windows_2_core_arm",
+      "usd_per_minute": "0.008",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_32_core",
+      "docs_sku": "windows_32_core",
+      "usd_per_minute": "0.162",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_32_core_arm",
+      "docs_sku": "windows_32_core_arm",
+      "usd_per_minute": "0.098",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_4_core",
+      "docs_sku": "windows_4_core",
+      "usd_per_minute": "0.022",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_4_core_arm",
+      "docs_sku": "windows_4_core_arm",
+      "usd_per_minute": "0.014",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_4_core_gpu",
+      "docs_sku": "windows_4_core_gpu",
+      "usd_per_minute": "0.102",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_64_core",
+      "docs_sku": "windows_64_core",
+      "usd_per_minute": "0.322",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_64_core_arm",
+      "docs_sku": "windows_64_core_arm",
+      "usd_per_minute": "0.194",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_8_core",
+      "docs_sku": "windows_8_core",
+      "usd_per_minute": "0.042",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_8_core_arm",
+      "docs_sku": "windows_8_core_arm",
+      "usd_per_minute": "0.026",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_96_core",
+      "docs_sku": "windows_96_core",
+      "usd_per_minute": "0.552",
+      "billed_on_public": true
+    },
+    {
+      "sku": "actions_windows_arm",
+      "docs_sku": "actions_windows_arm",
+      "usd_per_minute": "0.010",
+      "billed_on_public": false
+    },
+    {
+      "sku": "self_hosted",
+      "docs_sku": "self_hosted",
+      "usd_per_minute": "0",
+      "billed_on_public": false
+    }
+  ]
+}

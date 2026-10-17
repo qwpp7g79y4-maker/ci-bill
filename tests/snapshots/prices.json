@@ -1,0 +1,195 @@
+{
+  "currency": "USD",
+  "effective_from": "2026-01-01",
+  "retrieved": "2026-10-17",
+  "schema_version": 1,
+  "skus": [
+    {
+      "billed_on_public": false,
+      "sku": "actions_linux",
+      "usd_per_minute": "0.006000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_16_core",
+      "usd_per_minute": "0.042000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_16_core_arm",
+      "usd_per_minute": "0.026000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_2_core_advanced",
+      "usd_per_minute": "0.006000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_2_core_arm",
+      "usd_per_minute": "0.005000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_32_core",
+      "usd_per_minute": "0.082000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_32_core_arm",
+      "usd_per_minute": "0.050000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_4_core",
+      "usd_per_minute": "0.012000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_4_core_arm",
+      "usd_per_minute": "0.008000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_4_core_gpu",
+      "usd_per_minute": "0.052000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_64_core",
+      "usd_per_minute": "0.162000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_64_core_arm",
+      "usd_per_minute": "0.098000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_8_core",
+      "usd_per_minute": "0.022000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_8_core_arm",
+      "usd_per_minute": "0.014000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_linux_96_core",
+      "usd_per_minute": "0.252000"
+    },
+    {
+      "billed_on_public": false,
+      "sku": "actions_linux_arm",
+      "usd_per_minute": "0.005000"
+    },
+    {
+      "billed_on_public": false,
+      "sku": "actions_linux_slim",
+      "usd_per_minute": "0.002000"
+    },
+    {
+      "billed_on_public": false,
+      "sku": "actions_macos",
+      "usd_per_minute": "0.062000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_macos_l",
+      "usd_per_minute": "0.077000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_macos_xl",
+      "usd_per_minute": "0.102000"
+    },
+    {
+      "billed_on_public": false,
+      "sku": "actions_windows",
+      "usd_per_minute": "0.010000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_16_core",
+      "usd_per_minute": "0.082000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_16_core_arm",
+      "usd_per_minute": "0.050000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_2_core_arm",
+      "usd_per_minute": "0.008000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_32_core",
+      "usd_per_minute": "0.162000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_32_core_arm",
+      "usd_per_minute": "0.098000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_4_core",
+      "usd_per_minute": "0.022000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_4_core_arm",
+      "usd_per_minute": "0.014000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_4_core_gpu",
+      "usd_per_minute": "0.102000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_64_core",
+      "usd_per_minute": "0.322000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_64_core_arm",
+      "usd_per_minute": "0.194000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_8_core",
+      "usd_per_minute": "0.042000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_8_core_arm",
+      "usd_per_minute": "0.026000"
+    },
+    {
+      "billed_on_public": true,
+      "sku": "actions_windows_96_core",
+      "usd_per_minute": "0.552000"
+    },
+    {
+      "billed_on_public": false,
+      "sku": "actions_windows_arm",
+      "usd_per_minute": "0.010000"
+    },
+    {
+      "billed_on_public": false,
+      "sku": "self_hosted",
+      "usd_per_minute": "0.000000"
+    }
+  ],
+  "sources": [
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://docs.github.com/en/billing/reference/product-and-sku-names",
+    "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+    "https://docs.github.com/en/actions/reference/runners/larger-runners"
+  ],
+  "unit": "minute"
+}
