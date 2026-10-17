@@ -10,6 +10,8 @@ use crate::money::{DecimalError, Micros};
 /// only when a report prints them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRow {
+    /// 1-based physical line in the CSV file. The header is line 1.
+    pub line: u64,
     pub date: String,
     pub product: String,
     pub sku: String,
@@ -175,6 +177,7 @@ fn parse_row(
     line: u64,
 ) -> Result<UsageRow, UsageError> {
     Ok(UsageRow {
+        line,
         date: field(record, indexes.date, line)?.to_string(),
         product: field(record, indexes.product, line)?.to_string(),
         sku: field(record, indexes.sku, line)?.to_string(),

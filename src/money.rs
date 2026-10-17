@@ -225,6 +225,21 @@ fn parse_coefficient(coefficient: &str) -> Result<(i128, i32), DecimalError> {
     Ok((significand, frac_len))
 }
 
+/// `quantity * unit_price` in micros, rounded half away from zero.
+///
+/// Both factors are already in micros, so the raw product is in 10^-12 dollars.
+/// Dividing by [`Micros::SCALE`] returns micros. A remainder of half a micro
+/// rounds away from zero, the same rule as cent display.
+pub(crate) fn rounded_product(quantity: Micros, unit_price: Micros) -> i128 {
+    let product = i128::from(quantity.0) * i128::from(unit_price.0);
+    div_half_away(product, i128::from(Micros::SCALE))
+}
+
+/// Six digits after the decimal point, same shape as [`Micros::to_decimal_string`].
+pub(crate) fn format_micros(value: i128) -> String {
+    format_fixed(value, 6)
+}
+
 fn format_fixed(value: i128, digits: usize) -> String {
     let neg = value < 0;
     let abs = value.unsigned_abs();
@@ -366,6 +381,29 @@ mod tests {
         assert_eq!(usd("10.125").format_quantity(), "10.125");
         assert_eq!(usd("1.2345").format_quantity(), "1.235");
         assert_eq!(usd("-1.2").format_quantity(), "-1.2");
+    }
+
+    #[test]
+    fn product_118_minutes_at_0_062_is_7_316() {
+        assert_eq!(rounded_product(usd("118"), usd("0.062")), 7_316_000);
+        assert_eq!(
+            format_micros(rounded_product(usd("118"), usd("0.062"))),
+            "7.316000"
+        );
+    }
+
+    #[test]
+    fn product_rounds_half_away_from_zero_before_the_micro() {
+        // 0.5 * 0.000336 = 0.000168 exactly (storage sample row).
+        assert_eq!(rounded_product(usd("0.5"), usd("0.000336")), 168);
+        // 0.5 * 0.000001 = 0.5 micros -> 1 micro.
+        assert_eq!(rounded_product(usd("0.5"), usd("0.000001")), 1);
+        assert_eq!(rounded_product(usd("-0.5"), usd("0.000001")), -1);
+        // 0.1 micro rounds down to 0.
+        assert_eq!(rounded_product(usd("0.1"), usd("0.000001")), 0);
+        assert_eq!(rounded_product(usd("0"), usd("9.99")), 0);
+        assert_eq!(rounded_product(usd("118"), usd("0.080")), 9_440_000);
+        assert_eq!(format_micros(-1), "-0.000001");
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::money;
+use crate::usage::UsageRow;
 use crate::workflow::{Job, Matrix, RunsOn, Workflow};
 
 /// Why a workflow or job was flagged.
@@ -13,6 +15,8 @@ pub enum FindingKind {
     PullRequestConcurrency,
     /// Matrix expands to at least six billed jobs, or an axis length is an expression.
     MatrixJobs,
+    /// A usage row disagrees with quantity * unit price, or with gross - discount.
+    InvoiceMismatch,
 }
 
 impl FindingKind {
@@ -23,6 +27,7 @@ impl FindingKind {
             Self::MissingTimeout => "F2",
             Self::PullRequestConcurrency => "F3",
             Self::MatrixJobs => "F4",
+            Self::InvoiceMismatch => "F9",
         }
     }
 }
@@ -34,6 +39,10 @@ pub struct Finding {
     pub line: usize,
     pub kind: FindingKind,
     pub message: String,
+    /// Set on invoice findings so the row stays on its repository workflow.
+    pub repository: Option<String>,
+    /// Workflow path from the usage row, including `(no workflow)`.
+    pub workflow_path: Option<String>,
 }
 
 const LINT_TOOLS: [&str; 5] = ["lint", "fmt", "clippy", "eslint", "prettier"];
@@ -57,15 +66,95 @@ pub fn findings(workflows: &[Workflow]) -> Vec<Finding> {
             note_job(&mut found, &workflow.path, job);
         }
     }
-    found.sort_by(|left, right| {
-        (&left.path, left.line, left.kind, left.message.as_str()).cmp(&(
-            &right.path,
-            right.line,
-            right.kind,
-            right.message.as_str(),
-        ))
-    });
+    found.sort_by(cmp_finding);
     found
+}
+
+/// Invoice check for every usage row.
+///
+/// `gross` must match `quantity * applied_cost_per_quantity` after that product
+/// is rounded to micros. One micro of slack covers a half-micro tie. `net` must
+/// equal `gross - discount` exactly. The CSV `net` is left unchanged.
+///
+/// One finding per mismatched row. The message names the SKU, the date, and
+/// both sides of each failed comparison.
+pub fn invoice_findings(path: &Path, rows: &[UsageRow]) -> Vec<Finding> {
+    let mut found = Vec::new();
+    for row in rows {
+        let Some(message) = mismatch_message(row) else {
+            continue;
+        };
+        found.push(Finding {
+            path: path.to_path_buf(),
+            line: usize::try_from(row.line).unwrap_or(usize::MAX),
+            kind: FindingKind::InvoiceMismatch,
+            message,
+            repository: Some(row.repository.clone()),
+            workflow_path: Some(row.workflow_path.clone()),
+        });
+    }
+    found
+}
+
+/// YAML findings plus invoice findings, ordered by path, line, kind, and message.
+///
+/// `None` means the workflow directory was not scanned and no row mismatched.
+/// An empty scan stays `Some`, so the report can tell those cases apart.
+pub fn combine(yaml: Option<Vec<Finding>>, invoice: Vec<Finding>) -> Option<Vec<Finding>> {
+    let mut all = match yaml {
+        Some(items) => items,
+        None if invoice.is_empty() => return None,
+        None => Vec::new(),
+    };
+    all.extend(invoice);
+    all.sort_by(cmp_finding);
+    Some(all)
+}
+
+fn cmp_finding(left: &Finding, right: &Finding) -> std::cmp::Ordering {
+    (&left.path, left.line, left.kind, left.message.as_str()).cmp(&(
+        &right.path,
+        right.line,
+        right.kind,
+        right.message.as_str(),
+    ))
+}
+
+/// Absolute slack after the product has been rounded to micros.
+const GROSS_TOLERANCE_MICROS: i128 = 1;
+
+fn mismatch_message(row: &UsageRow) -> Option<String> {
+    let mut parts = Vec::new();
+    let expected_gross = money::rounded_product(row.quantity, row.applied_cost_per_quantity);
+    if (i128::from(row.gross.0) - expected_gross).abs() > GROSS_TOLERANCE_MICROS {
+        parts.push(format!(
+            "gross {} != quantity * applied_cost_per_quantity {}",
+            row.gross.to_decimal_string(),
+            money::format_micros(expected_gross),
+        ));
+    }
+    let expected_net = i128::from(row.gross.0) - i128::from(row.discount.0);
+    if expected_net != i128::from(row.net.0) {
+        parts.push(format!(
+            "net {} != gross - discount {}",
+            row.net.to_decimal_string(),
+            money::format_micros(expected_net),
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "invoice row mismatch: sku {}, date {}, {}",
+        debug_cell(&row.sku),
+        debug_cell(&row.date),
+        parts.join(", ")
+    ))
+}
+
+/// Quoted cell text so an empty SKU or date stays visible.
+fn debug_cell(text: &str) -> String {
+    format!("{text:?}")
 }
 
 fn note_job(found: &mut Vec<Finding>, path: &Path, job: &Job) {
@@ -164,12 +253,15 @@ fn push(found: &mut Vec<Finding>, path: &Path, line: usize, kind: FindingKind, m
         line,
         kind,
         message: message.to_string(),
+        repository: None,
+        workflow_path: None,
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::UsageRow;
     use crate::workflow::{scan_dir, scan_yaml};
     use std::path::Path;
 
@@ -673,5 +765,225 @@ jobs:
         let f2 = of_kind(&found, FindingKind::MissingTimeout);
         assert_eq!(f2.len(), 1, "{found:?}");
         assert_eq!(f2[0].line, 14);
+    }
+
+    fn usd(text: &str) -> crate::money::Micros {
+        crate::money::Micros::parse(text).unwrap()
+    }
+
+    fn usage_row(
+        sku: &str,
+        date: &str,
+        quantity: &str,
+        price: &str,
+        gross: &str,
+        discount: &str,
+        net: &str,
+    ) -> UsageRow {
+        UsageRow {
+            line: 2,
+            date: date.to_string(),
+            product: "actions".to_string(),
+            sku: sku.to_string(),
+            quantity: usd(quantity),
+            unit_type: "minutes".to_string(),
+            applied_cost_per_quantity: usd(price),
+            gross: usd(gross),
+            discount: usd(discount),
+            net: usd(net),
+            username: String::new(),
+            organization: "example-org".to_string(),
+            repository: "example-org/app".to_string(),
+            workflow_path: ".github/workflows/lint.yml".to_string(),
+        }
+    }
+
+    #[test]
+    fn invoice_accepts_118_minutes_at_0_062() {
+        let row = usage_row(
+            "actions_macos",
+            "2026-09-01",
+            "118",
+            "0.062",
+            "7.316",
+            "0",
+            "7.316",
+        );
+        let found = invoice_findings(Path::new("usage.csv"), std::slice::from_ref(&row));
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(row.net, usd("7.316"));
+        assert_eq!(
+            crate::money::rounded_product(row.quantity, row.applied_cost_per_quantity),
+            row.gross.0 as i128
+        );
+    }
+
+    #[test]
+    fn invoice_allows_one_micro_and_flags_two() {
+        let exact = usage_row(
+            "actions_macos",
+            "2026-09-01",
+            "118",
+            "0.062",
+            "7.316",
+            "0",
+            "7.316",
+        );
+        for (gross, expect_finding) in [
+            ("7.315999", false),
+            ("7.316000", false),
+            ("7.316001", false),
+            ("7.315998", true),
+            ("7.316002", true),
+        ] {
+            let mut row = exact.clone();
+            row.gross = usd(gross);
+            row.net = usd(gross);
+            let found = invoice_findings(Path::new("usage.csv"), &[row]);
+            assert_eq!(found.is_empty(), !expect_finding, "{gross} {found:?}");
+            if expect_finding {
+                assert_eq!(found[0].kind.code(), "F9");
+                assert!(
+                    found[0].message.starts_with("invoice row mismatch:"),
+                    "{found:?}"
+                );
+                assert!(
+                    found[0].message.contains("sku \"actions_macos\""),
+                    "{found:?}"
+                );
+                assert!(
+                    found[0].message.contains("date \"2026-09-01\""),
+                    "{found:?}"
+                );
+                assert!(
+                    found[0].message.contains(&format!(
+                        "gross {gross} != quantity * applied_cost_per_quantity 7.316000"
+                    )),
+                    "{found:?}"
+                );
+                assert!(!found[0].message.contains("gross - discount"), "{found:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn invoice_rounds_a_half_micro_before_the_tolerance() {
+        // 0.5 * 0.000001 = 0.5 micros, which rounds to 1 micro (0.000001).
+        let price = "0.000001";
+        for (gross, net, flagged) in [
+            ("0.000000", "0.000000", false),
+            ("0.000001", "0.000001", false),
+            ("0.000002", "0.000002", false),
+            ("0.000003", "0.000003", true),
+            ("-0.000001", "-0.000001", true),
+        ] {
+            let row = usage_row(
+                "actions_storage",
+                "2026-09-02",
+                "0.5",
+                price,
+                gross,
+                "0",
+                net,
+            );
+            let found = invoice_findings(Path::new("usage.csv"), &[row]);
+            assert_eq!(found.is_empty(), !flagged, "{gross} {found:?}");
+        }
+
+        let negative = usage_row(
+            "actions_storage",
+            "2026-09-02",
+            "-0.5",
+            price,
+            "-0.000001",
+            "0",
+            "-0.000001",
+        );
+        assert!(invoice_findings(Path::new("usage.csv"), &[negative]).is_empty());
+    }
+
+    #[test]
+    fn invoice_net_must_equal_gross_minus_discount() {
+        let matched = usage_row(
+            "actions_macos",
+            "2026-09-01",
+            "118",
+            "0.062",
+            "7.316",
+            "1",
+            "6.316",
+        );
+        assert!(invoice_findings(Path::new("usage.csv"), &[matched]).is_empty());
+
+        let off_by_one = usage_row(
+            "actions_macos",
+            "2026-09-01",
+            "118",
+            "0.062",
+            "7.316",
+            "0",
+            "7.315999",
+        );
+        let found = invoice_findings(Path::new("usage.csv"), &[off_by_one]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0]
+                .message
+                .contains("net 7.315999 != gross - discount 7.316000"),
+            "{found:?}"
+        );
+        assert!(!found[0].message.contains("quantity *"), "{found:?}");
+
+        let both = usage_row(
+            "Actions_MacOS",
+            "2026-09-14",
+            "118",
+            "0.080",
+            "7.316",
+            "1",
+            "7.316",
+        );
+        let found = invoice_findings(Path::new("bill.csv"), &[both]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, FindingKind::InvoiceMismatch);
+        assert_eq!(found[0].line, 2);
+        assert_eq!(found[0].path, Path::new("bill.csv"));
+        assert_eq!(found[0].repository.as_deref(), Some("example-org/app"));
+        assert_eq!(
+            found[0].workflow_path.as_deref(),
+            Some(".github/workflows/lint.yml")
+        );
+        assert_eq!(
+            found[0].message,
+            "invoice row mismatch: sku \"Actions_MacOS\", date \"2026-09-14\", gross 7.316000 != quantity * applied_cost_per_quantity 9.440000, net 7.316000 != gross - discount 6.316000"
+        );
+    }
+
+    #[test]
+    fn invoice_keeps_an_empty_sku_and_date() {
+        let row = usage_row("", "", "10", "0.5", "1", "0", "1");
+        let found = invoice_findings(Path::new("usage.csv"), &[row]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("sku \"\""), "{found:?}");
+        assert!(found[0].message.contains("date \"\""), "{found:?}");
+        assert!(
+            found[0]
+                .message
+                .contains("gross 1.000000 != quantity * applied_cost_per_quantity 5.000000"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn sample_usage_has_no_invoice_mismatch() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/usage-sample.csv");
+        let rows = crate::usage::read_usage(&path).unwrap();
+        let found = invoice_findings(&path, &rows);
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(rows[0].line, 2);
+        assert_eq!(rows[0].quantity, usd("118"));
+        assert_eq!(rows[0].applied_cost_per_quantity, usd("0.062"));
+        assert_eq!(rows[0].gross, usd("7.316"));
+        assert_eq!(rows[0].net, usd("7.316"));
     }
 }

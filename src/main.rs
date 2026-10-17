@@ -67,7 +67,7 @@ fn report(
         Some(limit) => &ranking.workflows[..limit.min(ranking.workflows.len())],
         None => ranking.workflows.as_slice(),
     };
-    let found = match workflows {
+    let yaml = match workflows {
         Some(dir) => match workflow::scan_dir(dir) {
             Ok(scanned) => Some(findings::findings(&scanned)),
             Err(err) => {
@@ -77,6 +77,8 @@ fn report(
         },
         None => None,
     };
+    // CSV net stays the total. A mismatched unit price is reported, not applied.
+    let found = findings::combine(yaml, findings::invoice_findings(usage_path, &rows));
     let api = match runs {
         Some(dir) => match api::read_dir(dir) {
             Ok(data) => Some(data),

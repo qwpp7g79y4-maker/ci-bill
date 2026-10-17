@@ -11,8 +11,11 @@ use crate::rank::{Bill, WorkflowTotal};
 /// `bill.total_net` and `bill.total_minutes` are the Actions bill. `workflows`
 /// may already be limited by `--top`; each share is still that workflow's part
 /// of the Actions net. Other products are one line, outside that total.
+/// Each workflow row shows net, gross, and discount, so a storage row whose
+/// net is zero still shows a positive gross.
 /// Findings attach to a workflow when the YAML path ends in
 /// `.github/workflows/<file>` and that suffix matches `workflow_path`.
+/// Invoice findings attach by repository and workflow path instead.
 /// Anything left over is listed under "Workflows without usage".
 pub fn render(workflows: &[WorkflowTotal], bill: &Bill, findings: Option<&[Finding]>) -> String {
     render_report(workflows, bill, findings, None)
@@ -66,6 +69,8 @@ fn render_report(
         &Row {
             name: "Workflow".to_string(),
             net: "Net".to_string(),
+            gross: "Gross".to_string(),
+            discount: "Discount".to_string(),
             minutes: "Minutes".to_string(),
             share: "Share".to_string(),
         },
@@ -211,7 +216,7 @@ fn attach<'a>(workflows: &[WorkflowTotal], findings: Option<&'a [Finding]>) -> A
         for finding in findings {
             if let Some(index) = workflows
                 .iter()
-                .position(|workflow| belongs_to(&workflow.workflow_path, finding))
+                .position(|workflow| belongs_to(workflow, finding))
             {
                 by_workflow[index].push(finding);
             } else {
@@ -238,11 +243,14 @@ fn workflow_key(path: &Path) -> Option<String> {
     Some(format!(".github/workflows/{name}"))
 }
 
-fn belongs_to(workflow_path: &str, finding: &Finding) -> bool {
+fn belongs_to(workflow: &WorkflowTotal, finding: &Finding) -> bool {
+    if let (Some(repository), Some(workflow_path)) = (&finding.repository, &finding.workflow_path) {
+        return workflow.repository == *repository && workflow.workflow_path == *workflow_path;
+    }
     let Some(key) = workflow_key(&finding.path) else {
         return false;
     };
-    workflow_path == key || workflow_path.ends_with(&format!("/{key}"))
+    workflow.workflow_path == key || workflow.workflow_path.ends_with(&format!("/{key}"))
 }
 
 fn workflow_json(
@@ -297,6 +305,8 @@ fn finding_text(finding: &Finding) -> String {
 struct Row {
     name: String,
     net: String,
+    gross: String,
+    discount: String,
     minutes: String,
     share: String,
 }
@@ -305,6 +315,8 @@ struct Row {
 struct Widths {
     name: usize,
     net: usize,
+    gross: usize,
+    discount: usize,
     minutes: usize,
     share: usize,
 }
@@ -321,6 +333,8 @@ fn workflow_rows(workflow: &WorkflowTotal, total_net: Micros) -> Vec<Row> {
     let mut rows = vec![Row {
         name: workflow_label(workflow),
         net: workflow.net.format_cents(),
+        gross: workflow.gross.format_cents(),
+        discount: workflow.discount.format_cents(),
         minutes: workflow.minutes.format_quantity(),
         share: format_share(workflow.net, total_net),
     }];
@@ -328,6 +342,8 @@ fn workflow_rows(workflow: &WorkflowTotal, total_net: Micros) -> Vec<Row> {
         rows.push(Row {
             name: format!("  {}", sku.sku),
             net: sku.net.format_cents(),
+            gross: sku.gross.format_cents(),
+            discount: sku.discount.format_cents(),
             minutes: sku.minutes.format_quantity(),
             share: String::new(),
         });
@@ -339,12 +355,16 @@ fn widths(blocks: &[Vec<Row>]) -> Widths {
     let mut widths = Widths {
         name: "Workflow".len(),
         net: "Net".len(),
+        gross: "Gross".len(),
+        discount: "Discount".len(),
         minutes: "Minutes".len(),
         share: "Share".len(),
     };
     for row in blocks.iter().flatten() {
         widths.name = widths.name.max(row.name.len());
         widths.net = widths.net.max(row.net.len());
+        widths.gross = widths.gross.max(row.gross.len());
+        widths.discount = widths.discount.max(row.discount.len());
         widths.minutes = widths.minutes.max(row.minutes.len());
         widths.share = widths.share.max(row.share.len());
     }
@@ -354,13 +374,17 @@ fn widths(blocks: &[Vec<Row>]) -> Widths {
 fn emit_row(out: &mut String, row: &Row, widths: Widths) {
     let _ = writeln!(
         out,
-        "{:<name_w$}  {:>net_w$}  {:>min_w$}  {:>share_w$}",
+        "{:<name_w$}  {:>net_w$}  {:>gross_w$}  {:>discount_w$}  {:>min_w$}  {:>share_w$}",
         row.name,
         row.net,
+        row.gross,
+        row.discount,
         row.minutes,
         row.share,
         name_w = widths.name,
         net_w = widths.net,
+        gross_w = widths.gross,
+        discount_w = widths.discount,
         min_w = widths.minutes,
         share_w = widths.share,
     );
@@ -618,6 +642,8 @@ mod tests {
             line,
             kind,
             message: message.to_string(),
+            repository: None,
+            workflow_path: None,
         }
     }
 
@@ -693,6 +719,106 @@ mod tests {
         assert!(lint < lint_finding && lint_finding < ci, "{text}");
         assert!(ci < heading && heading < nightly, "{text}");
         assert_eq!(text.matches("lint on macOS").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn storage_row_shows_gross_and_discount_when_net_is_zero() {
+        let storage = WorkflowTotal {
+            repository: "example-org/app".to_string(),
+            workflow_path: "(no workflow)".to_string(),
+            net: usd("0"),
+            gross: usd("0.005040"),
+            discount: usd("0.005040"),
+            minutes: usd("0"),
+            skus: vec![SkuTotal {
+                sku: "actions_storage".to_string(),
+                net: usd("0"),
+                gross: usd("0.005040"),
+                discount: usd("0.005040"),
+                minutes: usd("0"),
+            }],
+        };
+        let mut totals = bill("0", "0");
+        totals.repositories = vec!["example-org/app".to_string()];
+        let text = render(&[storage], &totals, None);
+        assert!(text.contains("Gross"), "{text}");
+        assert!(text.contains("Discount"), "{text}");
+        let storage_line = text
+            .lines()
+            .find(|line| line.contains("actions_storage"))
+            .expect("storage sku");
+        assert!(storage_line.contains("0.00"), "{storage_line}");
+        assert_eq!(storage_line.matches("0.01").count(), 2, "{storage_line}");
+        let workflow_line = text
+            .lines()
+            .find(|line| line.contains("(no workflow)"))
+            .expect("workflow");
+        assert_eq!(workflow_line.matches("0.01").count(), 2, "{workflow_line}");
+        assert!(workflow_line.contains("0.00"), "{workflow_line}");
+        assert!(!text.contains("F9"), "{text}");
+        assert!(!text.contains("invoice row mismatch"), "{text}");
+    }
+
+    #[test]
+    fn invoice_finding_stays_on_its_repository_workflow() {
+        let workflows = vec![
+            WorkflowTotal {
+                repository: "example-org/alpha".to_string(),
+                workflow_path: ".github/workflows/ci.yml".to_string(),
+                net: usd("7.316"),
+                gross: usd("7.316"),
+                discount: Micros::ZERO,
+                minutes: usd("118"),
+                skus: vec![SkuTotal {
+                    sku: "actions_macos".to_string(),
+                    net: usd("7.316"),
+                    gross: usd("7.316"),
+                    discount: Micros::ZERO,
+                    minutes: usd("118"),
+                }],
+            },
+            WorkflowTotal {
+                repository: "example-org/zeta".to_string(),
+                workflow_path: ".github/workflows/ci.yml".to_string(),
+                net: usd("7.316"),
+                gross: usd("7.316"),
+                discount: Micros::ZERO,
+                minutes: usd("118"),
+                skus: vec![SkuTotal {
+                    sku: "actions_macos".to_string(),
+                    net: usd("7.316"),
+                    gross: usd("7.316"),
+                    discount: Micros::ZERO,
+                    minutes: usd("118"),
+                }],
+            },
+        ];
+        let findings = vec![Finding {
+            path: PathBuf::from("usage.csv"),
+            line: 2,
+            kind: FindingKind::InvoiceMismatch,
+            message: "invoice row mismatch: sku \"actions_macos\", date \"2026-09-01\", gross 7.316000 != quantity * applied_cost_per_quantity 9.440000".to_string(),
+            repository: Some("example-org/alpha".to_string()),
+            workflow_path: Some(".github/workflows/ci.yml".to_string()),
+        }];
+        let mut totals = bill("14.632", "236");
+        totals.repositories = vec![
+            "example-org/alpha".to_string(),
+            "example-org/zeta".to_string(),
+        ];
+        let text = render(&workflows, &totals, Some(&findings));
+        let alpha = text
+            .find("example-org/alpha .github/workflows/ci.yml")
+            .expect("alpha");
+        let zeta = text
+            .find("example-org/zeta .github/workflows/ci.yml")
+            .expect("zeta");
+        let f9 = text
+            .find("F9 usage.csv:2: invoice row mismatch")
+            .expect("f9");
+        assert!(alpha < f9 && f9 < zeta, "{text}");
+        assert_eq!(text.matches("invoice row mismatch").count(), 1, "{text}");
+        assert!(!text.contains("Workflows without usage"), "{text}");
     }
 
     #[test]

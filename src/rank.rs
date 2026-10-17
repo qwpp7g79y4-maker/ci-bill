@@ -198,6 +198,7 @@ mod tests {
         gross_amount: &str,
     ) -> UsageRow {
         UsageRow {
+            line: 2,
             date: "2026-09-01".to_string(),
             product: "actions".to_string(),
             sku: sku.to_string(),
