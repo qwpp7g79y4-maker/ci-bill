@@ -1,3 +1,4 @@
+mod findings;
 mod rank;
 mod usage;
 mod workflow;
@@ -40,9 +41,14 @@ fn report(usage_path: &Path, workflows: Option<&Path>, top: Option<usize>) -> Ex
         }
     };
     if let Some(dir) = workflows {
-        if let Err(err) = workflow::scan_dir(dir) {
-            eprintln!("ci-bill: {}: {err}", err.path.display());
-            return ExitCode::from(2);
+        match workflow::scan_dir(dir) {
+            Ok(scanned) => {
+                let _ = findings::findings(&scanned);
+            }
+            Err(err) => {
+                eprintln!("ci-bill: {}: {err}", err.path.display());
+                return ExitCode::from(2);
+            }
         }
     }
     let ranked = rank::rank(&rows, top);
