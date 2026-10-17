@@ -50,7 +50,7 @@ impl std::fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-const EMPTY_WORKFLOW: &str = "(geen workflow)";
+const EMPTY_WORKFLOW: &str = "(no workflow)";
 
 const COLUMNS: [&str; 6] = [
     "sku",
@@ -276,8 +276,8 @@ actions_linux,1,minutes,1,SECRET_CELL_VALUE
         );
         let rows = parse(&csv_text).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].workflow_path, "(geen workflow)");
-        assert_eq!(rows[1].workflow_path, "(geen workflow)");
+        assert_eq!(rows[0].workflow_path, "(no workflow)");
+        assert_eq!(rows[1].workflow_path, "(no workflow)");
         assert_eq!(rows[0].unit_type, "gigabyte-hours");
     }
 
@@ -296,7 +296,7 @@ actions_linux,1,minutes,1,SECRET_CELL_VALUE
         assert_eq!(rows.len(), 150);
         assert_eq!(
             rows.iter()
-                .filter(|row| row.workflow_path == "(geen workflow)")
+                .filter(|row| row.workflow_path == "(no workflow)")
                 .count(),
             30
         );
