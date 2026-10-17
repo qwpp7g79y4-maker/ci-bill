@@ -1,5 +1,6 @@
 mod api;
 mod findings;
+mod job_cost;
 mod money;
 mod prices;
 mod rank;

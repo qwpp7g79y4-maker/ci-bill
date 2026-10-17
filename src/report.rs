@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::api::{linked_workflow_path, ApiData, Job, WorkflowRun, IN_PROGRESS, UNKNOWN_WORKFLOW};
 use crate::findings::Finding;
+use crate::job_cost::bill_job;
 use crate::money::{percent_fixed, Micros};
 use crate::rank::{Bill, WorkflowTotal};
 
@@ -34,10 +35,11 @@ pub fn render(
 /// Text report plus saved Actions runs and jobs.
 ///
 /// Run paths are linked to a CSV workflow path: an `@ref` suffix and an
-/// `owner/repo/` prefix are removed. Finished jobs are listed under "Jobs".
-/// A job with no `completed_at` is listed under "In progress" and is not
-/// included with the finished jobs. A job on the latest attempt that started
-/// before the run started is an inherited copy and costs 0.00.
+/// `owner/repo/` prefix are removed. Finished jobs are listed under "Jobs",
+/// grouped by workflow and sorted by list price. Each job shows billed
+/// minutes and the runner list price. A job with no completion time is
+/// listed under "In progress" and bills nothing. A job on the latest attempt
+/// that started before the run started is an inherited copy and costs 0.00.
 pub fn render_with_runs(
     workflows: &[WorkflowTotal],
     bill: &Bill,
@@ -144,9 +146,11 @@ pub fn render_json(
 /// JSON report plus `workflow_runs` and `in_progress`.
 ///
 /// Finished jobs sit on their run. An in-progress job is only in
-/// `in_progress`, with `counts` false and message "in progress".
-/// `path` is the linked workflow path. An inherited copy has
-/// `inherited_copy` true, `billable` false, and `net_amount` `"0.000000"`.
+/// `in_progress`, with `counts` false, `minutes` 0, and message "in progress".
+/// Each job has `minutes`, `sku`, `list_price`, and `usd_per_minute`.
+/// `list_price` is a 6-decimal USD string. `path` is the linked workflow path.
+/// An inherited copy has `inherited_copy` true, `billable` false,
+/// `minutes` 0, `list_price` `"0.000000"`, and `net_amount` `"0.000000"`.
 pub fn render_json_with_runs(
     workflows: &[WorkflowTotal],
     bill: &Bill,
@@ -619,31 +623,55 @@ fn run_lines(api: &ApiData) -> Vec<String> {
 }
 
 fn counted_lines(api: &ApiData) -> Vec<String> {
-    finished_jobs(api)
-        .into_iter()
-        .map(|job| {
-            let completed = job.completed_at.as_deref().unwrap_or("-");
-            let conclusion = job.conclusion.as_deref().unwrap_or("-");
-            format!(
-                "{}  completed {completed}  {conclusion}{}",
-                job_prefix(api, job),
-                copy_suffix(api, job),
-            )
-        })
-        .collect()
+    grouped_lines(api, finished_jobs(api), |api, job| {
+        let completed = job.completed_at.as_deref().unwrap_or("-");
+        let conclusion = job.conclusion.as_deref().unwrap_or("-");
+        format!(
+            "{}  completed {completed}  {conclusion}{}{}",
+            job_prefix(api, job),
+            cost_suffix(api, job),
+            copy_suffix(api, job),
+        )
+    })
 }
 
 fn progress_lines(api: &ApiData) -> Vec<String> {
-    in_progress_jobs(api)
-        .into_iter()
-        .map(|job| {
-            format!(
-                "{}  {IN_PROGRESS}{}",
-                job_prefix(api, job),
-                copy_suffix(api, job)
-            )
-        })
-        .collect()
+    grouped_lines(api, in_progress_jobs(api), |api, job| {
+        format!(
+            "{}  {IN_PROGRESS}{}{}",
+            job_prefix(api, job),
+            cost_suffix(api, job),
+            copy_suffix(api, job),
+        )
+    })
+}
+
+fn grouped_lines(
+    api: &ApiData,
+    jobs: Vec<&Job>,
+    mut line: impl FnMut(&ApiData, &Job) -> String,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current: Option<String> = None;
+    for job in jobs {
+        let path = displayed_run_path_for_id(api, job.run_id);
+        if current.as_deref() != Some(path.as_str()) {
+            lines.push(path.clone());
+            current = Some(path);
+        }
+        lines.push(line(api, job));
+    }
+    lines
+}
+
+fn cost_suffix(api: &ApiData, job: &Job) -> String {
+    let bill = bill_job(api, job);
+    let sku = bill.sku.as_deref().unwrap_or("-");
+    format!(
+        "  {} min  {sku}  list {}",
+        bill.minutes,
+        bill.list_price.format_cents()
+    )
 }
 
 fn job_prefix(api: &ApiData, job: &Job) -> String {
@@ -686,8 +714,12 @@ fn sort_jobs(api: &ApiData, jobs: &mut [&Job]) {
     jobs.sort_by(|left, right| {
         let left_path = displayed_run_path_for_id(api, left.run_id);
         let right_path = displayed_run_path_for_id(api, right.run_id);
+        let left_bill = bill_job(api, left);
+        let right_bill = bill_job(api, right);
         left_path
             .cmp(&right_path)
+            .then(right_bill.list_price.cmp(&left_bill.list_price))
+            .then(right_bill.minutes.cmp(&left_bill.minutes))
             .then(left.name.cmp(&right.name))
             .then(left.run_id.cmp(&right.run_id))
             .then(left.run_attempt.cmp(&right.run_attempt))
@@ -766,8 +798,13 @@ fn counted_job_values(api: &ApiData, run_id: u64) -> Vec<serde_json::Value> {
         .filter(|job| job.run_id == run_id)
         .collect();
     jobs.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
+        let left_bill = bill_job(api, left);
+        let right_bill = bill_job(api, right);
+        right_bill
+            .list_price
+            .cmp(&left_bill.list_price)
+            .then(right_bill.minutes.cmp(&left_bill.minutes))
+            .then(left.name.cmp(&right.name))
             .then(left.run_attempt.cmp(&right.run_attempt))
             .then(left.id.cmp(&right.id))
     });
@@ -829,6 +866,17 @@ fn job_json(api: &ApiData, job: &Job, counts: bool) -> serde_json::Value {
         "inherited_copy": inherited,
         "billable": counts && !inherited,
     });
+    let bill = bill_job(api, job);
+    value["minutes"] = serde_json::Value::from(bill.minutes);
+    value["sku"] = match bill.sku {
+        Some(sku) => serde_json::Value::String(sku),
+        None => serde_json::Value::Null,
+    };
+    value["list_price"] = serde_json::Value::String(bill.list_price.to_decimal_string());
+    value["usd_per_minute"] = match bill.usd_per_minute {
+        Some(rate) => serde_json::Value::String(rate.to_decimal_string()),
+        None => serde_json::Value::Null,
+    };
     if let Some(net) = api.inherited_copy_net(job) {
         value["net_amount"] = serde_json::Value::String(net.to_decimal_string());
     }
@@ -1337,13 +1385,13 @@ mod tests {
         let jobs = section(&text, "Jobs");
         assert!(
             jobs.contains(
-                "501  build  run 1001  .github/workflows/ci.yml  attempt 1  labels ubuntu-latest  runner GitHub Actions 88  started 2026-03-01T10:00:05Z  completed 2026-03-01T10:02:05Z  success\n"
+                "501  build  run 1001  .github/workflows/ci.yml  attempt 1  labels ubuntu-latest  runner GitHub Actions 88  started 2026-03-01T10:00:05Z  completed 2026-03-01T10:02:05Z  success  2 min  actions_linux  list 0.01\n"
             ),
             "{jobs}"
         );
         assert!(
             jobs.contains(
-                "77  orphan  run 99  (unknown workflow)  attempt 1  labels -  runner -  started -  completed 2026-03-04T00:01:00Z  -\n"
+                "77  orphan  run 99  (unknown workflow)  attempt 1  labels -  runner -  started -  completed 2026-03-04T00:01:00Z  -  1 min  -  list 0.00\n"
             ),
             "{jobs}"
         );
@@ -1353,7 +1401,7 @@ mod tests {
         let running = section(&text, "In progress");
         assert_eq!(
             running,
-            "601  lint  run 1002  .github/workflows/lint.yml  attempt 2  labels macos-latest  runner GitHub Actions 90  started 2026-03-02T11:00:10Z  in progress\n"
+            ".github/workflows/lint.yml\n601  lint  run 1002  .github/workflows/lint.yml  attempt 2  labels macos-latest  runner GitHub Actions 90  started 2026-03-02T11:00:10Z  in progress  0 min  actions_macos  list 0.00\n"
         );
         assert!(!running.contains("completed"), "{running}");
         assert_eq!(running.matches("in progress").count(), 1, "{running}");
@@ -1981,19 +2029,19 @@ mod tests {
         let jobs = section(&text, "Jobs");
         assert!(
             jobs.contains(
-                "10  build  run 1  .github/workflows/ci.yml  attempt 1  labels ubuntu-latest  runner runner-a  started 2026-04-01T10:00:00Z  completed 2026-04-01T10:05:00Z  success\n"
+                "10  build  run 1  .github/workflows/ci.yml  attempt 1  labels ubuntu-latest  runner runner-a  started 2026-04-01T10:00:00Z  completed 2026-04-01T10:05:00Z  success  5 min  actions_linux  list 0.03\n"
             ),
             "{jobs}"
         );
         assert!(
             jobs.contains(
-                "11  build  run 1  .github/workflows/ci.yml  attempt 2  labels ubuntu-latest  runner runner-a  started 2026-04-01T10:00:00Z  completed 2026-04-01T10:05:00Z  success  inherited copy  cost 0.00\n"
+                "11  build  run 1  .github/workflows/ci.yml  attempt 2  labels ubuntu-latest  runner runner-a  started 2026-04-01T10:00:00Z  completed 2026-04-01T10:05:00Z  success  0 min  actions_linux  list 0.00  inherited copy  cost 0.00\n"
             ),
             "{jobs}"
         );
         assert!(
             jobs.contains(
-                "12  lint  run 1  .github/workflows/ci.yml  attempt 2  labels ubuntu-latest  runner runner-a  started 2026-04-01T12:00:30Z  completed 2026-04-01T12:01:00Z  success\n"
+                "12  lint  run 1  .github/workflows/ci.yml  attempt 2  labels ubuntu-latest  runner runner-a  started 2026-04-01T12:00:30Z  completed 2026-04-01T12:01:00Z  success  1 min  actions_linux  list 0.01\n"
             ),
             "{jobs}"
         );
@@ -2001,7 +2049,7 @@ mod tests {
         let running = section(&text, "In progress");
         assert_eq!(
             running,
-            "13  pack  run 1  .github/workflows/ci.yml  attempt 2  labels ubuntu-latest  runner runner-a  started 2026-04-01T11:00:00Z  in progress  inherited copy  cost 0.00\n"
+            ".github/workflows/ci.yml\n13  pack  run 1  .github/workflows/ci.yml  attempt 2  labels ubuntu-latest  runner runner-a  started 2026-04-01T11:00:00Z  in progress  0 min  actions_linux  list 0.00  inherited copy  cost 0.00\n"
         );
 
         let json = render_json_with_runs(&[], &bill("0", "0"), None, None, &api, None, &[]);

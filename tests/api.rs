@@ -99,25 +99,25 @@ fn fixture_report_reads_pages_and_marks_in_progress() {
     let jobs = section(&text, "Jobs");
     assert!(
         jobs.contains(
-            "501  build  run 1001  .github/workflows/ci.yml  attempt 1  labels ubuntu-latest  runner GitHub Actions 88  started 2026-03-01T10:00:05Z  completed 2026-03-01T10:02:05Z  success\n"
+            "501  build  run 1001  .github/workflows/ci.yml  attempt 1  labels ubuntu-latest  runner GitHub Actions 88  started 2026-03-01T10:00:05Z  completed 2026-03-01T10:02:05Z  success  2 min  actions_linux  list 0.01\n"
         ),
         "{jobs}"
     );
     assert!(
         jobs.contains(
-            "502  test  run 1001  .github/workflows/ci.yml  attempt 1  labels ubuntu-latest, linux  runner GitHub Actions 89  started 2026-03-01T10:02:06Z  completed 2026-03-01T10:04:00Z  success\n"
+            "502  test  run 1001  .github/workflows/ci.yml  attempt 1  labels ubuntu-latest, linux  runner GitHub Actions 89  started 2026-03-01T10:02:06Z  completed 2026-03-01T10:04:00Z  success  2 min  actions_linux  list 0.01\n"
         ),
         "{jobs}"
     );
     assert!(
         jobs.contains(
-            "602  fmt  run 1002  .github/workflows/lint.yml  attempt 2  labels ubuntu-latest  runner GitHub Actions 91  started 2026-03-02T11:00:12Z  completed 2026-03-02T11:01:12Z  success\n"
+            "602  fmt  run 1002  .github/workflows/lint.yml  attempt 2  labels ubuntu-latest  runner GitHub Actions 91  started 2026-03-02T11:00:12Z  completed 2026-03-02T11:01:12Z  success  1 min  actions_linux  list 0.01\n"
         ),
         "{jobs}"
     );
     assert!(
         jobs.contains(
-            "701  publish  run 1003  .github/workflows/release.yml  attempt 1  labels windows-latest  runner -  started 2026-03-03T12:00:01Z  completed 2026-03-03T12:08:01Z  failure\n"
+            "701  publish  run 1003  .github/workflows/release.yml  attempt 1  labels windows-latest  runner -  started 2026-03-03T12:00:01Z  completed 2026-03-03T12:08:01Z  failure  8 min  actions_windows  list 0.08\n"
         ),
         "{jobs}"
     );
@@ -130,7 +130,7 @@ fn fixture_report_reads_pages_and_marks_in_progress() {
     let running = section(&text, "In progress");
     assert_eq!(
         running,
-        "601  lint  run 1002  .github/workflows/lint.yml  attempt 2  labels macos-latest  runner GitHub Actions 90  started 2026-03-02T11:00:10Z  in progress\n"
+        ".github/workflows/lint.yml\n601  lint  run 1002  .github/workflows/lint.yml  attempt 2  labels macos-latest  runner GitHub Actions 90  started 2026-03-02T11:00:10Z  in progress  0 min  actions_macos  list 0.00\n"
     );
     assert_eq!(running.matches("in progress").count(), 1);
 }
@@ -281,7 +281,7 @@ fn absent_completed_at_is_in_progress_on_the_cli() {
     let running = section(&text, "In progress");
     assert!(
         running.contains(
-            "81  lint  run 8  .github/workflows/ci.yml  attempt 1  labels macos-latest  runner runner-b  started 2026-04-01T00:00:05Z  in progress\n"
+            "81  lint  run 8  .github/workflows/ci.yml  attempt 1  labels macos-latest  runner runner-b  started 2026-04-01T00:00:05Z  in progress  0 min  actions_macos  list 0.00\n"
         ),
         "{running}"
     );

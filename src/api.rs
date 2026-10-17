@@ -45,8 +45,8 @@ impl WorkflowRun {
 
 /// One job from `jobs[]`.
 ///
-/// `completed_at` is `None` when the field is missing or null. That job is
-/// still in progress.
+/// `completed_at` is `None` when the field is missing or null. A blank
+/// completion time is stored as given and still counts as in progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
     pub id: u64,
@@ -61,9 +61,14 @@ pub struct Job {
 }
 
 impl Job {
-    /// A finished job has a completion time. An in-progress job does not count.
+    /// A finished job has a non-blank completion time.
+    ///
+    /// Missing, null, and blank `completed_at` values are still in progress
+    /// and do not count.
     pub fn counts(&self) -> bool {
-        self.completed_at.is_some()
+        self.completed_at
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
     }
 }
 
@@ -468,7 +473,7 @@ fn started_before_run(job: &Job, run: &WorkflowRun) -> bool {
 }
 
 /// Nanoseconds since the Unix epoch. `None` when the text is not a timestamp.
-fn parse_github_time(raw: &str) -> Option<i128> {
+pub(crate) fn parse_github_time(raw: &str) -> Option<i128> {
     let text = raw.trim().trim_matches('\r');
     let bytes = text.as_bytes();
     if bytes.len() < 20 {

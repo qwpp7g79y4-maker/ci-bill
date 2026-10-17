@@ -316,6 +316,56 @@ pub fn resolve_runner(
     chosen.ok_or_else(|| labels[0].clone())
 }
 
+/// SKU for the labels on a finished or running job.
+///
+/// A label list that contains `self-hosted` is `self_hosted`. Otherwise each
+/// label is resolved on its own and labels the map does not name are ignored.
+/// When several labels resolve, the larger runner wins: a core size beats an
+/// arm, slim, large, or xlarge label, and those beat a standard runner. A tie
+/// keeps the earlier label. No known label yields `None`.
+pub fn sku_for_labels(labels: &[String]) -> Option<String> {
+    let table = embedded_table().ok()?;
+    let map = RunnerMap::default();
+    let cleaned: Vec<String> = labels
+        .iter()
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty())
+        .collect();
+    if cleaned
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("self-hosted"))
+    {
+        return resolve_runner(&["self-hosted".to_string()], &map, table).ok();
+    }
+    let mut best: Option<(u8, String)> = None;
+    for label in &cleaned {
+        let one = [label.clone()];
+        let Ok(sku) = resolve_runner(&one, &map, table) else {
+            continue;
+        };
+        let score = label_specificity(&sku);
+        if best.as_ref().is_none_or(|pair| score > pair.0) {
+            best = Some((score, sku));
+        }
+    }
+    best.map(|(_, sku)| sku)
+}
+
+/// Larger runners outrank the standard image they also advertise.
+fn label_specificity(sku: &str) -> u8 {
+    if sku.contains("_core") {
+        3
+    } else if sku.ends_with("_arm")
+        || sku.ends_with("_slim")
+        || sku.ends_with("_xl")
+        || sku.ends_with("_l")
+    {
+        2
+    } else {
+        1
+    }
+}
+
 fn unknown_label_text(raw: &str, unknown: &str) -> String {
     if !unknown.is_empty() {
         return unknown.to_string();
