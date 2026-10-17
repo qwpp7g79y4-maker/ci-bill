@@ -63,6 +63,52 @@ fn unknown_option_exits_3() {
 }
 
 #[test]
+fn unreadable_usage_exits_2() {
+    let missing = run(&["report", "--usage", "/no/such/ci-bill-usage.csv"]);
+    assert_eq!(
+        missing.status.code(),
+        Some(2),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&missing),
+        stderr(&missing)
+    );
+    let missing_err = stderr(&missing);
+    assert!(missing_err.contains("line 0"), "{missing_err}");
+    assert!(missing_err.contains("cannot read file"), "{missing_err}");
+
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bad-number.csv");
+    std::fs::write(
+        &path,
+        "sku,quantity,unit_type,net_amount,gross_amount,workflow_path\nactions_linux,NOT_A_NUMBER,minutes,1,1,a.yml\n",
+    )
+    .unwrap();
+    let output = run(&["report", "--usage", path.to_str().unwrap()]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let err = stderr(&output);
+    assert!(err.contains("line 2"), "{err}");
+    assert!(err.contains("quantity is not a number"), "{err}");
+    assert!(!err.contains("NOT_A_NUMBER"), "{err}");
+}
+
+#[test]
+fn sample_usage_exits_0() {
+    let output = run(&["report", "--usage", "samples/usage-sample.csv"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+}
+
+#[test]
 fn missing_usage_exits_3() {
     let output = run(&["report"]);
     assert_eq!(

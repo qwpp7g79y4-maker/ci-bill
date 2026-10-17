@@ -1,3 +1,5 @@
+mod usage;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -27,9 +29,17 @@ fn usage_exit(err: clap::Error) -> ExitCode {
     ExitCode::from(3)
 }
 
-fn report(usage: &Path, workflows: Option<&Path>, top: Option<usize>) -> ExitCode {
-    let _ = (usage, workflows, top);
-    ExitCode::SUCCESS
+fn report(usage_path: &Path, workflows: Option<&Path>, top: Option<usize>) -> ExitCode {
+    match usage::read_usage(usage_path) {
+        Ok(rows) => {
+            let _ = (rows.len(), workflows, top);
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("ci-bill: {}: {err}", usage_path.display());
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// Rank workflow costs from a GitHub detailed usage report.
