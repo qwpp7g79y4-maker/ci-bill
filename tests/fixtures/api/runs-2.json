@@ -1,0 +1,16 @@
+{
+  "total_count": 1,
+  "workflow_runs": [
+    {
+      "id": 1003,
+      "name": "Release",
+      "path": ".github/workflows/release.yml",
+      "run_number": 7,
+      "event": "release",
+      "status": "completed",
+      "conclusion": "failure",
+      "run_attempt": 1,
+      "run_started_at": "2026-03-03T12:00:00Z"
+    }
+  ]
+}

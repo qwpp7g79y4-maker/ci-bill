@@ -38,6 +38,7 @@ fn help_shows_options() {
     let text = stdout(&output);
     assert!(text.contains("--usage"), "{text}");
     assert!(text.contains("--workflows"), "{text}");
+    assert!(text.contains("--runs"), "{text}");
     assert!(text.contains("--top"), "{text}");
     assert!(text.contains("--json"), "{text}");
     assert!(text.contains("--budget"), "{text}");

@@ -1,6 +1,7 @@
 use std::fmt::Write;
 use std::path::Path;
 
+use crate::api::{ApiData, Job, WorkflowRun, IN_PROGRESS, UNKNOWN_WORKFLOW};
 use crate::findings::Finding;
 use crate::rank::WorkflowTotal;
 
@@ -16,6 +17,30 @@ pub fn render(
     total_net: f64,
     total_minutes: f64,
     findings: Option<&[Finding]>,
+) -> String {
+    render_report(workflows, total_net, total_minutes, findings, None)
+}
+
+/// Text report plus saved Actions runs and jobs.
+///
+/// Finished jobs are listed under "Jobs". A job with no `completed_at` is
+/// listed under "In progress" and is not included with the finished jobs.
+pub fn render_with_runs(
+    workflows: &[WorkflowTotal],
+    total_net: f64,
+    total_minutes: f64,
+    findings: Option<&[Finding]>,
+    api: &ApiData,
+) -> String {
+    render_report(workflows, total_net, total_minutes, findings, Some(api))
+}
+
+fn render_report(
+    workflows: &[WorkflowTotal],
+    total_net: f64,
+    total_minutes: f64,
+    findings: Option<&[Finding]>,
+    api: Option<&ApiData>,
 ) -> String {
     let attached = attach(workflows, findings);
     let mut out = String::new();
@@ -56,6 +81,9 @@ pub fn render(
             let _ = writeln!(out, "{}", finding_text(finding));
         }
     }
+    if let Some(api) = api {
+        append_api(&mut out, api);
+    }
     out
 }
 
@@ -66,6 +94,39 @@ pub fn render_json(
     total_minutes: f64,
     findings: Option<&[Finding]>,
     budget: Option<f64>,
+) -> String {
+    render_json_report(workflows, total_net, total_minutes, findings, budget, None)
+}
+
+/// JSON report plus `workflow_runs` and `in_progress`.
+///
+/// Finished jobs sit on their run. An in-progress job is only in
+/// `in_progress`, with `counts` false and message "in progress".
+pub fn render_json_with_runs(
+    workflows: &[WorkflowTotal],
+    total_net: f64,
+    total_minutes: f64,
+    findings: Option<&[Finding]>,
+    budget: Option<f64>,
+    api: &ApiData,
+) -> String {
+    render_json_report(
+        workflows,
+        total_net,
+        total_minutes,
+        findings,
+        budget,
+        Some(api),
+    )
+}
+
+fn render_json_report(
+    workflows: &[WorkflowTotal],
+    total_net: f64,
+    total_minutes: f64,
+    findings: Option<&[Finding]>,
+    budget: Option<f64>,
+    api: Option<&ApiData>,
 ) -> String {
     let attached = attach(workflows, findings);
     let workflow_json: Vec<serde_json::Value> = workflows
@@ -86,6 +147,11 @@ pub fn render_json(
         "workflows": workflow_json,
         "unattached_findings": unattached,
     });
+    if let Some(api) = api {
+        let (runs, in_progress) = api_json(api);
+        value["workflow_runs"] = runs;
+        value["in_progress"] = in_progress;
+    }
     if let Some(amount) = budget {
         value["budget"] = serde_json::Value::from(amount);
         value["budget_exceeded"] = serde_json::Value::from(total_net > amount);
@@ -300,6 +366,205 @@ fn share_ratio(net: f64, total: f64) -> f64 {
     } else {
         net / total * 100.0
     }
+}
+
+fn append_api(out: &mut String, api: &ApiData) {
+    let _ = writeln!(out);
+    write_section(out, "Runs", &run_lines(api));
+    let _ = writeln!(out);
+    write_section(out, "Jobs", &counted_lines(api));
+    let _ = writeln!(out);
+    write_section(out, "In progress", &progress_lines(api));
+}
+
+fn write_section(out: &mut String, heading: &str, lines: &[String]) {
+    let _ = writeln!(out, "{heading}");
+    if lines.is_empty() {
+        let _ = writeln!(out, "(none)");
+        return;
+    }
+    for line in lines {
+        let _ = writeln!(out, "{line}");
+    }
+}
+
+fn run_lines(api: &ApiData) -> Vec<String> {
+    sorted_runs(api)
+        .into_iter()
+        .map(|run| {
+            let conclusion = run.conclusion.as_deref().unwrap_or(IN_PROGRESS);
+            let started = run.run_started_at.as_deref().unwrap_or("-");
+            format!(
+                "{id}  {path}  attempt {attempt}  number {number}  {event}  {conclusion}  {started}",
+                id = run.id,
+                path = run.path,
+                attempt = run.run_attempt,
+                number = run.run_number,
+                event = run.event,
+            )
+        })
+        .collect()
+}
+
+fn counted_lines(api: &ApiData) -> Vec<String> {
+    sorted_jobs(api, true)
+        .into_iter()
+        .map(|job| {
+            let completed = job.completed_at.as_deref().unwrap_or("-");
+            let conclusion = job.conclusion.as_deref().unwrap_or("-");
+            format!(
+                "{}  completed {completed}  {conclusion}",
+                job_prefix(api, job)
+            )
+        })
+        .collect()
+}
+
+fn progress_lines(api: &ApiData) -> Vec<String> {
+    sorted_jobs(api, false)
+        .into_iter()
+        .map(|job| format!("{}  {IN_PROGRESS}", job_prefix(api, job)))
+        .collect()
+}
+
+fn job_prefix(api: &ApiData, job: &Job) -> String {
+    let path = api.workflow_path(job.run_id);
+    let labels = if job.labels.is_empty() {
+        "-".to_string()
+    } else {
+        job.labels.join(", ")
+    };
+    let runner = job.runner_name.as_deref().unwrap_or("-");
+    let started = job.started_at.as_deref().unwrap_or("-");
+    format!(
+        "{id}  {name}  run {run_id}  {path}  attempt {attempt}  labels {labels}  runner {runner}  started {started}",
+        id = job.id,
+        name = job.name,
+        run_id = job.run_id,
+        attempt = job.run_attempt,
+    )
+}
+
+fn sorted_runs(api: &ApiData) -> Vec<&WorkflowRun> {
+    let mut runs: Vec<&WorkflowRun> = api.runs.iter().collect();
+    runs.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.run_number.cmp(&right.run_number))
+            .then(left.run_attempt.cmp(&right.run_attempt))
+            .then(left.id.cmp(&right.id))
+    });
+    runs
+}
+
+fn sorted_jobs(api: &ApiData, counts: bool) -> Vec<&Job> {
+    let mut jobs: Vec<&Job> = if counts {
+        api.counted_jobs().collect()
+    } else {
+        api.in_progress_jobs().collect()
+    };
+    jobs.sort_by(|left, right| {
+        api.workflow_path(left.run_id)
+            .cmp(api.workflow_path(right.run_id))
+            .then(left.name.cmp(&right.name))
+            .then(left.run_id.cmp(&right.run_id))
+            .then(left.run_attempt.cmp(&right.run_attempt))
+            .then(left.id.cmp(&right.id))
+    });
+    jobs
+}
+
+fn api_json(api: &ApiData) -> (serde_json::Value, serde_json::Value) {
+    let mut runs: Vec<serde_json::Value> = sorted_runs(api)
+        .into_iter()
+        .map(|run| run_json(run, counted_job_values(api, run.id)))
+        .collect();
+    let known: std::collections::HashSet<u64> = api.runs.iter().map(|run| run.id).collect();
+    let mut missing: Vec<u64> = Vec::new();
+    for job in &api.jobs {
+        if !known.contains(&job.run_id) && !missing.contains(&job.run_id) {
+            missing.push(job.run_id);
+        }
+    }
+    missing.sort_unstable();
+    for run_id in missing {
+        runs.push(serde_json::json!({
+            "id": run_id,
+            "path": UNKNOWN_WORKFLOW,
+            "run_attempt": null,
+            "run_number": null,
+            "event": null,
+            "conclusion": null,
+            "run_started_at": null,
+            "jobs": counted_job_values(api, run_id),
+        }));
+    }
+    runs.sort_by(|left, right| run_sort_key(left).cmp(&run_sort_key(right)));
+    let in_progress: Vec<serde_json::Value> = sorted_jobs(api, false)
+        .into_iter()
+        .map(|job| {
+            let mut value = job_json(job, false);
+            value["workflow_path"] = serde_json::Value::from(api.workflow_path(job.run_id));
+            value["message"] = serde_json::Value::from(IN_PROGRESS);
+            value
+        })
+        .collect();
+    (
+        serde_json::Value::Array(runs),
+        serde_json::Value::Array(in_progress),
+    )
+}
+
+fn counted_job_values(api: &ApiData, run_id: u64) -> Vec<serde_json::Value> {
+    let mut jobs: Vec<&Job> = api
+        .jobs
+        .iter()
+        .filter(|job| job.run_id == run_id && job.counts())
+        .collect();
+    jobs.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.run_attempt.cmp(&right.run_attempt))
+            .then(left.id.cmp(&right.id))
+    });
+    jobs.into_iter().map(|job| job_json(job, true)).collect()
+}
+
+fn run_json(run: &WorkflowRun, jobs: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({
+        "id": run.id,
+        "path": run.path,
+        "run_attempt": run.run_attempt,
+        "run_number": run.run_number,
+        "event": run.event,
+        "conclusion": run.conclusion,
+        "run_started_at": run.run_started_at,
+        "jobs": jobs,
+    })
+}
+
+fn run_sort_key(value: &serde_json::Value) -> (&str, u64, u64, u64) {
+    (
+        value["path"].as_str().unwrap_or(UNKNOWN_WORKFLOW),
+        value["run_number"].as_u64().unwrap_or(0),
+        value["run_attempt"].as_u64().unwrap_or(0),
+        value["id"].as_u64().unwrap_or(0),
+    )
+}
+
+fn job_json(job: &Job, counts: bool) -> serde_json::Value {
+    serde_json::json!({
+        "id": job.id,
+        "run_id": job.run_id,
+        "run_attempt": job.run_attempt,
+        "name": job.name,
+        "labels": job.labels,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+        "conclusion": job.conclusion,
+        "runner_name": job.runner_name,
+        "counts": counts,
+    })
 }
 
 fn finite(value: f64) -> f64 {
@@ -578,5 +843,226 @@ mod tests {
             absent_value.get("budget_exceeded").is_none(),
             "{absent_value}"
         );
+    }
+
+    fn sample_api() -> ApiData {
+        ApiData {
+            runs: vec![
+                WorkflowRun {
+                    id: 1002,
+                    path: ".github/workflows/lint.yml".to_string(),
+                    run_attempt: 2,
+                    run_number: 41,
+                    event: "pull_request".to_string(),
+                    conclusion: None,
+                    run_started_at: Some("2026-03-02T11:00:00Z".to_string()),
+                },
+                WorkflowRun {
+                    id: 1001,
+                    path: ".github/workflows/ci.yml".to_string(),
+                    run_attempt: 1,
+                    run_number: 40,
+                    event: "push".to_string(),
+                    conclusion: Some("success".to_string()),
+                    run_started_at: Some("2026-03-01T10:00:00Z".to_string()),
+                },
+            ],
+            jobs: vec![
+                Job {
+                    id: 601,
+                    run_id: 1002,
+                    run_attempt: 2,
+                    name: "lint".to_string(),
+                    labels: vec!["macos-latest".to_string()],
+                    started_at: Some("2026-03-02T11:00:10Z".to_string()),
+                    completed_at: None,
+                    conclusion: None,
+                    runner_name: Some("GitHub Actions 90".to_string()),
+                },
+                Job {
+                    id: 501,
+                    run_id: 1001,
+                    run_attempt: 1,
+                    name: "build".to_string(),
+                    labels: vec!["ubuntu-latest".to_string()],
+                    started_at: Some("2026-03-01T10:00:05Z".to_string()),
+                    completed_at: Some("2026-03-01T10:02:05Z".to_string()),
+                    conclusion: Some("success".to_string()),
+                    runner_name: Some("GitHub Actions 88".to_string()),
+                },
+                Job {
+                    id: 77,
+                    run_id: 99,
+                    run_attempt: 1,
+                    name: "orphan".to_string(),
+                    labels: vec![],
+                    started_at: None,
+                    completed_at: Some("2026-03-04T00:01:00Z".to_string()),
+                    conclusion: None,
+                    runner_name: None,
+                },
+            ],
+        }
+    }
+
+    fn section<'a>(text: &'a str, heading: &str) -> &'a str {
+        let marker = format!("\n{heading}\n");
+        let start = text
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {heading} in {text}"))
+            + marker.len();
+        let rest = &text[start..];
+        let end = ["\nRuns\n", "\nJobs\n", "\nIn progress\n"]
+            .into_iter()
+            .filter_map(|item| rest.find(item))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn runs_section_splits_finished_jobs_from_in_progress() {
+        let workflows = vec![workflow(
+            ".github/workflows/ci.yml",
+            3.0,
+            10.0,
+            "actions_linux",
+        )];
+        let findings = vec![finding(
+            "samples/.github/workflows/lint.yml",
+            8,
+            FindingKind::LintOnRunner,
+            "lint on macOS",
+        )];
+        let api = sample_api();
+        let text = render_with_runs(&workflows, 3.0, 10.0, Some(&findings), &api);
+        assert!(text.contains("USD (from net_amount)\n"), "{text}");
+        assert!(text.contains("Total net: 3.00\n"), "{text}");
+        let finding_at = text.find("lint on macOS").unwrap();
+        let runs_at = text.find("\nRuns\n").unwrap();
+        assert!(finding_at < runs_at, "{text}");
+
+        let runs = section(&text, "Runs");
+        assert!(
+            runs.contains(
+                "1001  .github/workflows/ci.yml  attempt 1  number 40  push  success  2026-03-01T10:00:00Z\n"
+            ),
+            "{runs}"
+        );
+        assert!(
+            runs.contains(
+                "1002  .github/workflows/lint.yml  attempt 2  number 41  pull_request  in progress  2026-03-02T11:00:00Z\n"
+            ),
+            "{runs}"
+        );
+        assert!(
+            runs.find("1001").unwrap() < runs.find("1002").unwrap(),
+            "{runs}"
+        );
+
+        let jobs = section(&text, "Jobs");
+        assert!(
+            jobs.contains(
+                "501  build  run 1001  .github/workflows/ci.yml  attempt 1  labels ubuntu-latest  runner GitHub Actions 88  started 2026-03-01T10:00:05Z  completed 2026-03-01T10:02:05Z  success\n"
+            ),
+            "{jobs}"
+        );
+        assert!(
+            jobs.contains(
+                "77  orphan  run 99  (unknown workflow)  attempt 1  labels -  runner -  started -  completed 2026-03-04T00:01:00Z  -\n"
+            ),
+            "{jobs}"
+        );
+        assert!(!jobs.contains("\n601 "), "{jobs}");
+        assert!(!jobs.contains("lint"), "{jobs}");
+
+        let running = section(&text, "In progress");
+        assert_eq!(
+            running,
+            "601  lint  run 1002  .github/workflows/lint.yml  attempt 2  labels macos-latest  runner GitHub Actions 90  started 2026-03-02T11:00:10Z  in progress\n"
+        );
+        assert!(!running.contains("completed"), "{running}");
+        assert_eq!(running.matches("in progress").count(), 1, "{running}");
+    }
+
+    #[test]
+    fn json_puts_in_progress_jobs_outside_the_counted_list() {
+        let api = sample_api();
+        let text = render_json_with_runs(&[], 0.0, 0.0, None, Some(1.5), &api);
+        let value: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["currency"], "USD");
+        assert_eq!(value["budget_exceeded"], false);
+
+        let runs = value["workflow_runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0]["id"], 99);
+        assert_eq!(runs[0]["path"], "(unknown workflow)");
+        assert!(runs[0]["event"].is_null());
+        assert!(runs[0]["run_attempt"].is_null());
+        assert_eq!(runs[0]["jobs"][0]["id"], 77);
+        assert_eq!(runs[0]["jobs"][0]["counts"], true);
+        assert_eq!(runs[0]["jobs"][0]["name"], "orphan");
+
+        assert_eq!(runs[1]["id"], 1001);
+        assert_eq!(runs[1]["path"], ".github/workflows/ci.yml");
+        assert_eq!(runs[1]["conclusion"], "success");
+        assert_eq!(runs[1]["jobs"].as_array().unwrap().len(), 1);
+        assert_eq!(runs[1]["jobs"][0]["id"], 501);
+        assert_eq!(runs[1]["jobs"][0]["counts"], true);
+        assert_eq!(runs[1]["jobs"][0]["name"], "build");
+        assert!(runs[1]["jobs"][0]["completed_at"].is_string());
+
+        assert_eq!(runs[2]["id"], 1002);
+        assert!(runs[2]["conclusion"].is_null());
+        assert!(runs[2]["jobs"].as_array().unwrap().is_empty());
+
+        let running = value["in_progress"].as_array().unwrap();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0]["id"], 601);
+        assert_eq!(running[0]["run_id"], 1002);
+        assert_eq!(running[0]["name"], "lint");
+        assert_eq!(running[0]["counts"], false);
+        assert_eq!(running[0]["message"], "in progress");
+        assert!(running[0]["completed_at"].is_null());
+        assert_eq!(running[0]["workflow_path"], ".github/workflows/lint.yml");
+        assert!(running[0]["labels"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("macos-latest")));
+
+        let counted_ids: Vec<u64> = runs
+            .iter()
+            .flat_map(|run| run["jobs"].as_array().unwrap())
+            .map(|job| job["id"].as_u64().unwrap())
+            .collect();
+        assert!(!counted_ids.contains(&601));
+        assert!(counted_ids.contains(&501));
+    }
+
+    #[test]
+    fn empty_runs_dir_prints_empty_sections() {
+        let api = crate::api::ApiData {
+            runs: Vec::new(),
+            jobs: Vec::new(),
+        };
+        let text = render_with_runs(&[], 0.0, 0.0, None, &api);
+        assert!(text.contains("\nRuns\n(none)\n"), "{text}");
+        assert!(text.contains("\nJobs\n(none)\n"), "{text}");
+        assert!(text.contains("\nIn progress\n(none)\n"), "{text}");
+    }
+
+    #[test]
+    fn report_without_runs_omits_actions_sections() {
+        let text = render(&[], 0.0, 0.0, None);
+        assert!(!text.contains("\nRuns\n"), "{text}");
+        assert!(!text.contains("\nJobs\n"), "{text}");
+        assert!(!text.contains("In progress"), "{text}");
+        assert!(!text.contains("(none)"), "{text}");
+
+        let json = render_json(&[], 0.0, 0.0, None, None);
+        let value: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
+        assert!(value.get("workflow_runs").is_none(), "{value}");
+        assert!(value.get("in_progress").is_none(), "{value}");
     }
 }

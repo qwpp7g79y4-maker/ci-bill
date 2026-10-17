@@ -1,3 +1,4 @@
+mod api;
 mod findings;
 mod rank;
 mod report;
@@ -15,10 +16,18 @@ fn main() -> ExitCode {
             Command::Report {
                 usage,
                 workflows,
+                runs,
                 top,
                 json,
                 budget,
-            } => report(&usage, workflows.as_deref(), top, json, budget),
+            } => report(
+                &usage,
+                workflows.as_deref(),
+                runs.as_deref(),
+                top,
+                json,
+                budget,
+            ),
         },
         Err(err) => usage_exit(err),
     }
@@ -38,6 +47,7 @@ fn usage_exit(err: clap::Error) -> ExitCode {
 fn report(
     usage_path: &Path,
     workflows: Option<&Path>,
+    runs: Option<&Path>,
     top: Option<usize>,
     json: bool,
     budget: Option<f64>,
@@ -66,10 +76,35 @@ fn report(
         },
         None => None,
     };
+    let api = match runs {
+        Some(dir) => match api::read_dir(dir) {
+            Ok(data) => Some(data),
+            Err(err) => {
+                eprintln!("ci-bill: {}: {err}", err.path.display());
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
     let text = if json {
-        report::render_json(shown, total_net, total_minutes, found.as_deref(), budget)
+        match api.as_ref() {
+            Some(data) => report::render_json_with_runs(
+                shown,
+                total_net,
+                total_minutes,
+                found.as_deref(),
+                budget,
+                data,
+            ),
+            None => report::render_json(shown, total_net, total_minutes, found.as_deref(), budget),
+        }
     } else {
-        report::render(shown, total_net, total_minutes, found.as_deref())
+        match api.as_ref() {
+            Some(data) => {
+                report::render_with_runs(shown, total_net, total_minutes, found.as_deref(), data)
+            }
+            None => report::render(shown, total_net, total_minutes, found.as_deref()),
+        }
     };
     print!("{text}");
     // The budget is the whole net total, including workflows omitted by --top.
@@ -111,6 +146,9 @@ enum Command {
         /// Directory of workflow YAML files.
         #[arg(long, value_name = "DIR")]
         workflows: Option<PathBuf>,
+        /// Saved Actions API JSON (`runs-*.json` and `jobs-<run_id>*.json`).
+        #[arg(long, value_name = "DIR")]
+        runs: Option<PathBuf>,
         /// Show the N workflows with the highest net amount.
         #[arg(long, value_name = "N")]
         top: Option<usize>,

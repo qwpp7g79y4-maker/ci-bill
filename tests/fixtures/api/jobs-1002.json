@@ -1,0 +1,30 @@
+{
+  "total_count": 2,
+  "jobs": [
+    {
+      "id": 601,
+      "run_id": 1002,
+      "run_attempt": 2,
+      "name": "lint",
+      "status": "in_progress",
+      "conclusion": null,
+      "started_at": "2026-03-02T11:00:10Z",
+      "completed_at": null,
+      "labels": ["macos-latest"],
+      "runner_name": "GitHub Actions 90",
+      "steps": []
+    },
+    {
+      "id": 602,
+      "run_id": 1002,
+      "run_attempt": 2,
+      "name": "fmt",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-03-02T11:00:12Z",
+      "completed_at": "2026-03-02T11:01:12Z",
+      "labels": ["ubuntu-latest"],
+      "runner_name": "GitHub Actions 91"
+    }
+  ]
+}

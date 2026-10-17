@@ -1,0 +1,17 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 701,
+      "run_id": 1003,
+      "run_attempt": 1,
+      "name": "publish",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-03-03T12:00:01Z",
+      "completed_at": "2026-03-03T12:08:01Z",
+      "labels": ["windows-latest"],
+      "runner_name": null
+    }
+  ]
+}
