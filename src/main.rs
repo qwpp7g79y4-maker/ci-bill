@@ -1,5 +1,6 @@
 mod findings;
 mod rank;
+mod report;
 mod usage;
 mod workflow;
 
@@ -40,19 +41,27 @@ fn report(usage_path: &Path, workflows: Option<&Path>, top: Option<usize>) -> Ex
             return ExitCode::from(2);
         }
     };
-    if let Some(dir) = workflows {
-        match workflow::scan_dir(dir) {
-            Ok(scanned) => {
-                let _ = findings::findings(&scanned);
-            }
+    let ranked = rank::rank(&rows, None);
+    let total_net: f64 = ranked.iter().map(|item| item.net).sum();
+    let total_minutes: f64 = ranked.iter().map(|item| item.minutes).sum();
+    let shown = match top {
+        Some(limit) => &ranked[..limit.min(ranked.len())],
+        None => ranked.as_slice(),
+    };
+    let found = match workflows {
+        Some(dir) => match workflow::scan_dir(dir) {
+            Ok(scanned) => Some(findings::findings(&scanned)),
             Err(err) => {
                 eprintln!("ci-bill: {}: {err}", err.path.display());
                 return ExitCode::from(2);
             }
-        }
-    }
-    let ranked = rank::rank(&rows, top);
-    let _ = ranked.len();
+        },
+        None => None,
+    };
+    print!(
+        "{}",
+        report::render(shown, total_net, total_minutes, found.as_deref())
+    );
     ExitCode::SUCCESS
 }
 

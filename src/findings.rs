@@ -13,6 +13,17 @@ pub enum FindingKind {
     PullRequestConcurrency,
 }
 
+impl FindingKind {
+    /// Short id used in the text report.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::LintOnRunner => "F1",
+            Self::MissingTimeout => "F2",
+            Self::PullRequestConcurrency => "F3",
+        }
+    }
+}
+
 /// One cause, pointing at a file line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {

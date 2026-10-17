@@ -1,0 +1,22 @@
+USD (from net_amount)
+
+Total net: 284.208
+Total minutes: 12208
+
+Workflow                           Net  Minutes   Share
+.github/workflows/lint.yml     230.144     3712  80.98%
+  actions_macos                230.144     3712        
+.github/workflows/ci.yml        44.232     7372  15.56%
+  actions_linux                 44.232     7372        
+.github/workflows/release.yml     7.72      772   2.72%
+  actions_windows                 7.72      772        
+.github/workflows/docs.yml       2.112      352   0.74%
+  actions_linux                  2.112      352        
+(no workflow)                        0        0   0.00%
+  actions_storage                    0        0        
+
+Findings
+F2 samples/.github/workflows/docs.yml:4: default timeout is 360 minutes
+F3 samples/.github/workflows/lint.yml:2: pull_request without concurrency cancel-in-progress
+F2 samples/.github/workflows/lint.yml:7: default timeout is 360 minutes
+F1 samples/.github/workflows/lint.yml:8: lint on macOS
