@@ -16,7 +16,10 @@ pub struct Workflow {
     /// Line of the top-level `on:` key, when present.
     pub on_line: Option<usize>,
     pub has_pull_request: bool,
-    /// Top-level `concurrency.cancel-in-progress` is the literal `true`.
+    /// `pull_request_target` is present under `on:`.
+    pub has_pull_request_target: bool,
+    /// Top-level `concurrency.cancel-in-progress` cancels in-progress runs.
+    /// Literal `true` and `github.event_name == 'pull_request'` both count.
     pub cancel_in_progress: bool,
     pub jobs: Vec<Job>,
     /// Repeated mapping keys, in document order. The later value won.
@@ -37,6 +40,8 @@ pub struct Job {
     pub steps_text: String,
     /// `strategy.matrix`, when the job has one.
     pub matrix: Option<Matrix>,
+    /// Job-level `concurrency.cancel-in-progress` cancels in-progress runs.
+    pub cancel_in_progress: bool,
 }
 
 /// `runs-on` for a job.
@@ -65,6 +70,18 @@ pub struct Matrix {
     pub at_least: bool,
     /// Finite upper bound, present only when it is greater than `jobs`.
     pub jobs_hi: Option<u64>,
+    /// Literal axis and include values, used to resolve `matrix.<name>` in `runs-on`.
+    pub axes: Vec<MatrixAxis>,
+}
+
+/// One matrix axis, including keys that appear only under `include`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatrixAxis {
+    pub name: String,
+    /// Line of the axis key. Include-only keys use the first include key line.
+    pub line: usize,
+    /// Each entry is one literal label set. Expressions are left out.
+    pub values: Vec<Vec<String>>,
 }
 
 /// One repeated mapping key. The later line wins.
@@ -493,6 +510,7 @@ fn workflow_from(path: &Path, root: Option<&Node>) -> Workflow {
         path: path.to_path_buf(),
         on_line: None,
         has_pull_request: false,
+        has_pull_request_target: false,
         cancel_in_progress: false,
         jobs: Vec::new(),
         duplicate_keys: dedupe_duplicates(duplicate_keys),
@@ -515,36 +533,187 @@ fn note_on(workflow: &mut Workflow, item: &Entry) {
     if workflow.on_line.is_none() {
         workflow.on_line = Some(item.line);
     }
-    if has_pull_request(&item.value) {
+    if has_event(&item.value, "pull_request") {
         workflow.has_pull_request = true;
+    }
+    if has_event(&item.value, "pull_request_target") {
+        workflow.has_pull_request_target = true;
     }
 }
 
-fn has_pull_request(node: &Node) -> bool {
+fn has_event(node: &Node, event: &str) -> bool {
     match node {
-        Node::Scalar { value, .. } => value == "pull_request",
-        Node::Sequence { items, .. } => items
+        Node::Scalar { value, .. } => value.eq_ignore_ascii_case(event),
+        Node::Sequence { items, .. } => items.iter().any(
+            |item| matches!(item, Node::Scalar { value, .. } if value.eq_ignore_ascii_case(event)),
+        ),
+        Node::Mapping { entries, .. } => entries
             .iter()
-            .any(|item| matches!(item, Node::Scalar { value, .. } if value == "pull_request")),
-        Node::Mapping { entries, .. } => entries.iter().any(|item| item.key == "pull_request"),
+            .any(|item| item.key.eq_ignore_ascii_case(event)),
     }
 }
 
 fn note_concurrency(workflow: &mut Workflow, node: &Node) {
-    let Node::Mapping { entries, .. } = node else {
-        return;
-    };
-    let enabled = entry(entries, "cancel-in-progress").is_some_and(|item| is_true(&item.value));
-    if enabled {
+    if concurrency_enabled(node) {
         workflow.cancel_in_progress = true;
     }
 }
 
-fn is_true(node: &Node) -> bool {
+fn concurrency_enabled(node: &Node) -> bool {
+    let Node::Mapping { entries, .. } = node else {
+        return false;
+    };
+    entry(entries, "cancel-in-progress").is_some_and(|item| scalar_enables_cancel(&item.value))
+}
+
+fn scalar_enables_cancel(node: &Node) -> bool {
     match node {
-        Node::Scalar { value, .. } => value.eq_ignore_ascii_case("true"),
+        Node::Scalar { value, .. } => expression_enables_cancel(value),
         _ => false,
     }
+}
+
+/// Literal `true`, or `github.event_name == 'pull_request'` (either quote, any
+/// spacing, optional `${{ }}`). `pull_request_target` uses the same comparison.
+/// An `||` chain counts when any clause does.
+fn expression_enables_cancel(value: &str) -> bool {
+    clause_enables_cancel(value.trim())
+}
+
+fn clause_enables_cancel(value: &str) -> bool {
+    let unwrapped = unwrap_expr(value.trim());
+    let text = strip_wrapping_parens(unwrapped.trim());
+    if text.eq_ignore_ascii_case("true") {
+        return true;
+    }
+    let parts = split_top_or(text);
+    if parts.len() > 1 {
+        return parts.iter().any(|part| clause_enables_cancel(part));
+    }
+    is_pull_event_comparison(text)
+}
+
+fn unwrap_expr(text: &str) -> &str {
+    let mut current = text.trim();
+    loop {
+        let Some(rest) = current.strip_prefix("${{") else {
+            return current;
+        };
+        let Some(inner) = rest.strip_suffix("}}") else {
+            return current;
+        };
+        if inner.contains("${{") || inner.contains("}}") {
+            return current;
+        }
+        current = inner.trim();
+    }
+}
+
+fn strip_wrapping_parens(text: &str) -> &str {
+    let mut current = text.trim();
+    while current.starts_with('(') && current.ends_with(')') && parens_wrap_all(current) {
+        current = current[1..current.len() - 1].trim();
+    }
+    current
+}
+
+fn parens_wrap_all(text: &str) -> bool {
+    let mut depth = 0i32;
+    for (index, character) in text.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+                if depth == 0 && index != text.len() - 1 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+fn split_top_or(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quote: Option<char> = None;
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let (byte, character) = chars[index];
+        if let Some(open) = quote {
+            if character == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if character == '\'' || character == '"' {
+            quote = Some(character);
+            index += 1;
+            continue;
+        }
+        if character == '|' && chars.get(index + 1).is_some_and(|(_, next)| *next == '|') {
+            parts.push(&text[start..byte]);
+            start = chars[index + 1].0 + 1;
+            index += 2;
+            continue;
+        }
+        index += 1;
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+fn is_pull_event_comparison(text: &str) -> bool {
+    let Some(rest) = strip_prefix_ignore_ascii_case(text.trim(), "github.event_name") else {
+        return false;
+    };
+    if rest.starts_with(|character: char| character.is_ascii_alphanumeric() || character == '_') {
+        return false;
+    }
+    let rest = rest.trim_start();
+    let Some(rest) = rest.strip_prefix("==") else {
+        return false;
+    };
+    if rest.starts_with('=') {
+        return false;
+    }
+    let rest = rest.trim_start();
+    let Some((body, rest)) = quoted_literal(rest) else {
+        return false;
+    };
+    if !rest.trim().is_empty() {
+        return false;
+    }
+    body.eq_ignore_ascii_case("pull_request") || body.eq_ignore_ascii_case("pull_request_target")
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let mut rest = text;
+    for expected in prefix.chars() {
+        let mut chars = rest.chars();
+        let got = chars.next()?;
+        if !got.eq_ignore_ascii_case(&expected) {
+            return None;
+        }
+        rest = chars.as_str();
+    }
+    Some(rest)
+}
+
+fn quoted_literal(text: &str) -> Option<(&str, &str)> {
+    let quote = text.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let rest = &text[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some((&rest[..end], &rest[end + quote.len_utf8()..]))
 }
 
 fn note_jobs(workflow: &mut Workflow, node: &Node) {
@@ -563,6 +732,7 @@ fn note_jobs(workflow: &mut Workflow, node: &Node) {
             has_timeout_minutes: false,
             steps_text: String::new(),
             matrix: None,
+            cancel_in_progress: false,
         };
         if let Node::Mapping { entries, .. } = &item.value {
             fill_job(&mut job, entries);
@@ -600,6 +770,9 @@ fn fill_job(job: &mut Job, entries: &[Entry]) {
     }
     if let Some(item) = entry(entries, "strategy") {
         job.matrix = matrix_from(&item.value);
+    }
+    if let Some(item) = entry(entries, "concurrency") {
+        job.cancel_in_progress = concurrency_enabled(&item.value);
     }
 }
 
@@ -750,6 +923,7 @@ fn eval_matrix(line: usize, node: &Node) -> Matrix {
             jobs: 1,
             at_least: true,
             jobs_hi: None,
+            axes: Vec::new(),
         },
         Node::Mapping { entries, .. } => count_matrix(line, entries),
         _ => Matrix {
@@ -757,6 +931,7 @@ fn eval_matrix(line: usize, node: &Node) -> Matrix {
             jobs: 0,
             at_least: false,
             jobs_hi: None,
+            axes: Vec::new(),
         },
     }
 }
@@ -784,6 +959,105 @@ fn count_matrix(line: usize, entries: &[Entry]) -> Matrix {
         jobs,
         at_least,
         jobs_hi,
+        axes: runner_axes(entries),
+    }
+}
+
+fn runner_axes(entries: &[Entry]) -> Vec<MatrixAxis> {
+    let mut axes = Vec::new();
+    for item in entries {
+        match item.key.as_str() {
+            "include" => note_include_runners(&item.value, &mut axes),
+            "exclude" => {}
+            _ => note_axis_definition(item.line, &item.key, &item.value, &mut axes),
+        }
+    }
+    axes
+}
+
+fn note_axis_definition(line: usize, name: &str, node: &Node, axes: &mut Vec<MatrixAxis>) {
+    note_axis(axes, name, line, true, axis_label_sets(node));
+}
+
+fn note_include_runners(node: &Node, axes: &mut Vec<MatrixAxis>) {
+    match node {
+        Node::Sequence { items } => {
+            for item in items {
+                note_include_row(item, axes);
+            }
+        }
+        Node::Mapping { .. } => note_include_row(node, axes),
+        _ => {}
+    }
+}
+
+fn note_include_row(node: &Node, axes: &mut Vec<MatrixAxis>) {
+    let Node::Mapping { entries, .. } = node else {
+        return;
+    };
+    for item in entries {
+        if let Some(labels) = runner_label_set(&item.value) {
+            note_axis(axes, &item.key, item.line, false, vec![labels]);
+        }
+    }
+}
+
+fn note_axis(
+    axes: &mut Vec<MatrixAxis>,
+    name: &str,
+    line: usize,
+    is_definition: bool,
+    sets: Vec<Vec<String>>,
+) {
+    if let Some(axis) = axes.iter_mut().find(|axis| axis.name == name) {
+        if is_definition {
+            axis.line = line;
+        }
+        axis.values.extend(sets);
+        return;
+    }
+    if !is_definition && sets.is_empty() {
+        return;
+    }
+    axes.push(MatrixAxis {
+        name: name.to_string(),
+        line,
+        values: sets,
+    });
+}
+
+/// One label set per list item. A nested list is one multi-label runner.
+fn axis_label_sets(node: &Node) -> Vec<Vec<String>> {
+    match node {
+        Node::Sequence { items } => items.iter().filter_map(runner_label_set).collect(),
+        Node::Scalar { value, .. } if value.is_empty() || is_github_expression(value) => Vec::new(),
+        other => runner_label_set(other).into_iter().collect(),
+    }
+}
+
+fn runner_label_set(node: &Node) -> Option<Vec<String>> {
+    let labels = match node {
+        Node::Scalar { value, .. } => {
+            if value.is_empty() || is_github_expression(value) {
+                return None;
+            }
+            vec![value.clone()]
+        }
+        Node::Sequence { items } => items
+            .iter()
+            .filter_map(|item| match item {
+                Node::Scalar { value, .. } if !value.is_empty() && !is_github_expression(value) => {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .collect(),
+        Node::Mapping { entries, .. } => labels_of(entries),
+    };
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels)
     }
 }
 
@@ -1408,6 +1682,7 @@ jobs:
 
         let other = must_scan("on.yml", "on: [push, pull_request_target]\n");
         assert!(!other.has_pull_request);
+        assert!(other.has_pull_request_target);
 
         let scalar = must_scan("on.yml", "on: pull_request\n");
         assert_eq!(scalar.on_line, Some(1));

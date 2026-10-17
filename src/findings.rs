@@ -11,7 +11,7 @@ pub enum FindingKind {
     LintOnRunner,
     /// Job has no `timeout-minutes`.
     MissingTimeout,
-    /// `pull_request` without `concurrency.cancel-in-progress: true`.
+    /// `pull_request` or `pull_request_target` without cancel-in-progress.
     PullRequestConcurrency,
     /// Matrix expands to at least six billed jobs, or an axis length is an expression.
     MatrixJobs,
@@ -54,14 +54,14 @@ const LINT_TOOLS: [&str; 5] = ["lint", "fmt", "clippy", "eslint", "prettier"];
 pub fn findings(workflows: &[Workflow]) -> Vec<Finding> {
     let mut found = Vec::new();
     for workflow in workflows {
-        if workflow.has_pull_request && !workflow.cancel_in_progress {
+        if pulls_without_cancel(workflow) {
             if let Some(line) = workflow.on_line {
                 push(
                     &mut found,
                     &workflow.path,
                     line,
                     FindingKind::PullRequestConcurrency,
-                    "pull_request without concurrency cancel-in-progress",
+                    pr_cancel_message(workflow),
                 );
             }
         }
@@ -172,29 +172,27 @@ fn debug_cell(text: &str) -> String {
     format!("{text:?}")
 }
 
+/// Workflow-level cancel, or cancel on any job, covers the workflow.
+fn pulls_without_cancel(workflow: &Workflow) -> bool {
+    let pulls = workflow.has_pull_request || workflow.has_pull_request_target;
+    pulls && !workflow_cancels(workflow)
+}
+
+fn workflow_cancels(workflow: &Workflow) -> bool {
+    workflow.cancel_in_progress || workflow.jobs.iter().any(|job| job.cancel_in_progress)
+}
+
+fn pr_cancel_message(workflow: &Workflow) -> &'static str {
+    if workflow.has_pull_request {
+        "pull_request without concurrency cancel-in-progress"
+    } else {
+        "pull_request_target without concurrency cancel-in-progress"
+    }
+}
+
 fn note_job(found: &mut Vec<Finding>, path: &Path, job: &Job) {
     if let Some(runs_on) = &job.runs_on {
-        if job_is_lint(job) {
-            let (macos, windows) = runner_oses(runs_on);
-            if macos {
-                push(
-                    found,
-                    path,
-                    runs_on.line,
-                    FindingKind::LintOnRunner,
-                    "lint on macOS",
-                );
-            }
-            if windows {
-                push(
-                    found,
-                    path,
-                    runs_on.line,
-                    FindingKind::LintOnRunner,
-                    "lint on Windows",
-                );
-            }
-        }
+        note_runner(found, path, job, runs_on);
     }
     if !job.has_timeout_minutes {
         push(
@@ -259,10 +257,219 @@ fn mentions_lint_tool(text: &str) -> bool {
         })
 }
 
-fn runner_oses(runs_on: &RunsOn) -> (bool, bool) {
+fn note_runner(found: &mut Vec<Finding>, path: &Path, job: &Job, runs_on: &RunsOn) {
+    if !job_is_lint(job) || self_hosted(&runs_on.labels) {
+        return;
+    }
+    let (macos, windows) = label_set_os(&runs_on.labels);
+    if macos {
+        push(
+            found,
+            path,
+            runs_on.line,
+            FindingKind::LintOnRunner,
+            "lint on macOS",
+        );
+    }
+    if windows {
+        push(
+            found,
+            path,
+            runs_on.line,
+            FindingKind::LintOnRunner,
+            "lint on Windows",
+        );
+    }
+    let Some(matrix) = &job.matrix else {
+        return;
+    };
+    for hit in matrix_runner_hits(runs_on, matrix) {
+        if hit.macos {
+            push(
+                found,
+                path,
+                runs_on.line,
+                FindingKind::LintOnRunner,
+                &axis_lint_message("macOS", runs_on.line, &hit.axis, hit.line),
+            );
+        }
+        if hit.windows {
+            push(
+                found,
+                path,
+                runs_on.line,
+                FindingKind::LintOnRunner,
+                &axis_lint_message("Windows", runs_on.line, &hit.axis, hit.line),
+            );
+        }
+    }
+}
+
+fn axis_lint_message(os: &str, runs_on_line: usize, axis: &str, axis_line: usize) -> String {
+    format!("lint on {os} (runs-on line {runs_on_line}, axis {axis} line {axis_line})")
+}
+
+struct AxisHit {
+    macos: bool,
+    windows: bool,
+    axis: String,
+    line: usize,
+}
+
+fn matrix_runner_hits(runs_on: &RunsOn, matrix: &crate::workflow::Matrix) -> Vec<AxisHit> {
+    let mut hits = Vec::new();
+    for name in runs_on_matrix_names(runs_on) {
+        let Some(axis) = matrix.axes.iter().find(|axis| axis.name == name) else {
+            continue;
+        };
+        let mut macos = false;
+        let mut windows = false;
+        for labels in &axis.values {
+            let (axis_macos, axis_windows) = label_set_os(labels);
+            macos |= axis_macos;
+            windows |= axis_windows;
+        }
+        if macos || windows {
+            hits.push(AxisHit {
+                macos,
+                windows,
+                axis: axis.name.clone(),
+                line: axis.line,
+            });
+        }
+    }
+    hits
+}
+
+fn runs_on_matrix_names(runs_on: &RunsOn) -> Vec<String> {
+    let mut names = matrix_axis_names(&runs_on.value);
+    for label in &runs_on.labels {
+        for name in matrix_axis_names(label) {
+            push_unique(&mut names, name);
+        }
+    }
+    names
+}
+
+fn push_unique(names: &mut Vec<String>, name: String) {
+    if !names.iter().any(|item| item == &name) {
+        names.push(name);
+    }
+}
+
+/// `matrix.name` and `matrix['name']` / `matrix["name"]`, including inside a longer scalar.
+fn matrix_axis_names(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut names = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if !starts_with_matrix(&chars, index) {
+            index += 1;
+            continue;
+        }
+        let boundary = index == 0 || !is_name_char(chars[index - 1]);
+        let after = index + MATRIX.len();
+        if !boundary {
+            index += 1;
+            continue;
+        }
+        if let Some(end) = dotted_axis_end(&chars, after) {
+            push_unique(&mut names, chars[after + 1..end].iter().collect());
+            index = end;
+            continue;
+        }
+        if let Some((name, end)) = bracket_axis(&chars, after) {
+            push_unique(&mut names, name);
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    names
+}
+
+const MATRIX: &[char] = &['m', 'a', 't', 'r', 'i', 'x'];
+
+fn starts_with_matrix(chars: &[char], index: usize) -> bool {
+    index + MATRIX.len() <= chars.len() && chars[index..index + MATRIX.len()] == MATRIX[..]
+}
+
+fn is_name_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
+}
+
+fn dotted_axis_end(chars: &[char], after_matrix: usize) -> Option<usize> {
+    if after_matrix >= chars.len() || chars[after_matrix] != '.' {
+        return None;
+    }
+    let start = after_matrix + 1;
+    if start >= chars.len() || !(chars[start].is_ascii_alphabetic() || chars[start] == '_') {
+        return None;
+    }
+    let mut end = start + 1;
+    while end < chars.len() && (is_name_char(chars[end]) || chars[end] == '-') {
+        end += 1;
+    }
+    while end > start && chars[end - 1] == '-' {
+        end -= 1;
+    }
+    if end == start {
+        None
+    } else {
+        Some(end)
+    }
+}
+
+fn bracket_axis(chars: &[char], after_matrix: usize) -> Option<(String, usize)> {
+    let mut index = skip_ws(chars, after_matrix);
+    if index >= chars.len() || chars[index] != '[' {
+        return None;
+    }
+    index = skip_ws(chars, index + 1);
+    if index >= chars.len() {
+        return None;
+    }
+    let quote = chars[index];
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    index += 1;
+    let start = index;
+    while index < chars.len() && chars[index] != quote {
+        index += 1;
+    }
+    if index >= chars.len() {
+        return None;
+    }
+    let name: String = chars[start..index].iter().collect();
+    index = skip_ws(chars, index + 1);
+    if name.is_empty() || index >= chars.len() || chars[index] != ']' {
+        return None;
+    }
+    Some((name, index + 1))
+}
+
+fn skip_ws(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn self_hosted(labels: &[String]) -> bool {
+    labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("self-hosted"))
+}
+
+/// A label set that contains `self-hosted` is never a paid macOS or Windows runner.
+fn label_set_os(labels: &[String]) -> (bool, bool) {
+    if self_hosted(labels) {
+        return (false, false);
+    }
     let mut macos = false;
     let mut windows = false;
-    for label in &runs_on.labels {
+    for label in labels {
         let label = label.to_ascii_lowercase();
         if label == "macos" || label.starts_with("macos-") {
             macos = true;
@@ -335,11 +542,13 @@ mod tests {
 "#;
         let found = analyze(yaml);
         let f1 = of_kind(&found, FindingKind::LintOnRunner);
-        assert_eq!(f1.len(), 2, "{found:?}");
-        assert_eq!(f1[0].line, 4);
-        assert_eq!(f1[0].message, "lint on macOS");
-        assert_eq!(f1[1].line, 8);
-        assert_eq!(f1[1].message, "lint on Windows");
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 8);
+        assert_eq!(f1[0].message, "lint on Windows");
+        assert!(
+            f1.iter().all(|item| item.line != 4),
+            "self-hosted label set is not paid macOS: {found:?}"
+        );
     }
 
     #[test]
@@ -520,10 +729,10 @@ jobs:
 
         let map_runner = "jobs:\n  lint:\n    runs-on: {group: large, labels: [self-hosted, macos]}\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n";
         let found = analyze(map_runner);
-        let f1 = of_kind(&found, FindingKind::LintOnRunner);
-        assert_eq!(f1.len(), 1, "{found:?}");
-        assert_eq!(f1[0].line, 3);
-        assert_eq!(f1[0].message, "lint on macOS");
+        assert!(
+            of_kind(&found, FindingKind::LintOnRunner).is_empty(),
+            "self-hosted label set is not paid macOS: {found:?}"
+        );
         assert!(
             of_kind(&found, FindingKind::MissingTimeout).is_empty(),
             "{found:?}"
@@ -531,10 +740,10 @@ jobs:
 
         let block_map = "jobs:\n  prettier:\n    runs-on:\n      group: large\n      labels:\n        - self-hosted\n        - windows\n    timeout-minutes: 5\n    steps:\n      - run: npx prettier --check .\n";
         let found = analyze(block_map);
-        let f1 = of_kind(&found, FindingKind::LintOnRunner);
-        assert_eq!(f1.len(), 1, "{found:?}");
-        assert_eq!(f1[0].line, 3);
-        assert_eq!(f1[0].message, "lint on Windows");
+        assert!(
+            of_kind(&found, FindingKind::LintOnRunner).is_empty(),
+            "self-hosted label set is not paid Windows: {found:?}"
+        );
 
         let merged = "defaults: &defaults\n  runs-on: ubuntu-latest\n  timeout-minutes: 10\n  steps:\n    - run: cargo test\non: pull_request\njobs:\n  lint:\n    <<: *defaults\n    runs-on: macos-latest\n    steps:\n      - run: cargo clippy -- -D warnings\n";
         let found = analyze(merged);
@@ -1172,5 +1381,940 @@ jobs:
         assert_eq!(rows[0].applied_cost_per_quantity, usd("0.062"));
         assert_eq!(rows[0].gross, usd("7.316"));
         assert_eq!(rows[0].net, usd("7.316"));
+    }
+
+    fn joined(lines: &[&str]) -> String {
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text
+    }
+
+    fn crlf(text: &str) -> String {
+        text.replace('\n', "\r\n")
+    }
+
+    fn axis_msg(os: &str, runs_on: usize, axis: &str, axis_line: usize) -> String {
+        format!("lint on {os} (runs-on line {runs_on}, axis {axis} line {axis_line})")
+    }
+
+    fn assert_f1(found: &[Finding], line: usize, messages: &[&str]) {
+        let f1 = of_kind(found, FindingKind::LintOnRunner);
+        let got: Vec<&str> = f1.iter().map(|item| item.message.as_str()).collect();
+        assert_eq!(got, messages, "{found:?}");
+        assert!(f1.iter().all(|item| item.line == line), "{found:?}");
+        assert!(
+            f1.iter().all(|item| item.path == Path::new("fixture.yml")),
+            "{found:?}"
+        );
+    }
+
+    fn assert_no_f1(found: &[Finding]) {
+        assert!(
+            of_kind(found, FindingKind::LintOnRunner).is_empty(),
+            "{found:?}"
+        );
+    }
+
+    const F3_PR: &str = "pull_request without concurrency cancel-in-progress";
+    const F3_TARGET: &str = "pull_request_target without concurrency cancel-in-progress";
+
+    fn assert_f3(found: &[Finding], line: usize, message: &str) {
+        let f3 = of_kind(found, FindingKind::PullRequestConcurrency);
+        assert_eq!(f3.len(), 1, "{found:?}");
+        assert_eq!(f3[0].line, line, "{found:?}");
+        assert_eq!(f3[0].message, message, "{found:?}");
+        assert_eq!(f3[0].path, Path::new("fixture.yml"));
+    }
+
+    fn assert_no_f3(found: &[Finding]) {
+        assert!(
+            of_kind(found, FindingKind::PullRequestConcurrency).is_empty(),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn matrix_runs_on_couples_axis_and_include_values() {
+        let positive = joined(&[
+            "jobs:",                                       // 1
+            "  lint:",                                     // 2
+            "    runs-on: ${{ matrix.os }}",               // 3
+            "    timeout-minutes: 5",                      // 4
+            "    steps:",                                  // 5
+            "      - run: cargo fmt --check",              // 6
+            "    strategy:",                               // 7
+            "      matrix:",                               // 8
+            "        os: [ubuntu-latest, windows-latest]", // 9
+            "        include:",                            // 10
+            "          - os: macos-latest",                // 11
+        ]);
+        let windows = axis_msg("Windows", 3, "os", 9);
+        let macos = axis_msg("macOS", 3, "os", 9);
+        assert_f1(&analyze(&positive), 3, &[&windows, &macos]);
+        assert_f1(&analyze(&crlf(&positive)), 3, &[&windows, &macos]);
+
+        let include_only = joined(&[
+            "jobs:",                          // 1
+            "  lint:",                        // 2
+            "    runs-on: ${{ matrix.os }}",  // 3
+            "    timeout-minutes: 5",         // 4
+            "    steps:",                     // 5
+            "      - run: cargo fmt --check", // 6
+            "    strategy:",                  // 7
+            "      matrix:",                  // 8
+            "        include:",               // 9
+            "          - os: macos-latest",   // 10
+            "            npm: \"9\"",         // 11
+            "          - os: ubuntu-latest",  // 12
+        ]);
+        assert_f1(
+            &analyze(&include_only),
+            3,
+            &[&axis_msg("macOS", 3, "os", 10)],
+        );
+
+        let include_first = joined(&[
+            "jobs:",                          // 1
+            "  lint:",                        // 2
+            "    runs-on: ${{ matrix.os }}",  // 3
+            "    timeout-minutes: 5",         // 4
+            "    steps:",                     // 5
+            "      - run: cargo fmt --check", // 6
+            "    strategy:",                  // 7
+            "      matrix:",                  // 8
+            "        include:",               // 9
+            "          - os: macos-latest",   // 10
+            "        os: [ubuntu-latest]",    // 11
+        ]);
+        assert_f1(
+            &analyze(&include_first),
+            3,
+            &[&axis_msg("macOS", 3, "os", 11)],
+        );
+        assert_f1(
+            &analyze(&crlf(&include_first)),
+            3,
+            &[&axis_msg("macOS", 3, "os", 11)],
+        );
+
+        let expression_axis = joined(&[
+            "jobs:",                          // 1
+            "  lint:",                        // 2
+            "    runs-on: ${{ matrix.os }}",  // 3
+            "    timeout-minutes: 5",         // 4
+            "    steps:",                     // 5
+            "      - run: cargo fmt --check", // 6
+            "    strategy:",                  // 7
+            "      matrix:",                  // 8
+            "        include:",               // 9
+            "          - os: windows-latest", // 10
+            "        os: ${{ inputs.os }}",   // 11
+        ]);
+        assert_f1(
+            &analyze(&expression_axis),
+            3,
+            &[&axis_msg("Windows", 3, "os", 11)],
+        );
+
+        let capitals = joined(&[
+            "jobs:",                                      // 1
+            "  lint:",                                    // 2
+            "    runs-on: ${{ matrix.OS }}",              // 3
+            "    timeout-minutes: 5",                     // 4
+            "    steps:",                                 // 5
+            "      - run: cargo fmt --check",             // 6
+            "    strategy:",                              // 7
+            "      matrix:",                              // 8
+            "        OS: [MacOS-latest, WINDOWS-latest]", // 9
+            "        include:",                           // 10
+            "          - OS: ubuntu-latest",              // 11
+        ]);
+        let windows = axis_msg("Windows", 3, "OS", 9);
+        let macos = axis_msg("macOS", 3, "OS", 9);
+        assert_f1(&analyze(&capitals), 3, &[&windows, &macos]);
+
+        let reordered = joined(&[
+            "jobs:",                          // 1
+            "  lint:",                        // 2
+            "    strategy:",                  // 3
+            "      matrix:",                  // 4
+            "        os: [macos-latest]",     // 5
+            "    steps:",                     // 6
+            "      - run: cargo fmt --check", // 7
+            "    timeout-minutes: 5",         // 8
+            "    runs-on: ${{ matrix.os }}",  // 9
+        ]);
+        assert_f1(&analyze(&reordered), 9, &[&axis_msg("macOS", 9, "os", 5)]);
+
+        let split_values = joined(&[
+            "jobs:",                                   // 1
+            "  prettier:",                             // 2
+            "    runs-on: ${{ matrix.os }}",           // 3
+            "    timeout-minutes: 5",                  // 4
+            "    steps:",                              // 5
+            "      - run: npx prettier --check .",     // 6
+            "    strategy:",                           // 7
+            "      matrix:",                           // 8
+            "        os: [self-hosted, macos-latest]", // 9
+        ]);
+        assert_f1(
+            &analyze(&split_values),
+            3,
+            &[&axis_msg("macOS", 3, "os", 9)],
+        );
+
+        let reversed_split = joined(&[
+            "jobs:",                                    // 1
+            "  lint:",                                  // 2
+            "    runs-on: ${{ matrix.os }}",            // 3
+            "    timeout-minutes: 5",                   // 4
+            "    steps:",                               // 5
+            "      - run: cargo clippy -- -D warnings", // 6
+            "    strategy:",                            // 7
+            "      matrix:",                            // 8
+            "        os: [WINDOWS-2022, Self-Hosted]",  // 9
+        ]);
+        assert_f1(
+            &analyze(&reversed_split),
+            3,
+            &[&axis_msg("Windows", 3, "os", 9)],
+        );
+
+        let map_value = joined(&[
+            "jobs:",                                    // 1
+            "  lint:",                                  // 2
+            "    runs-on: ${{ matrix.os }}",            // 3
+            "    timeout-minutes: 5",                   // 4
+            "    steps:",                               // 5
+            "      - run: cargo fmt --check",           // 6
+            "    strategy:",                            // 7
+            "      matrix:",                            // 8
+            "        os:",                              // 9
+            "          - group: large",                 // 10
+            "            labels: [self-hosted, macos]", // 11
+            "          - group: large",                 // 12
+            "            labels: [windows-latest]",     // 13
+        ]);
+        assert_f1(&analyze(&map_value), 3, &[&axis_msg("Windows", 3, "os", 9)]);
+
+        let excluded = joined(&[
+            "jobs:",                                     // 1
+            "  lint:",                                   // 2
+            "    runs-on: ${{ matrix.os }}",             // 3
+            "    timeout-minutes: 5",                    // 4
+            "    steps:",                                // 5
+            "      - run: cargo fmt --check",            // 6
+            "    strategy:",                             // 7
+            "      matrix:",                             // 8
+            "        os: [ubuntu-latest, macos-latest]", // 9
+            "        exclude:",                          // 10
+            "          - os: macos-latest",              // 11
+        ]);
+        assert_f1(&analyze(&excluded), 3, &[&axis_msg("macOS", 3, "os", 9)]);
+
+        let flow = joined(&[
+            "jobs: {",                                      // 1
+            "  lint: {",                                    // 2
+            "    runs-on: \"${{ matrix.os }}\",",           // 3
+            "    timeout-minutes: 5,",                      // 4
+            "    steps: [{run: cargo fmt --check}],",       // 5
+            "    strategy: {",                              // 6
+            "      matrix: {",                              // 7
+            "        os: [ubuntu-latest, windows-latest],", // 8
+            "        include: [{os: macos-latest}]",        // 9
+            "      }",                                      // 10
+            "    }",                                        // 11
+            "  }",                                          // 12
+            "}",                                            // 13
+        ]);
+        let windows = axis_msg("Windows", 3, "os", 8);
+        let macos = axis_msg("macOS", 3, "os", 8);
+        assert_f1(&analyze(&flow), 3, &[&windows, &macos]);
+        assert_f1(&analyze(&crlf(&flow)), 3, &[&windows, &macos]);
+
+        let ubuntu = joined(&[
+            "jobs:",                                     // 1
+            "  lint:",                                   // 2
+            "    runs-on: ${{ matrix.os }}",             // 3
+            "    timeout-minutes: 5",                    // 4
+            "    steps:",                                // 5
+            "      - run: cargo fmt --check",            // 6
+            "    strategy:",                             // 7
+            "      matrix:",                             // 8
+            "        os: [ubuntu-latest, ubuntu-22.04]", // 9
+            "        include:",                          // 10
+            "          - os: ubuntu-24.04",              // 11
+        ]);
+        assert_no_f1(&analyze(&ubuntu));
+        assert_no_f1(&analyze(&crlf(&ubuntu)));
+
+        let nested_hosted = joined(&[
+            "jobs:",                              // 1
+            "  lint:",                            // 2
+            "    runs-on: ${{ matrix.os }}",      // 3
+            "    timeout-minutes: 5",             // 4
+            "    steps:",                         // 5
+            "      - run: cargo fmt --check",     // 6
+            "    strategy:",                      // 7
+            "      matrix:",                      // 8
+            "        os:",                        // 9
+            "          - [self-hosted, macos]",   // 10
+            "          - [Self-Hosted, Windows]", // 11
+        ]);
+        assert_no_f1(&analyze(&nested_hosted));
+
+        let include_hosted = joined(&[
+            "jobs:",                                  // 1
+            "  lint:",                                // 2
+            "    runs-on: ${{ matrix.os }}",          // 3
+            "    timeout-minutes: 5",                 // 4
+            "    steps:",                             // 5
+            "      - run: cargo fmt --check",         // 6
+            "    strategy:",                          // 7
+            "      matrix:",                          // 8
+            "        include:",                       // 9
+            "          - os: [self-hosted, macos]",   // 10
+            "          - os: [windows, Self-Hosted]", // 11
+        ]);
+        assert_no_f1(&analyze(&include_hosted));
+
+        let not_lint = joined(&[
+            "jobs:",                                      // 1
+            "  test:",                                    // 2
+            "    runs-on: ${{ matrix.os }}",              // 3
+            "    timeout-minutes: 5",                     // 4
+            "    steps:",                                 // 5
+            "      - run: cargo test",                    // 6
+            "    strategy:",                              // 7
+            "      matrix:",                              // 8
+            "        os: [macos-latest, windows-latest]", // 9
+        ]);
+        assert_no_f1(&analyze(&not_lint));
+
+        let other_axis = joined(&[
+            "jobs:",                                      // 1
+            "  lint:",                                    // 2
+            "    runs-on: ${{ matrix.node }}",            // 3
+            "    timeout-minutes: 5",                     // 4
+            "    steps:",                                 // 5
+            "      - run: cargo fmt --check",             // 6
+            "    strategy:",                              // 7
+            "      matrix:",                              // 8
+            "        os: [macos-latest, windows-latest]", // 9
+            "        node: ['14', '16']",                 // 10
+        ]);
+        assert_no_f1(&analyze(&other_axis));
+
+        let wrong_case = joined(&[
+            "jobs:",                                      // 1
+            "  lint:",                                    // 2
+            "    runs-on: ${{ matrix.os }}",              // 3
+            "    timeout-minutes: 5",                     // 4
+            "    steps:",                                 // 5
+            "      - run: cargo fmt --check",             // 6
+            "    strategy:",                              // 7
+            "      matrix:",                              // 8
+            "        OS: [MacOS-latest, WINDOWS-latest]", // 9
+        ]);
+        assert_no_f1(&analyze(&wrong_case));
+
+        let missing = [
+            joined(&[
+                "jobs:",
+                "  lint:",
+                "    runs-on: ${{ matrix.os }}",
+                "    timeout-minutes: 5",
+                "    steps:",
+                "      - run: cargo fmt --check",
+            ]),
+            joined(&[
+                "jobs:",
+                "  lint:",
+                "    runs-on: ${{ matrix.os }}",
+                "    timeout-minutes: 5",
+                "    steps:",
+                "      - run: cargo fmt --check",
+                "    strategy:",
+                "      matrix: {}",
+            ]),
+            joined(&[
+                "jobs:",
+                "  lint:",
+                "    runs-on: ${{ matrix.os }}",
+                "    timeout-minutes: 5",
+                "    steps:",
+                "      - run: cargo fmt --check",
+                "    strategy:",
+                "      matrix:",
+                "        os: []",
+            ]),
+            joined(&[
+                "jobs:",
+                "  lint:",
+                "    runs-on: ${{ matrix.os }}",
+                "    timeout-minutes: 5",
+                "    steps:",
+                "      - run: cargo fmt --check",
+                "    strategy:",
+                "      matrix:",
+                "        os: ${{ inputs.os }}",
+            ]),
+            joined(&[
+                "jobs:",
+                "  lint:",
+                "    runs-on: \"\"",
+                "    timeout-minutes: 5",
+                "    steps:",
+                "      - run: cargo fmt --check",
+                "    strategy:",
+                "      matrix:",
+                "        os: [macos-latest]",
+            ]),
+            joined(&[
+                "jobs:",
+                "  lint:",
+                "    timeout-minutes: 5",
+                "    steps:",
+                "      - run: cargo fmt --check",
+                "    strategy:",
+                "      matrix:",
+                "        os: [macos-latest, windows-latest]",
+            ]),
+            joined(&[
+                "jobs:",
+                "  lint:",
+                "    runs-on: ${{ matrix.os }}",
+                "    timeout-minutes: 5",
+                "    steps:",
+                "      - run: cargo fmt --check",
+                "    strategy:",
+                "      matrix:",
+                "        include: []",
+            ]),
+            joined(&[
+                "jobs:",
+                "  lint:",
+                "    runs-on: ${{ matrix.missing }}",
+                "    timeout-minutes: 5",
+                "    steps:",
+                "      - run: cargo fmt --check",
+                "    strategy:",
+                "      matrix:",
+                "        os: [macos-latest]",
+            ]),
+            joined(&[
+                "jobs:",
+                "  lint:",
+                "    runs-on: ${{ matrix.os }}",
+                "    timeout-minutes: 5",
+                "    steps:",
+                "      - run: cargo fmt --check",
+                "    strategy:",
+                "      matrix:",
+                "        include:",
+                "          - os: \"\"",
+            ]),
+            String::new(),
+            "{}\n".to_string(),
+        ];
+        for yaml in missing {
+            assert_no_f1(&analyze(&yaml));
+            assert_no_f1(&analyze(&crlf(&yaml)));
+        }
+
+        let flow_negative = joined(&[
+            "jobs: {",
+            "  lint: {",
+            "    runs-on: \"${{ matrix.os }}\",",
+            "    timeout-minutes: 5,",
+            "    steps: [{run: cargo fmt --check}],",
+            "    strategy: {matrix: {os: [ubuntu-latest]}}",
+            "  }",
+            "}",
+        ]);
+        assert_no_f1(&analyze(&flow_negative));
+    }
+
+    #[test]
+    fn matrix_reference_inside_text_couples_that_axis() {
+        let inside = joined(&[
+            "jobs:",                                        // 1
+            "  fmt:",                                       // 2
+            "    runs-on: ${{ format('{0}', matrix.os) }}", // 3
+            "    timeout-minutes: 5",                       // 4
+            "    steps:",                                   // 5
+            "      - run: cargo fmt --check",               // 6
+            "    strategy:",                                // 7
+            "      matrix:",                                // 8
+            "        os: [ubuntu-latest, macos-14]",        // 9
+        ]);
+        assert_f1(&analyze(&inside), 3, &[&axis_msg("macOS", 3, "os", 9)]);
+        assert_f1(
+            &analyze(&crlf(&inside)),
+            3,
+            &[&axis_msg("macOS", 3, "os", 9)],
+        );
+
+        let both = joined(&[
+            "jobs:",                                                 // 1
+            "  lint:",                                               // 2
+            "    runs-on: pre-${{ matrix.os }}-${{ matrix.image }}", // 3
+            "    timeout-minutes: 5",                                // 4
+            "    steps:",                                            // 5
+            "      - run: cargo fmt --check",                        // 6
+            "    strategy:",                                         // 7
+            "      matrix:",                                         // 8
+            "        os: [ubuntu-latest]",                           // 9
+            "        image: [macos-latest, windows-latest]",         // 10
+        ]);
+        let windows = axis_msg("Windows", 3, "image", 10);
+        let macos = axis_msg("macOS", 3, "image", 10);
+        assert_f1(&analyze(&both), 3, &[&windows, &macos]);
+
+        let bracket = joined(&[
+            "jobs:",                            // 1
+            "  eslint:",                        // 2
+            "    runs-on: ${{ matrix['os'] }}", // 3
+            "    timeout-minutes: 5",           // 4
+            "    steps:",                       // 5
+            "      - run: npx eslint .",        // 6
+            "    strategy:",                    // 7
+            "      matrix:",                    // 8
+            "        os: [windows-latest]",     // 9
+        ]);
+        assert_f1(&analyze(&bracket), 3, &[&axis_msg("Windows", 3, "os", 9)]);
+
+        let spaced = joined(&[
+            "jobs:",                                // 1
+            "  lint:",                              // 2
+            "    name: Clippy",                     // 3
+            "    runs-on: ${{ matrix[ \"OS\" ] }}", // 4
+            "    timeout-minutes: 5",               // 5
+            "    steps:",                           // 6
+            "      - run: echo hi",                 // 7
+            "    strategy:",                        // 8
+            "      matrix:",                        // 9
+            "        OS: [MacOS]",                  // 10
+        ]);
+        assert_f1(&analyze(&spaced), 4, &[&axis_msg("macOS", 4, "OS", 10)]);
+
+        let extra = joined(&[
+            "jobs:",                          // 1
+            "  lint:",                        // 2
+            "    runs-on:",                   // 3
+            "      - ubuntu-latest",          // 4
+            "      - ${{ matrix.extra }}",    // 5
+            "    timeout-minutes: 5",         // 6
+            "    steps:",                     // 7
+            "      - run: cargo fmt --check", // 8
+            "    strategy:",                  // 9
+            "      matrix:",                  // 10
+            "        extra: [windows]",       // 11
+        ]);
+        assert_f1(&analyze(&extra), 3, &[&axis_msg("Windows", 3, "extra", 11)]);
+
+        let hosted_list = joined(&[
+            "jobs:",                                      // 1
+            "  lint:",                                    // 2
+            "    runs-on:",                               // 3
+            "      - ${{ matrix.os }}",                   // 4
+            "      - self-hosted",                        // 5
+            "    timeout-minutes: 5",                     // 6
+            "    steps:",                                 // 7
+            "      - run: cargo fmt --check",             // 8
+            "    strategy:",                              // 9
+            "      matrix:",                              // 10
+            "        os: [macos-latest, windows-latest]", // 11
+        ]);
+        assert_no_f1(&analyze(&hosted_list));
+        assert_no_f1(&analyze(&crlf(&hosted_list)));
+
+        let not_matrix = joined(&[
+            "jobs:",                            // 1
+            "  lint:",                          // 2
+            "    runs-on: ${{ notmatrix.os }}", // 3
+            "    timeout-minutes: 5",           // 4
+            "    steps:",                       // 5
+            "      - run: cargo fmt --check",   // 6
+            "    strategy:",                    // 7
+            "      matrix:",                    // 8
+            "        os: [macos-latest]",       // 9
+        ]);
+        assert_no_f1(&analyze(&not_matrix));
+
+        let flow = joined(&[
+            "jobs: {",                                                     // 1
+            "  lint: {",                                                   // 2
+            "    runs-on: \"runner-${{ matrix.os }}\",",                   // 3
+            "    timeout-minutes: 5,",                                     // 4
+            "    steps: [{run: cargo fmt --check}],",                      // 5
+            "    strategy: {matrix: {os: [ubuntu-latest, MacOS-latest]}}", // 6
+            "  }",                                                         // 7
+            "}",                                                           // 8
+        ]);
+        assert_f1(&analyze(&flow), 3, &[&axis_msg("macOS", 3, "os", 6)]);
+
+        let flow_negative = joined(&[
+            "jobs: {",
+            "  lint: {",
+            "    runs-on: \"${{ matrix.node }}\",",
+            "    timeout-minutes: 5,",
+            "    steps: [{run: cargo fmt --check}],",
+            "    strategy: {matrix: {os: [macos-latest], node: ['14']}}",
+            "  }",
+            "}",
+        ]);
+        assert_no_f1(&analyze(&flow_negative));
+        assert_no_f1(&analyze(&crlf(&flow_negative)));
+    }
+
+    #[test]
+    fn self_hosted_label_set_is_not_paid_macos_or_windows() {
+        let negative = [
+            "jobs:\n  lint:\n    runs-on: [self-hosted, macos]\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs:\n  lint:\n    runs-on: [macos, self-hosted]\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs:\n  lint:\n    runs-on: [Self-Hosted, MacOS]\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs:\n  prettier:\n    runs-on: [WINDOWS, SELF-HOSTED]\n    timeout-minutes: 5\n    steps:\n      - run: npx prettier --check .\n",
+            "jobs:\n  lint:\n    runs-on: [windows-latest, Self-Hosted]\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs:\n  lint:\n    runs-on:\n      - self-hosted\n      - windows\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs:\n  lint:\n    runs-on:\n      group: large\n      labels:\n        - windows\n        - self-hosted\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs:\n  lint:\n    runs-on: {group: large, labels: [self-hosted, macos]}\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs:\n  lint:\n    runs-on: {group: macos}\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs:\n  lint:\n    runs-on: []\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs:\n  lint:\n    runs-on: \"\"\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs:\n  lint:\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            "jobs: {lint: {runs-on: [self-hosted, macos], timeout-minutes: 5, steps: [{run: cargo fmt --check}]}}\n",
+            "jobs: {lint: {runs-on: {group: large, labels: [macos, Self-Hosted]}, timeout-minutes: 5, steps: [{run: cargo fmt --check}]}}\n",
+        ];
+        for yaml in negative {
+            assert_no_f1(&analyze(yaml));
+            assert_no_f1(&analyze(&crlf(yaml)));
+        }
+
+        let paid = joined(&[
+            "jobs:",                          // 1
+            "  lint:",                        // 2
+            "    runs-on: [MacOS-14]",        // 3
+            "    timeout-minutes: 5",         // 4
+            "    steps:",                     // 5
+            "      - run: cargo fmt --check", // 6
+        ]);
+        assert_f1(&analyze(&paid), 3, &["lint on macOS"]);
+        assert_f1(&analyze(&crlf(&paid)), 3, &["lint on macOS"]);
+
+        let both = joined(&[
+            "jobs:",                                       // 1
+            "  lint:",                                     // 2
+            "    runs-on: [macos-latest, windows-latest]", // 3
+            "    timeout-minutes: 5",                      // 4
+            "    steps:",                                  // 5
+            "      - run: cargo fmt --check",              // 6
+        ]);
+        assert_f1(&analyze(&both), 3, &["lint on Windows", "lint on macOS"]);
+
+        let exact = joined(&[
+            "jobs:",                  // 1
+            "  eslint:",              // 2
+            "    runs-on: Windows",   // 3
+            "    timeout-minutes: 5", // 4
+            "    steps:",             // 5
+            "      - run: echo hi",   // 6
+        ]);
+        assert_f1(&analyze(&exact), 3, &["lint on Windows"]);
+
+        let map = joined(&[
+            "jobs:",                          // 1
+            "  lint:",                        // 2
+            "    runs-on:",                   // 3
+            "      group: large",             // 4
+            "      labels: [macos-latest]",   // 5
+            "    timeout-minutes: 5",         // 6
+            "    steps:",                     // 7
+            "      - run: cargo fmt --check", // 8
+        ]);
+        assert_f1(&analyze(&map), 3, &["lint on macOS"]);
+
+        let flow = "jobs: {lint: {runs-on: {group: large, labels: [macos-latest, windows]}, timeout-minutes: 5, steps: [{run: cargo fmt --check}]}}\n";
+        assert_f1(&analyze(flow), 1, &["lint on Windows", "lint on macOS"]);
+        assert_f1(
+            &analyze(&crlf(flow)),
+            1,
+            &["lint on Windows", "lint on macOS"],
+        );
+    }
+
+    fn pr_with_cancel(value: &str) -> String {
+        format!("on: pull_request\nconcurrency:\n  group: ci\n  cancel-in-progress: {value}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n    steps:\n      - run: cargo test\n")
+    }
+
+    fn job_with_cancel(value: &str) -> String {
+        format!("on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n    concurrency:\n      group: ci\n      cancel-in-progress: {value}\n    steps:\n      - run: cargo test\n")
+    }
+
+    #[test]
+    fn cancel_expression_counts_as_true_for_f3() {
+        let cases = [
+            (r"${{ github.event_name == 'pull_request' }}", true),
+            (r"${{github.event_name=='pull_request'}}", true),
+            (r#"${{ github.event_name == "pull_request" }}"#, true),
+            (r"${{  github.event_name   ==   'pull_request'  }}", true),
+            (r"${{ GitHub.Event_Name == 'PULL_REQUEST' }}", true),
+            (r"${{ github.event_name == 'pull_request_target' }}", true),
+            (r#"${{ github.event_name == "Pull_Request_Target" }}"#, true),
+            (
+                r"${{ github.event_name == 'pull_request' || github.event_name == 'push' }}",
+                true,
+            ),
+            (r"${{ false || github.event_name == 'pull_request' }}", true),
+            (r"${{ (github.event_name == 'pull_request') }}", true),
+            ("(github.event_name == 'pull_request')", true),
+            ("true", true),
+            ("TRUE", true),
+            ("True", true),
+            (r"${{ true }}", true),
+            ("false", false),
+            ("FALSE", false),
+            (r"${{ false }}", false),
+            (r"${{ github.event_name == 'push' }}", false),
+            (r"${{ github.event_name != 'pull_request' }}", false),
+            (r"${{ github.event_name == 'pull_request_review' }}", false),
+            (
+                r"${{ github.event_name == 'pull_request' && false }}",
+                false,
+            ),
+            ("yes", false),
+            ("", false),
+            ("~", false),
+            ("null", false),
+        ];
+        for (value, enables) in cases {
+            for yaml in [
+                pr_with_cancel(value),
+                crlf(&pr_with_cancel(value)),
+                job_with_cancel(value),
+                crlf(&job_with_cancel(value)),
+            ] {
+                let found = analyze(&yaml);
+                if enables {
+                    assert_no_f3(&found);
+                } else {
+                    assert_f3(&found, 1, F3_PR);
+                }
+            }
+        }
+
+        let folded = "on: pull_request\nconcurrency:\n  cancel-in-progress: >-\n    ${{ github.event_name == 'pull_request' }}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n";
+        assert_no_f3(&analyze(folded));
+        assert_no_f3(&analyze(&crlf(folded)));
+
+        let literal_block = "on: pull_request\nconcurrency:\n  cancel-in-progress: |\n    ${{ github.event_name == \"pull_request\" }}\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_no_f3(&analyze(literal_block));
+
+        let flow = "on: {pull_request: {}}\nconcurrency: {group: ci, cancel-in-progress: \"${{ github.event_name == 'pull_request' }}\"}\njobs: {test: {runs-on: ubuntu-latest, timeout-minutes: 1, steps: [{run: cargo test}]}}\n";
+        assert_no_f3(&analyze(flow));
+        assert_no_f3(&analyze(&crlf(flow)));
+
+        let flow_job = "on: {pull_request: {}}\njobs: {test: {concurrency: {cancel-in-progress: \"${{  github.event_name == \\\"pull_request\\\"  }}\"}, runs-on: ubuntu-latest, timeout-minutes: 1}}\n";
+        assert_no_f3(&analyze(flow_job));
+
+        let flow_false = "on: [pull_request]\njobs: {test: {concurrency: {cancel-in-progress: false}, timeout-minutes: 1, runs-on: ubuntu-latest}}\n";
+        assert_f3(&analyze(flow_false), 1, F3_PR);
+        assert_f3(&analyze(&crlf(flow_false)), 1, F3_PR);
+
+        let missing_key = "on: pull_request\nconcurrency:\n  group: ci\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_f3(&analyze(missing_key), 1, F3_PR);
+
+        let empty_map = "on: pull_request\nconcurrency: {}\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_f3(&analyze(empty_map), 1, F3_PR);
+        assert_f3(&analyze(&crlf(empty_map)), 1, F3_PR);
+
+        let empty_value = "on: pull_request\nconcurrency:\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_f3(&analyze(empty_value), 1, F3_PR);
+
+        let group_only = "on: pull_request\nconcurrency: ci\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_f3(&analyze(group_only), 1, F3_PR);
+
+        let job_group_only = "on: pull_request\njobs:\n  test:\n    concurrency:\n      group: ci\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_f3(&analyze(job_group_only), 1, F3_PR);
+
+        let last_wins = "on: pull_request\nconcurrency:\n  cancel-in-progress: false\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        let found = analyze(last_wins);
+        assert_no_f3(&found);
+        assert_eq!(of_kind(&found, FindingKind::DuplicateKey).len(), 1);
+
+        let last_false = "on: pull_request\nconcurrency:\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n  cancel-in-progress: false\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        let found = analyze(last_false);
+        assert_f3(&found, 1, F3_PR);
+        assert_eq!(of_kind(&found, FindingKind::DuplicateKey).len(), 1);
+
+        let job_last_true = "on: pull_request\njobs:\n  test:\n    concurrency:\n      cancel-in-progress: false\n      cancel-in-progress: true\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_no_f3(&analyze(job_last_true));
+        assert_no_f3(&analyze(&crlf(job_last_true)));
+    }
+
+    #[test]
+    fn job_level_concurrency_counts_for_f3() {
+        let one_job = joined(&[
+            "on: pull_request",               // 1
+            "jobs:",                          // 2
+            "  test:",                        // 3
+            "    runs-on: ubuntu-latest",     // 4
+            "    timeout-minutes: 1",         // 5
+            "    concurrency:",               // 6
+            "      group: ci",                // 7
+            "      cancel-in-progress: true", // 8
+            "    steps:",                     // 9
+            "      - run: cargo test",        // 10
+        ]);
+        assert_no_f3(&analyze(&one_job));
+        assert_no_f3(&analyze(&crlf(&one_job)));
+
+        let concurrency_first = joined(&[
+            "on: pull_request",
+            "jobs:",
+            "  test:",
+            "    concurrency:",
+            "      cancel-in-progress: TRUE",
+            "    runs-on: ubuntu-latest",
+            "    timeout-minutes: 1",
+        ]);
+        assert_no_f3(&analyze(&concurrency_first));
+
+        let one_of_two = joined(&[
+            "on: pull_request",
+            "jobs:",
+            "  lint:",
+            "    runs-on: ubuntu-latest",
+            "    timeout-minutes: 1",
+            "    concurrency:",
+            "      cancel-in-progress: true",
+            "    steps:",
+            "      - run: cargo test",
+            "  build:",
+            "    runs-on: ubuntu-latest",
+            "    timeout-minutes: 1",
+            "    steps:",
+            "      - run: cargo test",
+        ]);
+        assert_no_f3(&analyze(&one_of_two));
+        assert_no_f3(&analyze(&crlf(&one_of_two)));
+
+        let workflow_false_job_true = "on: pull_request\nconcurrency:\n  cancel-in-progress: false\njobs:\n  test:\n    concurrency:\n      cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_no_f3(&analyze(workflow_false_job_true));
+
+        let workflow_true_job_false = "on: pull_request\nconcurrency:\n  cancel-in-progress: true\njobs:\n  test:\n    concurrency:\n      cancel-in-progress: false\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_no_f3(&analyze(workflow_true_job_false));
+        assert_no_f3(&analyze(&crlf(workflow_true_job_false)));
+
+        let anchored = "on: pull_request\ndefaults: &job\n  concurrency:\n    cancel-in-progress: true\n  timeout-minutes: 5\n  runs-on: ubuntu-latest\njobs:\n  test:\n    <<: *job\n    steps:\n      - run: cargo test\n";
+        assert_no_f3(&analyze(anchored));
+
+        let flow = "on: {pull_request: {}}\njobs: {test: {concurrency: {group: ci, cancel-in-progress: true}, runs-on: ubuntu-latest, timeout-minutes: 1, steps: [{run: cargo test}]}}\n";
+        assert_no_f3(&analyze(flow));
+        assert_no_f3(&analyze(&crlf(flow)));
+
+        let job_false = joined(&[
+            "on: pull_request",
+            "jobs:",
+            "  test:",
+            "    concurrency:",
+            "      cancel-in-progress: false",
+            "    runs-on: ubuntu-latest",
+            "    timeout-minutes: 1",
+        ]);
+        assert_f3(&analyze(&job_false), 1, F3_PR);
+        assert_f3(&analyze(&crlf(&job_false)), 1, F3_PR);
+
+        let neither = joined(&[
+            "on: pull_request",
+            "jobs:",
+            "  lint:",
+            "    runs-on: ubuntu-latest",
+            "    timeout-minutes: 1",
+            "  build:",
+            "    runs-on: ubuntu-latest",
+            "    timeout-minutes: 1",
+        ]);
+        assert_f3(&analyze(&neither), 1, F3_PR);
+
+        let no_jobs = "on: pull_request\n";
+        assert_f3(&analyze(no_jobs), 1, F3_PR);
+        assert_f3(&analyze(&crlf(no_jobs)), 1, F3_PR);
+
+        let empty_jobs = "on: pull_request\njobs: {}\n";
+        assert_f3(&analyze(empty_jobs), 1, F3_PR);
+
+        let flow_false = "on: [pull_request]\njobs: {lint: {concurrency: {cancel-in-progress: false}, timeout-minutes: 1}, test: {runs-on: ubuntu-latest, timeout-minutes: 1}}\n";
+        assert_f3(&analyze(flow_false), 1, F3_PR);
+    }
+
+    #[test]
+    fn pull_request_target_triggers_f3() {
+        let positive = [
+            "on: pull_request_target\njobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n",
+            "on: \"pull_request_target\"\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n",
+            "on: 'PULL_REQUEST_TARGET'\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n",
+            "on: [push, pull_request_target]\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n",
+            "on: [pull_request_target, push]\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n",
+            "on: [Push, Pull_Request_Target]\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n",
+            "on:\n  pull_request_target:\n    types: [opened]\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n",
+            "on: {pull_request_target: {}}\njobs: {test: {runs-on: ubuntu-latest, timeout-minutes: 1}}\n",
+            "on: PULL_REQUEST_TARGET\n",
+        ];
+        for yaml in positive {
+            assert_f3(&analyze(yaml), 1, F3_TARGET);
+            assert_f3(&analyze(&crlf(yaml)), 1, F3_TARGET);
+        }
+
+        let both = "on:\n  pull_request_target:\n  pull_request:\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_f3(&analyze(both), 1, F3_PR);
+        assert_f3(&analyze(&crlf(both)), 1, F3_PR);
+
+        let both_flow = "on: [pull_request, pull_request_target]\n";
+        assert_f3(&analyze(both_flow), 1, F3_PR);
+
+        let both_order = "on: {pull_request_target: {}, pull_request: {}}\n";
+        assert_f3(&analyze(both_order), 1, F3_PR);
+
+        let cancelled = "on: pull_request_target\nconcurrency:\n  group: ci\n  cancel-in-progress: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n";
+        assert_no_f3(&analyze(cancelled));
+        assert_no_f3(&analyze(&crlf(cancelled)));
+
+        let expression = "on: pull_request_target\nconcurrency:\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_no_f3(&analyze(expression));
+
+        let target_expression = "on: PULL_REQUEST_TARGET\nconcurrency:\n  cancel-in-progress: ${{  github.event_name == \"pull_request_target\"  }}\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n";
+        assert_no_f3(&analyze(target_expression));
+        assert_no_f3(&analyze(&crlf(target_expression)));
+
+        let job_level = "on: {pull_request_target: {types: [opened]}}\njobs: {test: {concurrency: {cancel-in-progress: true}, runs-on: ubuntu-latest, timeout-minutes: 1}}\n";
+        assert_no_f3(&analyze(job_level));
+        assert_no_f3(&analyze(&crlf(job_level)));
+
+        let negative = [
+            "on: push\njobs:\n  test:\n    timeout-minutes: 1\n    runs-on: ubuntu-latest\n",
+            "on: pull_request_review\n",
+            "on: workflow_dispatch\n",
+            "on: [push, workflow_dispatch]\n",
+            "on:\n",
+            "on: {}\n",
+            "on: []\n",
+            "on: \"\"\n",
+            "jobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n",
+            "",
+            "{}\n",
+            "on: {push: null, workflow_dispatch: {}}\nconcurrency: {cancel-in-progress: false}\n",
+        ];
+        for yaml in negative {
+            assert_no_f3(&analyze(yaml));
+            assert_no_f3(&analyze(&crlf(yaml)));
+        }
+
+        let flow_positive = "on: {pull_request_target: {types: [opened, synchronize]}}\njobs: {lint: {runs-on: ubuntu-latest, timeout-minutes: 5, steps: [{run: cargo test}]}}\n";
+        assert_f3(&analyze(flow_positive), 1, F3_TARGET);
+
+        let flow_cancelled = "on: [pull_request_target]\nconcurrency: {cancel-in-progress: \"${{ github.event_name == 'pull_request_target' }}\"}\njobs: {test: {runs-on: ubuntu-latest, timeout-minutes: 1}}\n";
+        assert_no_f3(&analyze(flow_cancelled));
+        assert_no_f3(&analyze(&crlf(flow_cancelled)));
     }
 }
