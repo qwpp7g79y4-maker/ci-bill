@@ -1,7 +1,7 @@
 use std::fmt::Write;
 use std::path::Path;
 
-use crate::api::{ApiData, Job, WorkflowRun, IN_PROGRESS, UNKNOWN_WORKFLOW};
+use crate::api::{linked_workflow_path, ApiData, Job, WorkflowRun, IN_PROGRESS, UNKNOWN_WORKFLOW};
 use crate::findings::Finding;
 use crate::money::{percent_fixed, Micros};
 use crate::rank::{Bill, WorkflowTotal};
@@ -33,8 +33,11 @@ pub fn render(
 
 /// Text report plus saved Actions runs and jobs.
 ///
-/// Finished jobs are listed under "Jobs". A job with no `completed_at` is
-/// listed under "In progress" and is not included with the finished jobs.
+/// Run paths are linked to a CSV workflow path: an `@ref` suffix and an
+/// `owner/repo/` prefix are removed. Finished jobs are listed under "Jobs".
+/// A job with no `completed_at` is listed under "In progress" and is not
+/// included with the finished jobs. A job on the latest attempt that started
+/// before the run started is an inherited copy and costs 0.00.
 pub fn render_with_runs(
     workflows: &[WorkflowTotal],
     bill: &Bill,
@@ -142,6 +145,8 @@ pub fn render_json(
 ///
 /// Finished jobs sit on their run. An in-progress job is only in
 /// `in_progress`, with `counts` false and message "in progress".
+/// `path` is the linked workflow path. An inherited copy has
+/// `inherited_copy` true, `billable` false, and `net_amount` `"0.000000"`.
 pub fn render_json_with_runs(
     workflows: &[WorkflowTotal],
     bill: &Bill,
@@ -601,10 +606,10 @@ fn run_lines(api: &ApiData) -> Vec<String> {
         .map(|run| {
             let conclusion = run.conclusion.as_deref().unwrap_or(IN_PROGRESS);
             let started = run.run_started_at.as_deref().unwrap_or("-");
+            let path = displayed_run_path(run);
             format!(
                 "{id}  {path}  attempt {attempt}  number {number}  {event}  {conclusion}  {started}",
                 id = run.id,
-                path = run.path,
                 attempt = run.run_attempt,
                 number = run.run_number,
                 event = run.event,
@@ -614,28 +619,35 @@ fn run_lines(api: &ApiData) -> Vec<String> {
 }
 
 fn counted_lines(api: &ApiData) -> Vec<String> {
-    sorted_jobs(api, true)
+    finished_jobs(api)
         .into_iter()
         .map(|job| {
             let completed = job.completed_at.as_deref().unwrap_or("-");
             let conclusion = job.conclusion.as_deref().unwrap_or("-");
             format!(
-                "{}  completed {completed}  {conclusion}",
-                job_prefix(api, job)
+                "{}  completed {completed}  {conclusion}{}",
+                job_prefix(api, job),
+                copy_suffix(api, job),
             )
         })
         .collect()
 }
 
 fn progress_lines(api: &ApiData) -> Vec<String> {
-    sorted_jobs(api, false)
+    in_progress_jobs(api)
         .into_iter()
-        .map(|job| format!("{}  {IN_PROGRESS}", job_prefix(api, job)))
+        .map(|job| {
+            format!(
+                "{}  {IN_PROGRESS}{}",
+                job_prefix(api, job),
+                copy_suffix(api, job)
+            )
+        })
         .collect()
 }
 
 fn job_prefix(api: &ApiData, job: &Job) -> String {
-    let path = api.workflow_path(job.run_id);
+    let path = displayed_run_path_for_id(api, job.run_id);
     let labels = if job.labels.is_empty() {
         "-".to_string()
     } else {
@@ -655,8 +667,8 @@ fn job_prefix(api: &ApiData, job: &Job) -> String {
 fn sorted_runs(api: &ApiData) -> Vec<&WorkflowRun> {
     let mut runs: Vec<&WorkflowRun> = api.runs.iter().collect();
     runs.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
+        displayed_run_path(left)
+            .cmp(&displayed_run_path(right))
             .then(left.run_number.cmp(&right.run_number))
             .then(left.run_attempt.cmp(&right.run_attempt))
             .then(left.id.cmp(&right.id))
@@ -664,21 +676,46 @@ fn sorted_runs(api: &ApiData) -> Vec<&WorkflowRun> {
     runs
 }
 
-fn sorted_jobs(api: &ApiData, counts: bool) -> Vec<&Job> {
-    let mut jobs: Vec<&Job> = if counts {
-        api.counted_jobs().collect()
-    } else {
-        api.in_progress_jobs().collect()
-    };
+fn in_progress_jobs(api: &ApiData) -> Vec<&Job> {
+    let mut jobs: Vec<&Job> = api.in_progress_jobs().collect();
+    sort_jobs(api, &mut jobs);
+    jobs
+}
+
+fn sort_jobs(api: &ApiData, jobs: &mut [&Job]) {
     jobs.sort_by(|left, right| {
-        api.workflow_path(left.run_id)
-            .cmp(api.workflow_path(right.run_id))
+        let left_path = displayed_run_path_for_id(api, left.run_id);
+        let right_path = displayed_run_path_for_id(api, right.run_id);
+        left_path
+            .cmp(&right_path)
             .then(left.name.cmp(&right.name))
             .then(left.run_id.cmp(&right.run_id))
             .then(left.run_attempt.cmp(&right.run_attempt))
             .then(left.id.cmp(&right.id))
     });
-    jobs
+}
+
+fn displayed_run_path(run: &WorkflowRun) -> String {
+    let linked = linked_workflow_path(&run.path);
+    if linked.is_empty() || run.links_to(&linked) {
+        linked
+    } else {
+        run.path.clone()
+    }
+}
+
+fn displayed_run_path_for_id(api: &ApiData, run_id: u64) -> String {
+    match api.runs.iter().find(|run| run.id == run_id) {
+        Some(run) => displayed_run_path(run),
+        None => api.workflow_path(run_id),
+    }
+}
+
+fn copy_suffix(api: &ApiData, job: &Job) -> String {
+    match api.inherited_copy_net(job) {
+        Some(net) => format!("  inherited copy  cost {}", net.format_cents()),
+        None => String::new(),
+    }
 }
 
 fn api_json(api: &ApiData) -> (serde_json::Value, serde_json::Value) {
@@ -707,11 +744,12 @@ fn api_json(api: &ApiData) -> (serde_json::Value, serde_json::Value) {
         }));
     }
     runs.sort_by(|left, right| run_sort_key(left).cmp(&run_sort_key(right)));
-    let in_progress: Vec<serde_json::Value> = sorted_jobs(api, false)
+    let in_progress: Vec<serde_json::Value> = in_progress_jobs(api)
         .into_iter()
         .map(|job| {
-            let mut value = job_json(job, false);
-            value["workflow_path"] = serde_json::Value::from(api.workflow_path(job.run_id));
+            let mut value = job_json(api, job, false);
+            value["workflow_path"] =
+                serde_json::Value::from(displayed_run_path_for_id(api, job.run_id));
             value["message"] = serde_json::Value::from(IN_PROGRESS);
             value
         })
@@ -723,10 +761,9 @@ fn api_json(api: &ApiData) -> (serde_json::Value, serde_json::Value) {
 }
 
 fn counted_job_values(api: &ApiData, run_id: u64) -> Vec<serde_json::Value> {
-    let mut jobs: Vec<&Job> = api
-        .jobs
-        .iter()
-        .filter(|job| job.run_id == run_id && job.counts())
+    let mut jobs: Vec<&Job> = finished_jobs(api)
+        .into_iter()
+        .filter(|job| job.run_id == run_id)
         .collect();
     jobs.sort_by(|left, right| {
         left.name
@@ -734,13 +771,30 @@ fn counted_job_values(api: &ApiData, run_id: u64) -> Vec<serde_json::Value> {
             .then(left.run_attempt.cmp(&right.run_attempt))
             .then(left.id.cmp(&right.id))
     });
-    jobs.into_iter().map(|job| job_json(job, true)).collect()
+    jobs.into_iter()
+        .map(|job| job_json(api, job, true))
+        .collect()
+}
+
+/// Finished jobs that add cost, then inherited copies, in report order.
+///
+/// A copy stays visible with its own cost. It is not part of `billable_jobs`.
+fn finished_jobs(api: &ApiData) -> Vec<&Job> {
+    let copy_ids: Vec<u64> = api
+        .counted_jobs()
+        .filter(|job| api.is_inherited_copy(job))
+        .map(|job| job.id)
+        .collect();
+    let mut jobs: Vec<&Job> = api.billable_jobs().collect();
+    jobs.extend(api.counted_jobs().filter(|job| copy_ids.contains(&job.id)));
+    sort_jobs(api, &mut jobs);
+    jobs
 }
 
 fn run_json(run: &WorkflowRun, jobs: Vec<serde_json::Value>) -> serde_json::Value {
     serde_json::json!({
         "id": run.id,
-        "path": run.path,
+        "path": displayed_run_path(run),
         "run_attempt": run.run_attempt,
         "run_number": run.run_number,
         "event": run.event,
@@ -759,8 +813,9 @@ fn run_sort_key(value: &serde_json::Value) -> (&str, u64, u64, u64) {
     )
 }
 
-fn job_json(job: &Job, counts: bool) -> serde_json::Value {
-    serde_json::json!({
+fn job_json(api: &ApiData, job: &Job, counts: bool) -> serde_json::Value {
+    let inherited = api.is_inherited_copy(job);
+    let mut value = serde_json::json!({
         "id": job.id,
         "run_id": job.run_id,
         "run_attempt": job.run_attempt,
@@ -771,7 +826,13 @@ fn job_json(job: &Job, counts: bool) -> serde_json::Value {
         "conclusion": job.conclusion,
         "runner_name": job.runner_name,
         "counts": counts,
-    })
+        "inherited_copy": inherited,
+        "billable": counts && !inherited,
+    });
+    if let Some(net) = api.inherited_copy_net(job) {
+        value["net_amount"] = serde_json::Value::String(net.to_decimal_string());
+    }
+    value
 }
 
 #[cfg(test)]
@@ -1841,5 +1902,144 @@ mod tests {
         let bare_value: serde_json::Value = serde_json::from_str(bare.trim_end()).unwrap();
         assert_eq!(bare_value["workflows"][0]["steps"], serde_json::json!([]));
         assert!(!bare.contains("echo one"), "{bare}");
+    }
+
+    fn sample_job(
+        id: u64,
+        attempt: u64,
+        name: &str,
+        started: &str,
+        completed: Option<&str>,
+    ) -> Job {
+        Job {
+            id,
+            run_id: 1,
+            run_attempt: attempt,
+            name: name.to_string(),
+            labels: vec!["ubuntu-latest".to_string()],
+            started_at: Some(started.to_string()),
+            completed_at: completed.map(str::to_string),
+            conclusion: completed.map(|_| "success".to_string()),
+            runner_name: Some("runner-a".to_string()),
+        }
+    }
+
+    #[test]
+    fn linked_path_and_inherited_copy_show_zero_cost() {
+        let api = ApiData {
+            runs: vec![WorkflowRun {
+                id: 1,
+                path: "octocat/octo-repo/.github/workflows/ci.yml@refs/heads/feature/foo"
+                    .to_string(),
+                run_attempt: 2,
+                run_number: 4,
+                event: "push".to_string(),
+                conclusion: Some("success".to_string()),
+                run_started_at: Some("2026-04-01T12:00:00Z".to_string()),
+            }],
+            jobs: vec![
+                sample_job(
+                    10,
+                    1,
+                    "build",
+                    "2026-04-01T10:00:00Z",
+                    Some("2026-04-01T10:05:00Z"),
+                ),
+                sample_job(
+                    11,
+                    2,
+                    "build",
+                    "2026-04-01T10:00:00Z",
+                    Some("2026-04-01T10:05:00Z"),
+                ),
+                sample_job(
+                    12,
+                    2,
+                    "lint",
+                    "2026-04-01T12:00:30Z",
+                    Some("2026-04-01T12:01:00Z"),
+                ),
+                sample_job(13, 2, "pack", "2026-04-01T11:00:00Z", None),
+            ],
+        };
+        let text = render_with_runs(&[], &bill("0", "0"), None, &api, None);
+        assert!(
+            !text.to_ascii_lowercase().contains("not supported"),
+            "{text}"
+        );
+        assert!(!text.to_ascii_lowercase().contains("skipped"), "{text}");
+        assert!(!text.contains('@'), "{text}");
+        assert!(!text.contains("octocat"), "{text}");
+        assert!(!text.contains("refs/heads"), "{text}");
+        let runs = section(&text, "Runs");
+        assert!(
+            runs.contains(
+                "1  .github/workflows/ci.yml  attempt 2  number 4  push  success  2026-04-01T12:00:00Z\n"
+            ),
+            "{runs}"
+        );
+        let jobs = section(&text, "Jobs");
+        assert!(
+            jobs.contains(
+                "10  build  run 1  .github/workflows/ci.yml  attempt 1  labels ubuntu-latest  runner runner-a  started 2026-04-01T10:00:00Z  completed 2026-04-01T10:05:00Z  success\n"
+            ),
+            "{jobs}"
+        );
+        assert!(
+            jobs.contains(
+                "11  build  run 1  .github/workflows/ci.yml  attempt 2  labels ubuntu-latest  runner runner-a  started 2026-04-01T10:00:00Z  completed 2026-04-01T10:05:00Z  success  inherited copy  cost 0.00\n"
+            ),
+            "{jobs}"
+        );
+        assert!(
+            jobs.contains(
+                "12  lint  run 1  .github/workflows/ci.yml  attempt 2  labels ubuntu-latest  runner runner-a  started 2026-04-01T12:00:30Z  completed 2026-04-01T12:01:00Z  success\n"
+            ),
+            "{jobs}"
+        );
+        assert!(!jobs.contains("13  pack"), "{jobs}");
+        let running = section(&text, "In progress");
+        assert_eq!(
+            running,
+            "13  pack  run 1  .github/workflows/ci.yml  attempt 2  labels ubuntu-latest  runner runner-a  started 2026-04-01T11:00:00Z  in progress  inherited copy  cost 0.00\n"
+        );
+
+        let json = render_json_with_runs(&[], &bill("0", "0"), None, None, &api, None, &[]);
+        assert!(
+            !json.to_ascii_lowercase().contains("not supported"),
+            "{json}"
+        );
+        assert!(!json.to_ascii_lowercase().contains("skipped"), "{json}");
+        let value: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
+        assert_eq!(
+            value["workflow_runs"][0]["path"],
+            ".github/workflows/ci.yml"
+        );
+        let listed = value["workflow_runs"][0]["jobs"].as_array().unwrap();
+        assert_eq!(listed.len(), 3);
+        let by_id = |id: u64| {
+            listed
+                .iter()
+                .find(|job| job["id"].as_u64() == Some(id))
+                .unwrap()
+        };
+        assert_eq!(by_id(10)["inherited_copy"], false);
+        assert_eq!(by_id(10)["billable"], true);
+        assert_eq!(by_id(10)["counts"], true);
+        assert!(by_id(10).get("net_amount").is_none());
+        assert_eq!(by_id(11)["inherited_copy"], true);
+        assert_eq!(by_id(11)["billable"], false);
+        assert_eq!(by_id(11)["counts"], true);
+        assert_eq!(by_id(11)["net_amount"], "0.000000");
+        assert_eq!(by_id(12)["billable"], true);
+        assert!(by_id(12).get("net_amount").is_none());
+        let progress = &value["in_progress"][0];
+        assert_eq!(progress["id"], 13);
+        assert_eq!(progress["workflow_path"], ".github/workflows/ci.yml");
+        assert_eq!(progress["inherited_copy"], true);
+        assert_eq!(progress["billable"], false);
+        assert_eq!(progress["counts"], false);
+        assert_eq!(progress["message"], "in progress");
+        assert_eq!(progress["net_amount"], "0.000000");
     }
 }

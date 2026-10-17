@@ -4,13 +4,19 @@
 //! body) and `jobs-<run_id>*.json` (a
 //! `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs?filter=all` body).
 //! Several files are pages of one list. Only files directly in the directory
-//! are read.
+//! are read. Bodies from `attempts/{n}/jobs` are a different list and are
+//! not mixed in.
+//!
+//! A run `path` is stored so it matches a CSV `workflow_path`: the `@ref`
+//! suffix (including `@refs/heads/...`) and an `owner/repo/` prefix are removed.
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+
+use crate::money::Micros;
 
 /// Phrase used when a job has not finished.
 pub const IN_PROGRESS: &str = "in progress";
@@ -28,6 +34,13 @@ pub struct WorkflowRun {
     pub event: String,
     pub conclusion: Option<String>,
     pub run_started_at: Option<String>,
+}
+
+impl WorkflowRun {
+    /// This run's linked path is the CSV `workflow_path` (ASCII case-insensitive).
+    pub fn links_to(&self, workflow_path: &str) -> bool {
+        workflow_paths_match(&self.path, workflow_path)
+    }
 }
 
 /// One job from `jobs[]`.
@@ -75,14 +88,62 @@ impl ApiData {
         self.jobs.iter().filter(|job| !job.counts())
     }
 
-    /// Workflow path for `run_id`, or [`UNKNOWN_WORKFLOW`].
-    pub fn workflow_path(&self, run_id: u64) -> &str {
+    /// Linked workflow path for `run_id`, or [`UNKNOWN_WORKFLOW`].
+    pub fn workflow_path(&self, run_id: u64) -> String {
         self.runs
             .iter()
             .find(|run| run.id == run_id)
-            .map(|run| run.path.as_str())
-            .unwrap_or(UNKNOWN_WORKFLOW)
+            .map(|run| linked_workflow_path(&run.path))
+            .unwrap_or_else(|| UNKNOWN_WORKFLOW.to_string())
     }
+
+    /// A job on the latest attempt whose `started_at` is before `run_started_at`.
+    ///
+    /// GitHub can carry a finished job onto the new attempt. That copy adds
+    /// no cost. A job from an earlier attempt stays billable. A missing run,
+    /// a different attempt, or a missing or unreadable timestamp is not a copy.
+    pub fn is_inherited_copy(&self, job: &Job) -> bool {
+        let Some(run) = self.runs.iter().find(|run| run.id == job.run_id) else {
+            return false;
+        };
+        job.run_attempt == run.run_attempt && started_before_run(job, run)
+    }
+
+    /// `Some(0)` when `job` is an inherited copy.
+    pub fn inherited_copy_net(&self, job: &Job) -> Option<Micros> {
+        self.is_inherited_copy(job).then_some(Micros::ZERO)
+    }
+
+    /// Finished jobs that add cost. Inherited copies are omitted.
+    pub fn billable_jobs(&self) -> impl Iterator<Item = &Job> {
+        self.jobs
+            .iter()
+            .filter(|job| job.counts() && !self.is_inherited_copy(job))
+    }
+}
+
+/// Drop `@ref` and an `owner/repo/` prefix so a run path matches a CSV workflow path.
+///
+/// `@main` and `@refs/heads/feature/x` both leave the workflow file. The prefix
+/// is removed only when exactly two segments sit in front of `.github/workflows`.
+/// Matching later is ASCII case-insensitive; this function keeps the workflow
+/// path's own case.
+pub fn linked_workflow_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('\u{feff}').trim_matches('\r');
+    let without_ref = trimmed
+        .split_once('@')
+        .map(|(path, _reference)| path)
+        .unwrap_or(trimmed);
+    let without_ref = without_ref.trim().trim_matches('\r');
+    let slashed = without_ref.replace('\\', "/");
+    strip_owner_repo_prefix(&slashed)
+}
+
+/// Both paths refer to the same workflow file after linking.
+pub fn workflow_paths_match(left: &str, right: &str) -> bool {
+    let left = linked_workflow_path(left);
+    let right = linked_workflow_path(right);
+    !left.is_empty() && left.eq_ignore_ascii_case(&right)
 }
 
 /// The runs directory or one JSON file could not be read. Exit code 2.
@@ -155,12 +216,13 @@ impl std::fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
-/// Read every runs page and jobs page in `dir`.
+/// Read every runs page and `jobs?filter=all` page in `dir`.
 ///
 /// Names are sorted, then pages are merged. A later file that repeats a run
-/// id or a job id is an error. Each job's `run_id` must match the
+/// id is an error. A repeated job id counts once: the first record in file-name
+/// order, then array order, is kept. Each job's `run_id` must match the
 /// `jobs-<run_id>` prefix of its file (`jobs-15-2.json` is run 15,
-/// `jobs-150.json` is run 150).
+/// `jobs-150.json` is run 150). Files from `attempts/{n}/jobs` are not read.
 pub fn read_dir(dir: &Path) -> Result<ApiData, ApiError> {
     let mut runs = Vec::new();
     let mut jobs = Vec::new();
@@ -188,8 +250,9 @@ pub fn read_dir(dir: &Path) -> Result<ApiData, ApiError> {
                 if job.run_id != file_run_id {
                     return Err(ApiError::mismatch(&path));
                 }
+                // The same job id on another filter=all page counts once.
                 if !seen_jobs.insert(job.id) {
-                    return Err(ApiError::duplicate(&path));
+                    continue;
                 }
                 jobs.push(job);
             }
@@ -210,7 +273,7 @@ fn matching_files(dir: &Path) -> Result<Vec<PathBuf>, ApiError> {
         let Some(name) = path.file_name().and_then(|item| item.to_str()) else {
             continue;
         };
-        if !is_runs_file(name) && job_file_run_id(name).is_none() {
+        if !is_runs_file(name) && !is_filter_all_jobs_name(name) {
             continue;
         }
         if !path.is_file() {
@@ -236,6 +299,24 @@ fn is_runs_file(name: &str) -> bool {
         return false;
     };
     !middle.is_empty()
+}
+
+/// `jobs-<run_id>*.json` from `jobs?filter=all`, not from `attempts/{n}/jobs`.
+///
+/// A file-name segment `attempt` or `attempts` is the per-attempt endpoint
+/// (`jobs-15-attempts-1.json`). Those files are left unread. Pagination names
+/// such as `jobs-15-2.json` stay included. Subdirectories, including
+/// `attempts/{n}/`, are not listed.
+fn is_filter_all_jobs_name(name: &str) -> bool {
+    if name_has_attempt_segment(name) {
+        return false;
+    }
+    job_file_run_id(name).is_some()
+}
+
+fn name_has_attempt_segment(name: &str) -> bool {
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|part| part.eq_ignore_ascii_case("attempt") || part.eq_ignore_ascii_case("attempts"))
 }
 
 /// Run id encoded by `jobs-<run_id>*.json`.
@@ -269,7 +350,7 @@ fn parse_run(value: &Value) -> Result<WorkflowRun, ()> {
     let object = value.as_object().ok_or(())?;
     Ok(WorkflowRun {
         id: require_u64(object, "id")?,
-        path: require_string(object, "path")?,
+        path: linked_workflow_path(&require_string(object, "path")?),
         run_attempt: require_u64(object, "run_attempt")?,
         run_number: require_u64(object, "run_number")?,
         event: require_string(object, "event")?,
@@ -328,6 +409,199 @@ fn optional_labels(object: &Map<String, Value>) -> Result<Vec<String>, ()> {
             .collect(),
         Some(_) => Err(()),
     }
+}
+
+fn strip_owner_repo_prefix(path: &str) -> String {
+    let Some(index) = find_workflows_marker(path) else {
+        return path.to_string();
+    };
+    let prefix = path[..index].trim_end_matches('/');
+    if prefix.is_empty() {
+        return path[index..].to_string();
+    }
+    let parts: Vec<&str> = prefix.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() == 2 {
+        path[index..].to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn find_workflows_marker(path: &str) -> Option<usize> {
+    let bytes = path.as_bytes();
+    const NEEDLE: &[u8] = b".github/workflows";
+    if bytes.len() < NEEDLE.len() {
+        return None;
+    }
+    let last = bytes.len() - NEEDLE.len();
+    let mut index = 0;
+    while index <= last {
+        if eq_ignore_ascii(&bytes[index..index + NEEDLE.len()], NEEDLE) {
+            let at_boundary = index == 0 || bytes[index - 1] == b'/';
+            let after = index + NEEDLE.len();
+            let at_end = after == bytes.len() || bytes[after] == b'/';
+            if at_boundary && at_end {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn eq_ignore_ascii(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left_byte, right_byte)| left_byte.eq_ignore_ascii_case(right_byte))
+}
+
+fn started_before_run(job: &Job, run: &WorkflowRun) -> bool {
+    let Some(started) = job.started_at.as_deref().and_then(parse_github_time) else {
+        return false;
+    };
+    let Some(run_started) = run.run_started_at.as_deref().and_then(parse_github_time) else {
+        return false;
+    };
+    started < run_started
+}
+
+/// Nanoseconds since the Unix epoch. `None` when the text is not a timestamp.
+fn parse_github_time(raw: &str) -> Option<i128> {
+    let text = raw.trim().trim_matches('\r');
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 {
+        return None;
+    }
+    if bytes[4] != b'-' || bytes[7] != b'-' || bytes[13] != b':' || bytes[16] != b':' {
+        return None;
+    }
+    let year = parse_digits(&bytes[0..4])?;
+    let month = parse_digits(&bytes[5..7])?;
+    let day = parse_digits(&bytes[8..10])?;
+    if !matches!(bytes[10], b'T' | b't' | b' ') {
+        return None;
+    }
+    let hour = parse_digits(&bytes[11..13])?;
+    let minute = parse_digits(&bytes[14..16])?;
+    let second = parse_digits(&bytes[17..19])?;
+    if !valid_ymd(year, month, day) || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let mut index = 19;
+    let mut nanos: i128 = 0;
+    if index < bytes.len() && bytes[index] == b'.' {
+        index += 1;
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == start {
+            return None;
+        }
+        nanos = fraction_nanos(&text[start..index])?;
+    }
+    let offset_minutes = parse_offset(&bytes[index..])?;
+    let days = days_from_civil(i32::try_from(year).ok()?, month, day);
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))?;
+    let utc = seconds.checked_sub(offset_minutes.checked_mul(60)?)?;
+    Some(i128::from(utc) * 1_000_000_000 + nanos)
+}
+
+fn fraction_nanos(digits: &str) -> Option<i128> {
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mut padded = String::new();
+    for (index, byte) in digits.bytes().enumerate() {
+        if index == 9 {
+            break;
+        }
+        padded.push(char::from(byte));
+    }
+    while padded.len() < 9 {
+        padded.push('0');
+    }
+    padded.parse().ok()
+}
+
+fn parse_offset(bytes: &[u8]) -> Option<i64> {
+    if bytes == b"Z" || bytes == b"z" {
+        return Some(0);
+    }
+    if bytes.is_empty() {
+        return None;
+    }
+    let sign: i64 = match bytes[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let rest = &bytes[1..];
+    let (hours, minutes) = match rest.len() {
+        2 => (parse_digits(rest)?, 0),
+        4 => (parse_digits(&rest[0..2])?, parse_digits(&rest[2..4])?),
+        5 => {
+            if rest[2] != b':' {
+                return None;
+            }
+            (parse_digits(&rest[0..2])?, parse_digits(&rest[3..5])?)
+        }
+        _ => return None,
+    };
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some(sign * (i64::from(hours) * 60 + i64::from(minutes)))
+}
+
+fn parse_digits(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut value: u32 = 0;
+    for byte in bytes {
+        let digit = byte.checked_sub(b'0')?;
+        if digit > 9 {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(u32::from(digit))?;
+    }
+    Some(value)
+}
+
+fn valid_ymd(year: u32, month: u32, day: u32) -> bool {
+    if !(1..=12).contains(&month) || day < 1 {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    day <= max
+}
+
+/// Days since 1970-01-01. Howard Hinnant's civil-from-days algorithm.
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let mut y = i64::from(year);
+    if month <= 2 {
+        y -= 1;
+    }
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = u64::try_from(y - era * 400).unwrap_or(0);
+    let month_adj = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * month_adj + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + u64::from(doy);
+    era * 146097 + i64::try_from(doe).unwrap_or(0) - 719468
 }
 
 fn cmp_run(left: &WorkflowRun, right: &WorkflowRun) -> std::cmp::Ordering {
@@ -934,21 +1208,6 @@ mod tests {
         let err = read_dir(&dir).unwrap_err();
         assert_eq!(err.to_string(), "duplicate id");
         assert_eq!(err.path, dir.join("runs-1.json"));
-
-        let dir = scratch("duplicate-jobs");
-        write_json(
-            &dir,
-            "jobs-7-1.json",
-            &jobs_body(vec![job_value(70, 7, "build")]),
-        );
-        write_json(
-            &dir,
-            "jobs-7-2.json",
-            &jobs_body(vec![job_value(70, 7, "test")]),
-        );
-        let err = read_dir(&dir).unwrap_err();
-        assert_eq!(err.to_string(), "duplicate id");
-        assert_eq!(err.path, dir.join("jobs-7-2.json"));
     }
 
     #[test]
@@ -1042,5 +1301,785 @@ mod tests {
         let err = read_dir(&dir).unwrap_err();
         assert_eq!(err.to_string(), "invalid JSON");
         assert_eq!(err.path, dir.join("jobs-1.json"));
+    }
+
+    fn assert_links(raw: &str, stored: &str, csv_path: &str, matches: bool) {
+        let linked = linked_workflow_path(raw);
+        assert_eq!(linked, stored, "{raw}");
+        assert_eq!(linked_workflow_path(&linked), linked, "{raw}");
+        assert_eq!(workflow_paths_match(raw, csv_path), matches, "{raw}");
+        assert_eq!(workflow_paths_match(&linked, csv_path), matches, "{raw}");
+    }
+
+    #[test]
+    fn run_paths_link_to_csv_workflow_paths() {
+        let cases = [
+            (
+                ".github/workflows/build.yml@main",
+                ".github/workflows/build.yml",
+                ".github/workflows/build.yml",
+                true,
+            ),
+            (
+                ".github/workflows/ci.yml@refs/heads/main",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                ".github/workflows/ci.yml@refs/heads/feature/foo",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                ".github/workflows/ci.yml@REFS/HEADS/Feature/Foo-1",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                "octocat/octo-repo/.github/workflows/ci.yml@main",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                "octocat/octo-repo/.github/workflows/ci.yml@refs/heads/main",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                "OWNER/REPO/.GitHub/Workflows/CI.yml@MAIN",
+                ".GitHub/Workflows/CI.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                "Owner/Repo/.github/workflows/ci.yml@Refs/Heads/Main",
+                ".github/workflows/ci.yml",
+                ".GITHUB/WORKFLOWS/CI.YML",
+                true,
+            ),
+            (
+                "acme/widgets/.github/workflows/release.yaml@refs/tags/v1.2.3",
+                ".github/workflows/release.yaml",
+                ".github/workflows/release.yaml",
+                true,
+            ),
+            (
+                "acme/widgets/.github/workflows/ci.yml@refs/pull/3/merge",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                ".github/workflows/ci.yml@0123456789abcdef",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                "  .github/workflows/ci.yml@main  ",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                ".github/workflows/ci.yml@main\r",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                "\u{feff}.github/workflows/ci.yml@main",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                "owner\\repo\\.github\\workflows\\ci.yml@main",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                "owner/repo/.github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                "my.org/repo.name/.github/workflows/ci.yml@refs/heads/main",
+                ".github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                true,
+            ),
+            (
+                "owner/repo/custom.yml@main",
+                "owner/repo/custom.yml",
+                ".github/workflows/custom.yml",
+                false,
+            ),
+            (
+                "extra/owner/repo/.github/workflows/ci.yml@main",
+                "extra/owner/repo/.github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                false,
+            ),
+            (
+                "only-repo/.github/workflows/ci.yml@main",
+                "only-repo/.github/workflows/ci.yml",
+                ".github/workflows/ci.yml",
+                false,
+            ),
+            (
+                "owner/repo/.github/workflow/ci.yml@main",
+                "owner/repo/.github/workflow/ci.yml",
+                ".github/workflows/ci.yml",
+                false,
+            ),
+            ("@main", "", ".github/workflows/ci.yml", false),
+            ("", "", ".github/workflows/ci.yml", false),
+            (
+                ".github/workflows/ci.yml@main",
+                ".github/workflows/ci.yml",
+                "",
+                false,
+            ),
+        ];
+        for (raw, stored, csv_path, matches) in cases {
+            assert_links(raw, stored, csv_path, matches);
+        }
+    }
+
+    #[test]
+    fn read_dir_links_main_refs_heads_and_owner_repo_prefixes() {
+        let dir = scratch("link-forms");
+        write_json(
+            &dir,
+            "runs-1.json",
+            &runs_body(vec![
+                run_value(1, ".github/workflows/build.yml@main"),
+                run_value(2, ".github/workflows/ci.yml@refs/heads/main"),
+                run_value(3, "octocat/octo-repo/.github/workflows/lint.yml@main"),
+                run_value(
+                    4,
+                    "octocat/octo-repo/.github/workflows/release.yml@refs/heads/feature/foo",
+                ),
+            ]),
+        );
+        let data = read_dir(&dir).unwrap();
+        let path = |id: u64| {
+            data.runs
+                .iter()
+                .find(|run| run.id == id)
+                .unwrap()
+                .path
+                .clone()
+        };
+        assert_eq!(path(1), ".github/workflows/build.yml");
+        assert_eq!(path(2), ".github/workflows/ci.yml");
+        assert_eq!(path(3), ".github/workflows/lint.yml");
+        assert_eq!(path(4), ".github/workflows/release.yml");
+        assert!(data
+            .runs
+            .iter()
+            .any(|run| run.id == 1 && run.links_to(".github/workflows/build.yml")));
+        assert!(data
+            .runs
+            .iter()
+            .any(|run| { run.id == 2 && run.links_to(".github/workflows/ci.yml") }));
+        assert!(data
+            .runs
+            .iter()
+            .any(|run| { run.id == 3 && run.links_to(".GitHub/Workflows/Lint.yml") }));
+        assert!(data
+            .runs
+            .iter()
+            .any(|run| { run.id == 4 && run.links_to(".github/workflows/release.yml") }));
+        assert!(!data.runs.iter().any(|run| run.path.contains('@')));
+        assert!(!data.runs.iter().any(|run| run.path.contains("octocat")));
+        assert_eq!(data.workflow_path(2), ".github/workflows/ci.yml");
+        assert_eq!(data.workflow_path(3), ".github/workflows/lint.yml");
+    }
+
+    #[test]
+    fn linked_paths_accept_crlf_reordered_keys_empty_fields_and_case() {
+        let dir = scratch("link-variants");
+        let crlf = "{\r\n\"total_count\": 2,\r\n\"workflow_runs\": [\r\n{\r\n\"run_number\": 8,\r\n\"event\": \"push\",\r\n\"conclusion\": null,\r\n\"id\": 8,\r\n\"run_started_at\": \"2026-04-01T00:00:00Z\",\r\n\"run_attempt\": 1,\r\n\"path\": \"OWNER/REPO/.GitHub/Workflows/CI.yml@MAIN\"\r\n},\r\n{\r\n\"path\": \"\",\r\n\"id\": 9,\r\n\"run_attempt\": 2,\r\n\"run_number\": 9,\r\n\"event\": \"pull_request\"\r\n}\r\n]\r\n}\r\n";
+        fs::write(dir.join("runs-1.json"), crlf).unwrap();
+        let reversed = r#"{"workflow_runs":[{"run_started_at":"2026-05-01T01:02:03Z","conclusion":"success","event":"workflow_dispatch","run_number":10,"run_attempt":3,"path":".github/workflows/docs.yml@refs/heads/main","id":10,"html_url":"https://example.invalid/hidden"}]}"#;
+        fs::write(dir.join("runs-2.json"), reversed).unwrap();
+
+        let data = read_dir(&dir).unwrap();
+        let by_id = |id: u64| data.runs.iter().find(|run| run.id == id).unwrap();
+        assert_eq!(by_id(8).path, ".GitHub/Workflows/CI.yml");
+        assert!(by_id(8).links_to(".github/workflows/ci.yml"));
+        assert!(by_id(8).conclusion.is_none());
+        assert_eq!(by_id(8).run_attempt, 1);
+        assert_eq!(by_id(9).path, "");
+        assert!(!by_id(9).links_to(".github/workflows/ci.yml"));
+        assert!(by_id(9).conclusion.is_none());
+        assert!(by_id(9).run_started_at.is_none());
+        assert_eq!(by_id(10).path, ".github/workflows/docs.yml");
+        assert!(by_id(10).links_to(".github/workflows/docs.yml"));
+        assert_eq!(by_id(10).event, "workflow_dispatch");
+        assert!(!format!("{data:?}").contains("example.invalid"));
+    }
+
+    #[test]
+    fn duplicate_job_id_counts_once() {
+        let dir = scratch("duplicate-jobs-order");
+        write_json(
+            &dir,
+            "jobs-7-b.json",
+            &jobs_body(vec![job_value(70, 7, "from-later-file")]),
+        );
+        write_json(
+            &dir,
+            "jobs-7-a.json",
+            &jobs_body(vec![job_value(70, 7, "from-earlier-file")]),
+        );
+        write_json(
+            &dir,
+            "jobs-7.json",
+            &jobs_body(vec![
+                job_value(71, 7, "first-in-array"),
+                job_value(71, 7, "second-in-array"),
+            ]),
+        );
+        let data = read_dir(&dir).unwrap();
+        assert_eq!(data.jobs.iter().filter(|job| job.id == 70).count(), 1);
+        assert_eq!(data.jobs.iter().filter(|job| job.id == 71).count(), 1);
+        assert_eq!(
+            data.jobs.iter().find(|job| job.id == 70).unwrap().name,
+            "from-earlier-file"
+        );
+        assert_eq!(
+            data.jobs.iter().find(|job| job.id == 71).unwrap().name,
+            "first-in-array"
+        );
+        assert_eq!(data.jobs.len(), 2);
+
+        let dir = scratch("duplicate-jobs-fields");
+        let mut first = job_value(70, 7, "kept");
+        first.as_object_mut().unwrap().remove("started_at");
+        first["labels"] = serde_json::json!(["ubuntu-latest"]);
+        let mut second = job_value(70, 7, "dropped");
+        second["labels"] = serde_json::json!(["windows-latest"]);
+        second["started_at"] = serde_json::json!("2026-04-01T00:00:00Z");
+        let crlf_first = serde_json::to_string(&jobs_body(vec![first]))
+            .unwrap()
+            .replace('\n', "\r\n");
+        fs::write(dir.join("jobs-7-1.json"), crlf_first).unwrap();
+        let reversed = format!(
+            "{{\"jobs\":[{}]}}",
+            r#"{"runner_name":"other","conclusion":"failure","completed_at":"2026-04-01T00:02:00Z","labels":["windows-latest"],"started_at":"2026-04-01T00:00:00Z","name":"dropped","run_attempt":1,"run_id":7,"id":70}"#
+        );
+        fs::write(dir.join("jobs-7-2.json"), reversed).unwrap();
+        let data = read_dir(&dir).unwrap();
+        assert_eq!(data.jobs.len(), 1);
+        let kept = &data.jobs[0];
+        assert_eq!(kept.name, "kept");
+        assert!(kept.started_at.is_none());
+        assert_eq!(kept.labels, vec!["ubuntu-latest".to_string()]);
+        assert_eq!(data.billable_jobs().count(), 1);
+
+        let dir = scratch("duplicate-still-checks-run-id");
+        write_json(
+            &dir,
+            "jobs-15.json",
+            &jobs_body(vec![job_value(5, 15, "build")]),
+        );
+        write_json(
+            &dir,
+            "jobs-16.json",
+            &jobs_body(vec![job_value(5, 99, "other")]),
+        );
+        let err = read_dir(&dir).unwrap_err();
+        assert_eq!(err.to_string(), "run id does not match file name");
+        assert_eq!(err.path, dir.join("jobs-16.json"));
+    }
+
+    #[test]
+    fn attempt_endpoint_files_are_not_mixed_with_filter_all() {
+        let dir = scratch("attempt-files");
+        write_json(
+            &dir,
+            "jobs-9.json",
+            &jobs_body(vec![job_value(1, 9, "filter-all")]),
+        );
+        write_json(
+            &dir,
+            "jobs-9-2.json",
+            &jobs_body(vec![job_value(2, 9, "page-two")]),
+        );
+        fs::write(dir.join("jobs-9-attempts-1.json"), b"{").unwrap();
+        fs::write(dir.join("jobs-9-attempt-2.json"), b"null").unwrap();
+        fs::write(
+            dir.join("jobs-9-ATTEMPTS-3.json"),
+            br#"{"jobs":[{"id":3}]}"#,
+        )
+        .unwrap();
+        let nested = dir.join("attempts").join("1");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("jobs-9.json"), b"{").unwrap();
+        let upper = dir.join("Attempts").join("2");
+        fs::create_dir_all(&upper).unwrap();
+        fs::write(
+            upper.join("jobs-9.json"),
+            serde_json::to_vec(&jobs_body(vec![job_value(4, 9, "attempt-only")])).unwrap(),
+        )
+        .unwrap();
+
+        let data = read_dir(&dir).unwrap();
+        let ids: Vec<u64> = data.jobs.iter().map(|job| job.id).collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(data.jobs[0].name, "filter-all");
+        assert_eq!(data.jobs[1].name, "page-two");
+        assert!(!is_filter_all_jobs_name("jobs-9-attempts-1.json"));
+        assert!(!is_filter_all_jobs_name("jobs-9-attempt-2.json"));
+        assert!(!is_filter_all_jobs_name("jobs-9-ATTEMPTS-3.json"));
+        assert!(is_filter_all_jobs_name("jobs-9.json"));
+        assert!(is_filter_all_jobs_name("jobs-9-2.json"));
+        assert!(is_filter_all_jobs_name("jobs-15_page3.json"));
+    }
+
+    fn stamp_job(
+        id: u64,
+        run_id: u64,
+        attempt: u64,
+        name: &str,
+        started: Option<&str>,
+        completed: Option<&str>,
+    ) -> Value {
+        let mut job = job_value(id, run_id, name);
+        job["run_attempt"] = serde_json::json!(attempt);
+        match started {
+            Some(text) => job["started_at"] = serde_json::json!(text),
+            None => {
+                job.as_object_mut().unwrap().remove("started_at");
+            }
+        }
+        match completed {
+            Some(text) => job["completed_at"] = serde_json::json!(text),
+            None => job["completed_at"] = Value::Null,
+        }
+        job
+    }
+
+    fn run_with_start(id: u64, path: &str, attempt: u64, started: Option<&str>) -> Value {
+        let mut run = run_value(id, path);
+        run["run_attempt"] = serde_json::json!(attempt);
+        match started {
+            Some(text) => run["run_started_at"] = serde_json::json!(text),
+            None => {
+                run.as_object_mut().unwrap().remove("run_started_at");
+            }
+        }
+        run
+    }
+
+    #[test]
+    fn inherited_copy_on_the_last_attempt_costs_zero() {
+        let dir = scratch("copy-main");
+        write_json(
+            &dir,
+            "runs-1.json",
+            &runs_body(vec![run_with_start(
+                9,
+                ".github/workflows/ci.yml@refs/heads/main",
+                2,
+                Some("2026-04-01T12:00:00Z"),
+            )]),
+        );
+        write_json(
+            &dir,
+            "jobs-9.json",
+            &jobs_body(vec![
+                stamp_job(
+                    1,
+                    9,
+                    1,
+                    "test",
+                    Some("2026-04-01T10:00:00Z"),
+                    Some("2026-04-01T10:10:00Z"),
+                ),
+                stamp_job(
+                    2,
+                    9,
+                    2,
+                    "test",
+                    Some("2026-04-01T10:00:00Z"),
+                    Some("2026-04-01T10:10:00Z"),
+                ),
+                stamp_job(
+                    3,
+                    9,
+                    2,
+                    "lint",
+                    Some("2026-04-01T12:00:30Z"),
+                    Some("2026-04-01T12:02:00Z"),
+                ),
+                stamp_job(
+                    4,
+                    9,
+                    2,
+                    "pack",
+                    Some("2026-04-01T12:00:00Z"),
+                    Some("2026-04-01T12:01:00Z"),
+                ),
+                stamp_job(5, 9, 2, "queue", Some("2026-04-01T11:00:00Z"), None),
+            ]),
+        );
+        let data = read_dir(&dir).unwrap();
+        assert!(data.runs[0].links_to(".github/workflows/ci.yml"));
+        let copy = data.jobs.iter().find(|job| job.id == 2).unwrap();
+        assert!(data.is_inherited_copy(copy));
+        assert_eq!(
+            data.inherited_copy_net(copy).unwrap().to_decimal_string(),
+            "0.000000"
+        );
+        assert_eq!(
+            data.inherited_copy_net(copy).unwrap().format_cents(),
+            "0.00"
+        );
+        assert!(copy.counts());
+        let queued = data.jobs.iter().find(|job| job.id == 5).unwrap();
+        assert!(data.is_inherited_copy(queued));
+        assert!(!queued.counts());
+        assert_eq!(
+            data.inherited_copy_net(queued).unwrap().to_decimal_string(),
+            "0.000000"
+        );
+        for id in [1, 3, 4] {
+            let job = data.jobs.iter().find(|job| job.id == id).unwrap();
+            assert!(!data.is_inherited_copy(job), "{id}");
+            assert!(data.inherited_copy_net(job).is_none(), "{id}");
+        }
+        let billable: Vec<u64> = data.billable_jobs().map(|job| job.id).collect();
+        assert_eq!(billable, vec![3, 4, 1]);
+        assert_eq!(data.jobs.iter().filter(|job| job.id == 2).count(), 1);
+
+        let cases = [
+            ("absent-started", None, Some("2026-04-01T12:00:00Z"), false),
+            (
+                "empty-started",
+                Some(""),
+                Some("2026-04-01T12:00:00Z"),
+                false,
+            ),
+            (
+                "blank-started",
+                Some("   "),
+                Some("2026-04-01T12:00:00Z"),
+                false,
+            ),
+            (
+                "bad-started",
+                Some("not-a-time"),
+                Some("2026-04-01T12:00:00Z"),
+                false,
+            ),
+            (
+                "equal-fraction",
+                Some("2026-04-01T12:00:00.000Z"),
+                Some("2026-04-01T12:00:00Z"),
+                false,
+            ),
+            (
+                "equal-offset",
+                Some("2026-04-01T14:00:00+02:00"),
+                Some("2026-04-01T12:00:00Z"),
+                false,
+            ),
+            (
+                "earlier-offset",
+                Some("2026-04-01T13:59:59+02:00"),
+                Some("2026-04-01T12:00:00Z"),
+                true,
+            ),
+            (
+                "earlier-fraction",
+                Some("2026-04-01T11:59:59.999Z"),
+                Some("2026-04-01T12:00:00.000Z"),
+                true,
+            ),
+        ];
+        for (name, started, run_started, is_copy) in cases {
+            let dir = scratch(&format!("copy-{name}"));
+            write_json(
+                &dir,
+                "runs-1.json",
+                &runs_body(vec![run_with_start(
+                    1,
+                    "OWNER/REPO/.github/workflows/ci.yml@REFS/HEADS/Main",
+                    2,
+                    run_started,
+                )]),
+            );
+            let job = stamp_job(20, 1, 2, "test", started, Some("2026-04-01T12:30:00Z"));
+            write_json(&dir, "jobs-1.json", &jobs_body(vec![job]));
+            let data = read_dir(&dir).unwrap();
+            assert!(data.runs[0].links_to(".github/workflows/ci.yml"), "{name}");
+            let job = &data.jobs[0];
+            assert_eq!(data.is_inherited_copy(job), is_copy, "{name}");
+            if is_copy {
+                assert_eq!(data.billable_jobs().count(), 0, "{name}");
+                assert_eq!(
+                    data.inherited_copy_net(job).unwrap().to_decimal_string(),
+                    "0.000000",
+                    "{name}"
+                );
+            } else {
+                assert_eq!(data.billable_jobs().count(), 1, "{name}");
+                assert!(data.inherited_copy_net(job).is_none(), "{name}");
+            }
+        }
+
+        let dir = scratch("copy-null-started");
+        write_json(
+            &dir,
+            "runs-1.json",
+            &runs_body(vec![run_with_start(
+                1,
+                ".github/workflows/ci.yml@main",
+                2,
+                Some("2026-04-01T12:00:00Z"),
+            )]),
+        );
+        let mut job = stamp_job(
+            21,
+            1,
+            2,
+            "test",
+            Some("2026-04-01T10:00:00Z"),
+            Some("2026-04-01T10:05:00Z"),
+        );
+        job["started_at"] = Value::Null;
+        write_json(&dir, "jobs-1.json", &jobs_body(vec![job]));
+        let data = read_dir(&dir).unwrap();
+        assert!(!data.is_inherited_copy(&data.jobs[0]));
+        assert_eq!(data.billable_jobs().count(), 1);
+
+        let dir = scratch("copy-missing-run-start");
+        let mut run = run_with_start(1, ".github/workflows/ci.yml@main", 2, None);
+        run["run_started_at"] = Value::Null;
+        write_json(&dir, "runs-a.json", &runs_body(vec![run.clone()]));
+        write_json(
+            &dir,
+            "jobs-1.json",
+            &jobs_body(vec![stamp_job(
+                22,
+                1,
+                2,
+                "test",
+                Some("2026-04-01T10:00:00Z"),
+                Some("2026-04-01T10:05:00Z"),
+            )]),
+        );
+        let data = read_dir(&dir).unwrap();
+        assert!(!data.is_inherited_copy(&data.jobs[0]));
+
+        let dir = scratch("copy-empty-run-start");
+        write_json(
+            &dir,
+            "runs-1.json",
+            &runs_body(vec![run_with_start(
+                1,
+                ".github/workflows/ci.yml@main",
+                2,
+                Some(""),
+            )]),
+        );
+        write_json(
+            &dir,
+            "jobs-1.json",
+            &jobs_body(vec![stamp_job(
+                23,
+                1,
+                2,
+                "test",
+                Some("2026-04-01T10:00:00Z"),
+                Some("2026-04-01T10:05:00Z"),
+            )]),
+        );
+        let data = read_dir(&dir).unwrap();
+        assert!(!data.is_inherited_copy(&data.jobs[0]));
+        assert_eq!(data.billable_jobs().count(), 1);
+
+        let dir = scratch("copy-absent-run-start");
+        write_json(
+            &dir,
+            "runs-1.json",
+            &runs_body(vec![run_with_start(
+                1,
+                ".github/workflows/ci.yml@main",
+                2,
+                None,
+            )]),
+        );
+        write_json(
+            &dir,
+            "jobs-1.json",
+            &jobs_body(vec![stamp_job(
+                24,
+                1,
+                2,
+                "test",
+                Some("2026-04-01T10:00:00Z"),
+                Some("2026-04-01T10:05:00Z"),
+            )]),
+        );
+        let data = read_dir(&dir).unwrap();
+        assert!(data.runs[0].run_started_at.is_none());
+        assert!(!data.is_inherited_copy(&data.jobs[0]));
+
+        let dir = scratch("copy-other-attempt");
+        write_json(
+            &dir,
+            "runs-1.json",
+            &runs_body(vec![run_with_start(
+                1,
+                ".github/workflows/ci.yml@main",
+                2,
+                Some("2026-04-01T12:00:00Z"),
+            )]),
+        );
+        write_json(
+            &dir,
+            "jobs-1.json",
+            &jobs_body(vec![stamp_job(
+                25,
+                1,
+                3,
+                "test",
+                Some("2026-04-01T10:00:00Z"),
+                Some("2026-04-01T10:05:00Z"),
+            )]),
+        );
+        let data = read_dir(&dir).unwrap();
+        assert!(!data.is_inherited_copy(&data.jobs[0]));
+        assert_eq!(data.billable_jobs().count(), 1);
+
+        let dir = scratch("copy-no-run");
+        write_json(
+            &dir,
+            "jobs-4.json",
+            &jobs_body(vec![stamp_job(
+                26,
+                4,
+                1,
+                "orphan",
+                Some("2026-04-01T10:00:00Z"),
+                Some("2026-04-01T10:05:00Z"),
+            )]),
+        );
+        let data = read_dir(&dir).unwrap();
+        assert!(!data.is_inherited_copy(&data.jobs[0]));
+        assert_eq!(data.workflow_path(4), UNKNOWN_WORKFLOW);
+        assert_eq!(data.billable_jobs().count(), 1);
+
+        let dir = scratch("copy-duplicate-and-crlf");
+        write_json(
+            &dir,
+            "runs-1.json",
+            &runs_body(vec![run_with_start(
+                3,
+                ".github/workflows/ci.yml@main",
+                2,
+                Some("2026-04-01T12:00:00Z"),
+            )]),
+        );
+        let copy = stamp_job(
+            30,
+            3,
+            2,
+            "test",
+            Some("2026-04-01T10:00:00Z"),
+            Some("2026-04-01T11:00:00Z"),
+        );
+        let pretty = serde_json::to_vec_pretty(&jobs_body(vec![copy])).unwrap();
+        let mut crlf = Vec::with_capacity(pretty.len() + 16);
+        for byte in pretty {
+            if byte == b'\n' {
+                crlf.push(b'\r');
+            }
+            crlf.push(byte);
+        }
+        fs::write(dir.join("jobs-3-1.json"), crlf).unwrap();
+        fs::write(
+            dir.join("jobs-3-2.json"),
+            format!(
+                "{{\"total_count\":1,\"jobs\":[{}]}}",
+                r#"{"completed_at":"2026-04-01T12:06:00Z","started_at":"2026-04-01T12:05:00Z","name":"renamed","labels":[],"conclusion":"success","runner_name":"runner-a","run_attempt":2,"run_id":3,"id":30}"#
+            ),
+        )
+        .unwrap();
+        let data = read_dir(&dir).unwrap();
+        assert_eq!(data.jobs.len(), 1);
+        assert_eq!(data.jobs[0].name, "test");
+        assert!(data.is_inherited_copy(&data.jobs[0]));
+        assert_eq!(data.billable_jobs().count(), 0);
+        assert_eq!(
+            data.inherited_copy_net(&data.jobs[0])
+                .unwrap()
+                .to_decimal_string(),
+            "0.000000"
+        );
+    }
+
+    #[test]
+    fn github_timestamps_order_by_utc_instant() {
+        assert_eq!(parse_github_time("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_github_time("1970-01-01T00:00:01Z"),
+            Some(1_000_000_000)
+        );
+        assert_eq!(
+            parse_github_time("2026-03-01T10:00:00Z"),
+            parse_github_time("2026-03-01T10:00:00.000Z")
+        );
+        assert_eq!(
+            parse_github_time("2026-03-01T10:00:00Z"),
+            parse_github_time("2026-03-01T12:00:00+02:00")
+        );
+        assert_eq!(
+            parse_github_time("2026-03-01T10:00:00Z"),
+            parse_github_time("2026-03-01T10:00:00+0000")
+        );
+        assert_eq!(
+            parse_github_time("2026-03-01T10:00:00Z"),
+            parse_github_time("2026-03-01T11:00:00+01")
+        );
+        assert!(
+            parse_github_time("2026-03-01T09:59:59Z") < parse_github_time("2026-03-01T10:00:00Z")
+        );
+        assert!(parse_github_time("2024-02-29T00:00:00Z").is_some());
+        for bad in [
+            "",
+            "   ",
+            "2026-13-01T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2025-02-29T00:00:00Z",
+            "2026-03-01T24:00:00Z",
+            "2026-03-01T10:00:00",
+            "2026-03-01T10:00:00Zextra",
+            "yesterday",
+            "2026-03-01T10:00:60Z",
+            "2026-03-01t10:00:00",
+        ] {
+            assert_eq!(parse_github_time(bad), None, "{bad}");
+        }
+        assert!(parse_github_time("2026-03-01t10:00:00Z").is_some());
+        assert!(parse_github_time("  2026-03-01T10:00:00Z\r").is_some());
     }
 }

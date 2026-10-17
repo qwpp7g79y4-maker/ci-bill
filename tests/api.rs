@@ -540,3 +540,342 @@ fn empty_runs_directory_exits_0() {
     assert!(text.contains("\nIn progress\n(none)\n"), "{text}");
     assert!(!text.contains("in progress\n"), "{text}");
 }
+
+const LINK_USAGE: &str = "\
+date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path
+2026-04-01,actions,actions_linux,1,minutes,0.006,0.006,0,0.006,dev,acme,acme/widgets,.github/workflows/ci.yml
+";
+
+fn assert_plain(text: &str) {
+    let lower = text.to_ascii_lowercase();
+    assert!(!lower.contains("not supported"), "{text}");
+    assert!(!lower.contains("skipped"), "{text}");
+    assert!(!lower.contains("limitation"), "{text}");
+}
+
+fn report_runs(dir: &Path, json: bool) -> std::process::Output {
+    std::fs::write(dir.join("usage.csv"), LINK_USAGE).unwrap();
+    let usage = dir.join("usage.csv");
+    let usage = usage.to_str().unwrap();
+    let runs = dir.to_str().unwrap();
+    if json {
+        report(&["report", "--usage", usage, "--runs", runs, "--json"])
+    } else {
+        report(&["report", "--usage", usage, "--runs", runs])
+    }
+}
+
+fn id_lines<'a>(section: &'a str, id: &str) -> Vec<&'a str> {
+    let prefix = format!("{id} ");
+    section
+        .lines()
+        .filter(|line| line.starts_with(&prefix))
+        .collect()
+}
+
+#[test]
+fn cli_links_ref_owner_prefix_case_crlf_and_reordered_fields() {
+    let dir = scratch("cli-link");
+    let crlf = "{\r\n\"workflow_runs\": [\r\n{\r\n\"event\": \"push\",\r\n\"run_number\": 1,\r\n\"conclusion\": null,\r\n\"run_attempt\": 1,\r\n\"id\": 1,\r\n\"path\": \".github/workflows/ci.yml@main\",\r\n\"run_started_at\": \"2026-04-01T12:00:00Z\"\r\n},\r\n{\r\n\"path\": \".github/workflows/ci.yml@refs/heads/main\",\r\n\"id\": 2,\r\n\"run_attempt\": 1,\r\n\"run_number\": 2,\r\n\"event\": \"pull_request\",\r\n\"conclusion\": \"success\",\r\n\"run_started_at\": \"2026-04-02T12:00:00Z\"\r\n}\r\n]\r\n}\r\n";
+    std::fs::write(dir.join("runs-1.json"), crlf).unwrap();
+    write_json(
+        &dir,
+        "runs-2.json",
+        &serde_json::json!({
+            "workflow_runs": [
+                {
+                    "run_started_at": "2026-04-03T12:00:00Z",
+                    "event": "push",
+                    "conclusion": "success",
+                    "run_number": 3,
+                    "run_attempt": 1,
+                    "path": "octocat/octo-repo/.github/workflows/ci.yml@main",
+                    "id": 3
+                },
+                {
+                    "id": 4,
+                    "path": "OWNER/REPO/.GitHub/Workflows/CI.yml@REFS/HEADS/Feature/Foo",
+                    "run_attempt": 1,
+                    "run_number": 4,
+                    "event": "workflow_dispatch",
+                    "conclusion": "",
+                    "run_started_at": ""
+                }
+            ]
+        }),
+    );
+    write_json(
+        &dir,
+        "jobs-1.json",
+        &serde_json::json!({
+            "jobs": [{
+                "runner_name": "runner-a",
+                "conclusion": "success",
+                "completed_at": "2026-04-01T12:02:00Z",
+                "started_at": "2026-04-01T12:00:05Z",
+                "labels": ["ubuntu-latest"],
+                "name": "build",
+                "run_attempt": 1,
+                "run_id": 1,
+                "id": 11
+            }]
+        }),
+    );
+
+    let output = report_runs(&dir, false);
+    assert_exit(&output, 0);
+    let text = stdout(&output);
+    assert_plain(&text);
+    assert!(text.contains(".github/workflows/ci.yml"), "{text}");
+    assert!(!text.contains('@'), "{text}");
+    assert!(!text.contains("octocat"), "{text}");
+    assert!(!text.contains("OWNER/REPO"), "{text}");
+    assert!(!text.contains("refs/heads"), "{text}");
+    let runs = section(&text, "Runs");
+    assert!(
+        runs.contains(
+            "1  .github/workflows/ci.yml  attempt 1  number 1  push  in progress  2026-04-01T12:00:00Z\n"
+        ),
+        "{runs}"
+    );
+    assert!(
+        runs.contains(
+            "2  .github/workflows/ci.yml  attempt 1  number 2  pull_request  success  2026-04-02T12:00:00Z\n"
+        ),
+        "{runs}"
+    );
+    assert!(
+        runs.contains(
+            "3  .github/workflows/ci.yml  attempt 1  number 3  push  success  2026-04-03T12:00:00Z\n"
+        ),
+        "{runs}"
+    );
+    assert!(
+        runs.contains("4  .GitHub/Workflows/CI.yml  attempt 1  number 4  workflow_dispatch"),
+        "{runs}"
+    );
+    let jobs = section(&text, "Jobs");
+    assert!(
+        jobs.contains("11  build  run 1  .github/workflows/ci.yml"),
+        "{jobs}"
+    );
+    assert_eq!(id_lines(jobs, "11").len(), 1);
+
+    let json_out = report_runs(&dir, true);
+    assert_exit(&json_out, 0);
+    let body = stdout(&json_out);
+    assert_plain(&body);
+    let value: serde_json::Value = serde_json::from_str(body.trim_end()).unwrap();
+    let paths: Vec<&str> = value["workflow_runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|run| run["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&".github/workflows/ci.yml"), "{paths:?}");
+    assert!(paths.contains(&".GitHub/Workflows/CI.yml"), "{paths:?}");
+    assert!(paths.iter().all(|path| !path.contains('@')), "{paths:?}");
+    assert!(
+        paths
+            .iter()
+            .all(|path| !path.contains("OWNER") && !path.contains("octocat")),
+        "{paths:?}"
+    );
+}
+
+#[test]
+fn cli_duplicate_job_id_counts_once_across_order_and_crlf() {
+    let dir = scratch("cli-dedupe");
+    write_json(
+        &dir,
+        "runs-1.json",
+        &serde_json::json!({
+            "workflow_runs": [{
+                "id": 7,
+                "path": ".github/workflows/ci.yml@main",
+                "run_attempt": 1,
+                "run_number": 7,
+                "event": "push",
+                "conclusion": "success",
+                "run_started_at": "2026-04-01T12:00:00Z"
+            }]
+        }),
+    );
+    let first = "{\r\n\"jobs\": [\r\n{\r\n\"id\": 70,\r\n\"run_id\": 7,\r\n\"run_attempt\": 1,\r\n\"name\": \"kept\",\r\n\"labels\": [\"ubuntu-latest\"],\r\n\"started_at\": \"2026-04-01T12:00:05Z\",\r\n\"completed_at\": \"2026-04-01T12:01:00Z\",\r\n\"conclusion\": \"success\",\r\n\"runner_name\": \"runner-a\"\r\n}\r\n]\r\n}\r\n";
+    std::fs::write(dir.join("jobs-7-a.json"), first).unwrap();
+    std::fs::write(
+        dir.join("jobs-7-b.json"),
+        r#"{"jobs":[{"runner_name":"other","conclusion":"failure","completed_at":"2026-04-01T13:00:00Z","started_at":"2026-04-01T12:30:00Z","labels":["windows-latest"],"name":"dropped","run_attempt":1,"run_id":7,"id":70}]}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("jobs-7-attempts-1.json"), b"{").unwrap();
+    let nested = dir.join("attempts").join("1");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        nested.join("jobs-7.json"),
+        r#"{"jobs":[{"id":71,"run_id":7,"run_attempt":1,"name":"attempt-only","labels":[],"started_at":"2026-04-01T12:00:00Z","completed_at":"2026-04-01T12:01:00Z","conclusion":"success","runner_name":null}]}"#,
+    )
+    .unwrap();
+
+    let output = report_runs(&dir, false);
+    assert_exit(&output, 0);
+    let text = stdout(&output);
+    assert_plain(&text);
+    let jobs = section(&text, "Jobs");
+    assert_eq!(id_lines(jobs, "70").len(), 1, "{jobs}");
+    assert!(jobs.contains("kept"), "{jobs}");
+    assert!(!jobs.contains("dropped"), "{jobs}");
+    assert!(!jobs.contains("attempt-only"), "{jobs}");
+    assert!(!text.contains("71 "), "{text}");
+
+    let json_out = report_runs(&dir, true);
+    assert_exit(&json_out, 0);
+    let value: serde_json::Value = serde_json::from_str(stdout(&json_out).trim_end()).unwrap();
+    let listed = value["workflow_runs"][0]["jobs"].as_array().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["id"], 70);
+    assert_eq!(listed[0]["name"], "kept");
+    assert_eq!(listed[0]["billable"], true);
+    assert_eq!(listed[0]["inherited_copy"], false);
+}
+
+#[test]
+fn cli_inherited_copy_costs_zero_and_blank_times_do_not() {
+    let dir = scratch("cli-copy");
+    write_json(
+        &dir,
+        "runs-1.json",
+        &serde_json::json!({
+            "workflow_runs": [{
+                "id": 9,
+                "path": "octocat/octo-repo/.github/workflows/ci.yml@refs/heads/main",
+                "run_attempt": 2,
+                "run_number": 9,
+                "event": "push",
+                "conclusion": "success",
+                "run_started_at": "2026-04-01T12:00:00Z"
+            }]
+        }),
+    );
+    write_json(
+        &dir,
+        "jobs-9.json",
+        &serde_json::json!({
+            "jobs": [
+                {
+                    "id": 1,
+                    "run_id": 9,
+                    "run_attempt": 1,
+                    "name": "test",
+                    "labels": ["ubuntu-latest"],
+                    "started_at": "2026-04-01T10:00:00Z",
+                    "completed_at": "2026-04-01T10:10:00Z",
+                    "conclusion": "success",
+                    "runner_name": "runner-a"
+                },
+                {
+                    "id": 2,
+                    "run_id": 9,
+                    "run_attempt": 2,
+                    "name": "test",
+                    "labels": ["ubuntu-latest"],
+                    "started_at": "2026-04-01T10:00:00Z",
+                    "completed_at": "2026-04-01T10:10:00Z",
+                    "conclusion": "success",
+                    "runner_name": "runner-a"
+                },
+                {
+                    "id": 3,
+                    "run_id": 9,
+                    "run_attempt": 2,
+                    "name": "lint",
+                    "labels": ["ubuntu-latest"],
+                    "started_at": "2026-04-01T12:00:30Z",
+                    "completed_at": "2026-04-01T12:02:00Z",
+                    "conclusion": "success",
+                    "runner_name": "runner-a"
+                },
+                {
+                    "id": 4,
+                    "run_id": 9,
+                    "run_attempt": 2,
+                    "name": "pack",
+                    "labels": [],
+                    "started_at": "",
+                    "completed_at": "2026-04-01T12:03:00Z",
+                    "conclusion": "success",
+                    "runner_name": null
+                },
+                {
+                    "id": 5,
+                    "run_id": 9,
+                    "run_attempt": 2,
+                    "name": "queue",
+                    "labels": ["ubuntu-latest"],
+                    "started_at": "2026-04-01T11:00:00Z",
+                    "completed_at": null,
+                    "conclusion": null,
+                    "runner_name": "runner-b"
+                }
+            ]
+        }),
+    );
+
+    let output = report_runs(&dir, false);
+    assert_exit(&output, 0);
+    let text = stdout(&output);
+    assert_plain(&text);
+    assert!(!text.contains("octocat"), "{text}");
+    assert!(!text.contains('@'), "{text}");
+    let jobs = section(&text, "Jobs");
+    assert_eq!(id_lines(jobs, "1").len(), 1, "{jobs}");
+    assert_eq!(id_lines(jobs, "2").len(), 1, "{jobs}");
+    assert!(id_lines(jobs, "1")[0].contains("attempt 1"), "{jobs}");
+    assert!(!id_lines(jobs, "1")[0].contains("inherited copy"), "{jobs}");
+    assert!(
+        id_lines(jobs, "2")[0].contains("inherited copy  cost 0.00"),
+        "{jobs}"
+    );
+    assert!(!id_lines(jobs, "3")[0].contains("inherited copy"), "{jobs}");
+    assert!(!id_lines(jobs, "4")[0].contains("inherited copy"), "{jobs}");
+    assert!(!jobs.contains("queue"), "{jobs}");
+    let running = section(&text, "In progress");
+    assert_eq!(id_lines(running, "5").len(), 1, "{running}");
+    assert!(running.contains("inherited copy  cost 0.00"), "{running}");
+    assert!(running.contains("in progress"), "{running}");
+
+    let json_out = report_runs(&dir, true);
+    assert_exit(&json_out, 0);
+    let body = stdout(&json_out);
+    assert_plain(&body);
+    let value: serde_json::Value = serde_json::from_str(body.trim_end()).unwrap();
+    assert_eq!(
+        value["workflow_runs"][0]["path"],
+        ".github/workflows/ci.yml"
+    );
+    let listed = value["workflow_runs"][0]["jobs"].as_array().unwrap();
+    let by_id = |id: u64| {
+        listed
+            .iter()
+            .find(|job| job["id"].as_u64() == Some(id))
+            .unwrap_or_else(|| panic!("missing {id} in {listed:?}"))
+    };
+    assert_eq!(by_id(1)["billable"], true);
+    assert_eq!(by_id(1)["inherited_copy"], false);
+    assert!(by_id(1).get("net_amount").is_none());
+    assert_eq!(by_id(2)["billable"], false);
+    assert_eq!(by_id(2)["inherited_copy"], true);
+    assert_eq!(by_id(2)["counts"], true);
+    assert_eq!(by_id(2)["net_amount"], "0.000000");
+    assert_eq!(by_id(3)["billable"], true);
+    assert_eq!(by_id(4)["inherited_copy"], false);
+    assert_eq!(by_id(4)["billable"], true);
+    assert!(by_id(4).get("net_amount").is_none());
+    let progress = &value["in_progress"][0];
+    assert_eq!(progress["id"], 5);
+    assert_eq!(progress["inherited_copy"], true);
+    assert_eq!(progress["billable"], false);
+    assert_eq!(progress["net_amount"], "0.000000");
+    assert_eq!(progress["message"], "in progress");
+    assert_eq!(progress["workflow_path"], ".github/workflows/ci.yml");
+}
