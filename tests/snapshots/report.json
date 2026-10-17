@@ -1,0 +1,110 @@
+{
+  "currency": "USD",
+  "schema_version": 1,
+  "total_minutes": 12208.0,
+  "total_net": 284.208,
+  "unattached_findings": [],
+  "workflows": [
+    {
+      "findings": [
+        {
+          "file": "samples/.github/workflows/lint.yml",
+          "id": "F3",
+          "line": 2,
+          "message": "pull_request without concurrency cancel-in-progress"
+        },
+        {
+          "file": "samples/.github/workflows/lint.yml",
+          "id": "F2",
+          "line": 7,
+          "message": "default timeout is 360 minutes"
+        },
+        {
+          "file": "samples/.github/workflows/lint.yml",
+          "id": "F1",
+          "line": 8,
+          "message": "lint on macOS"
+        }
+      ],
+      "gross": 230.144,
+      "minutes": 3712.0,
+      "net": 230.144,
+      "path": ".github/workflows/lint.yml",
+      "share": 80.97731239092495,
+      "skus": [
+        {
+          "minutes": 3712.0,
+          "net": 230.144,
+          "sku": "actions_macos"
+        }
+      ]
+    },
+    {
+      "findings": [],
+      "gross": 44.23199999999999,
+      "minutes": 7372.0,
+      "net": 44.23199999999999,
+      "path": ".github/workflows/ci.yml",
+      "share": 15.563249451106229,
+      "skus": [
+        {
+          "minutes": 7372.0,
+          "net": 44.23199999999999,
+          "sku": "actions_linux"
+        }
+      ]
+    },
+    {
+      "findings": [],
+      "gross": 7.720000000000001,
+      "minutes": 772.0,
+      "net": 7.720000000000001,
+      "path": ".github/workflows/release.yml",
+      "share": 2.716320441366886,
+      "skus": [
+        {
+          "minutes": 772.0,
+          "net": 7.720000000000001,
+          "sku": "actions_windows"
+        }
+      ]
+    },
+    {
+      "findings": [
+        {
+          "file": "samples/.github/workflows/docs.yml",
+          "id": "F2",
+          "line": 4,
+          "message": "default timeout is 360 minutes"
+        }
+      ],
+      "gross": 2.112000000000001,
+      "minutes": 352.0,
+      "net": 2.112000000000001,
+      "path": ".github/workflows/docs.yml",
+      "share": 0.7431177166019256,
+      "skus": [
+        {
+          "minutes": 352.0,
+          "net": 2.112000000000001,
+          "sku": "actions_linux"
+        }
+      ]
+    },
+    {
+      "findings": [],
+      "gross": 0.00504,
+      "minutes": 0.0,
+      "net": 0.0,
+      "path": "(no workflow)",
+      "share": 0.0,
+      "skus": [
+        {
+          "minutes": 0.0,
+          "net": 0.0,
+          "sku": "actions_storage"
+        }
+      ]
+    }
+  ]
+}

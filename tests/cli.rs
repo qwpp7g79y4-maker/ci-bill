@@ -39,6 +39,7 @@ fn help_shows_options() {
     assert!(text.contains("--usage"), "{text}");
     assert!(text.contains("--workflows"), "{text}");
     assert!(text.contains("--top"), "{text}");
+    assert!(text.contains("--json"), "{text}");
 }
 
 #[test]

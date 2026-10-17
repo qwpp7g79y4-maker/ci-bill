@@ -16,7 +16,8 @@ fn main() -> ExitCode {
                 usage,
                 workflows,
                 top,
-            } => report(&usage, workflows.as_deref(), top),
+                json,
+            } => report(&usage, workflows.as_deref(), top, json),
         },
         Err(err) => usage_exit(err),
     }
@@ -33,7 +34,7 @@ fn usage_exit(err: clap::Error) -> ExitCode {
     ExitCode::from(3)
 }
 
-fn report(usage_path: &Path, workflows: Option<&Path>, top: Option<usize>) -> ExitCode {
+fn report(usage_path: &Path, workflows: Option<&Path>, top: Option<usize>, json: bool) -> ExitCode {
     let rows = match usage::read_usage(usage_path) {
         Ok(rows) => rows,
         Err(err) => {
@@ -58,10 +59,12 @@ fn report(usage_path: &Path, workflows: Option<&Path>, top: Option<usize>) -> Ex
         },
         None => None,
     };
-    print!(
-        "{}",
+    let text = if json {
+        report::render_json(shown, total_net, total_minutes, found.as_deref())
+    } else {
         report::render(shown, total_net, total_minutes, found.as_deref())
-    );
+    };
+    print!("{text}");
     ExitCode::SUCCESS
 }
 
@@ -86,5 +89,8 @@ enum Command {
         /// Show the N workflows with the highest net amount.
         #[arg(long, value_name = "N")]
         top: Option<usize>,
+        /// Print one JSON object instead of the text report.
+        #[arg(long)]
+        json: bool,
     },
 }
