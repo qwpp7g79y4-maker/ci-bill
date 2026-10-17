@@ -42,6 +42,19 @@ pub struct Job {
     pub matrix: Option<Matrix>,
     /// Job-level `concurrency.cancel-in-progress` cancels in-progress runs.
     pub cancel_in_progress: bool,
+    /// `uses: ./.github/workflows/<file>.yml` (or `.yaml`) on this job.
+    pub uses: Option<ReusableCall>,
+}
+
+/// A job calling a reusable workflow in the same repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReusableCall {
+    /// Line of the `uses:` key.
+    pub line: usize,
+    /// Scalar text, for example `./.github/workflows/lint.yml`.
+    pub spec: String,
+    /// File name the call asks for, for example `lint.yml`.
+    pub file_name: String,
 }
 
 /// `runs-on` for a job.
@@ -733,6 +746,7 @@ fn note_jobs(workflow: &mut Workflow, node: &Node) {
             steps_text: String::new(),
             matrix: None,
             cancel_in_progress: false,
+            uses: None,
         };
         if let Node::Mapping { entries, .. } = &item.value {
             fill_job(&mut job, entries);
@@ -774,6 +788,54 @@ fn fill_job(job: &mut Job, entries: &[Entry]) {
     if let Some(item) = entry(entries, "concurrency") {
         job.cancel_in_progress = concurrency_enabled(&item.value);
     }
+    if let Some(item) = entry(entries, "uses") {
+        if let Some(text) = scalar_text(&item.value) {
+            let text = trim_breaks(text);
+            let text = text.trim();
+            if let Some(call) = local_reusable_call(item.line, text) {
+                job.uses = Some(call);
+            }
+        }
+    }
+}
+
+/// `./.github/workflows/<file>.yml` or `.yaml`, ignoring ASCII case on the
+/// directory names and the extension. `..` and `.` are folded first.
+fn local_reusable_call(line: usize, spec: &str) -> Option<ReusableCall> {
+    if spec.is_empty() || spec.contains('@') || spec.contains("://") {
+        return None;
+    }
+    let rest = spec.strip_prefix("./")?;
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rest.split(['/', '\\']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            parts.pop()?;
+            continue;
+        }
+        parts.push(part);
+    }
+    if parts.len() != 3 {
+        return None;
+    }
+    if !parts[0].eq_ignore_ascii_case(".github") || !parts[1].eq_ignore_ascii_case("workflows") {
+        return None;
+    }
+    let file_name = parts[2];
+    let ext = file_name.rsplit_once('.')?.1;
+    if file_name.len() == ext.len() + 1 {
+        return None;
+    }
+    if !ext.eq_ignore_ascii_case("yml") && !ext.eq_ignore_ascii_case("yaml") {
+        return None;
+    }
+    Some(ReusableCall {
+        line,
+        spec: spec.to_string(),
+        file_name: file_name.to_string(),
+    })
 }
 
 fn runs_on_from(line: usize, node: &Node) -> RunsOn {

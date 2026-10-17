@@ -19,6 +19,8 @@ use crate::rank::{Bill, WorkflowTotal};
 /// Findings attach to a workflow when the YAML path ends in
 /// `.github/workflows/<file>` and that suffix matches `workflow_path`.
 /// Invoice findings attach by repository and workflow path instead.
+/// A callee finding with `workflow_path` set and no repository is listed on
+/// that caller. Its file and line stay on the callee.
 /// A finding with no usage row is listed under "Workflows without usage".
 pub fn render(
     workflows: &[WorkflowTotal],
@@ -267,10 +269,32 @@ fn attach<'a>(workflows: &[WorkflowTotal], findings: Option<&'a [Finding]>) -> A
             }
         }
     }
+    // The caller already lists this callee finding. Invoice rows carry a
+    // repository, so an unmatched invoice row stays in the unattached list.
+    unattached.retain(|finding| {
+        finding.repository.is_some()
+            || !by_workflow
+                .iter()
+                .flatten()
+                .any(|placed| same_spot(finding, placed))
+    });
+    let mut unique: Vec<&Finding> = Vec::new();
+    for finding in unattached {
+        if finding.repository.is_some() || !unique.iter().any(|kept| same_spot(finding, kept)) {
+            unique.push(finding);
+        }
+    }
     Attached {
         by_workflow,
-        unattached,
+        unattached: unique,
     }
+}
+
+fn same_spot(left: &Finding, right: &Finding) -> bool {
+    left.path == right.path
+        && left.line == right.line
+        && left.kind == right.kind
+        && left.message == right.message
 }
 
 /// `.github/workflows/<file>` taken from the YAML path.
@@ -287,13 +311,21 @@ fn workflow_key(path: &Path) -> Option<String> {
 }
 
 fn belongs_to(workflow: &WorkflowTotal, finding: &Finding) -> bool {
-    if let (Some(repository), Some(workflow_path)) = (&finding.repository, &finding.workflow_path) {
-        return workflow.repository == *repository && workflow.workflow_path == *workflow_path;
+    if let Some(workflow_path) = &finding.workflow_path {
+        let path_ok = workflow_path_matches(&workflow.workflow_path, workflow_path);
+        return match &finding.repository {
+            Some(repository) => path_ok && workflow.repository == *repository,
+            None => path_ok,
+        };
     }
     let Some(key) = workflow_key(&finding.path) else {
         return false;
     };
-    workflow.workflow_path == key || workflow.workflow_path.ends_with(&format!("/{key}"))
+    workflow_path_matches(&workflow.workflow_path, &key)
+}
+
+fn workflow_path_matches(workflow_path: &str, key: &str) -> bool {
+    workflow_path == key || workflow_path.ends_with(&format!("/{key}"))
 }
 
 fn workflow_json(

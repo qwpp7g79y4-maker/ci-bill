@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::money;
 use crate::usage::UsageRow;
@@ -19,6 +19,10 @@ pub enum FindingKind {
     DuplicateKey,
     /// A usage row disagrees with quantity * unit price, or with gross - discount.
     InvoiceMismatch,
+    /// Job calls `./.github/workflows/<file>` and that file is not in the scan.
+    CalleeNotFound,
+    /// A local reusable workflow calls back into a workflow already being expanded.
+    ReusableCycle,
 }
 
 impl FindingKind {
@@ -31,6 +35,8 @@ impl FindingKind {
             Self::MatrixJobs => "F4",
             Self::DuplicateKey => "F8",
             Self::InvoiceMismatch => "F9",
+            Self::CalleeNotFound => "F6",
+            Self::ReusableCycle => "F7",
         }
     }
 }
@@ -44,45 +50,183 @@ pub struct Finding {
     pub message: String,
     /// Set on invoice findings so the row stays on its repository workflow.
     pub repository: Option<String>,
-    /// Workflow path from the usage row, including `(no workflow)`.
+    /// Workflow path this finding is listed under.
+    ///
+    /// Invoice findings set this together with `repository`. Findings copied
+    /// from a local reusable workflow set it to the caller
+    /// (`.github/workflows/<file>`) and leave `repository` empty. `path` and
+    /// `line` stay on the callee file.
     pub workflow_path: Option<String>,
 }
 
 const LINT_TOOLS: [&str; 5] = ["lint", "fmt", "clippy", "eslint", "prettier"];
 
 /// Findings for the scanned workflows, ordered by path, line, and kind.
+///
+/// A job `uses: ./.github/workflows/<file>.yml` (or `.yaml`) loads that file
+/// from this scan. Findings for the callee are listed on the caller. The
+/// finding file and line stay on the callee. A missing file and a call cycle
+/// are findings on the `uses:` line.
 pub fn findings(workflows: &[Workflow]) -> Vec<Finding> {
     let mut found = Vec::new();
     for workflow in workflows {
-        if pulls_without_cancel(workflow) {
-            if let Some(line) = workflow.on_line {
-                push(
-                    &mut found,
-                    &workflow.path,
-                    line,
-                    FindingKind::PullRequestConcurrency,
-                    pr_cancel_message(workflow),
+        emit_workflow_findings(&mut found, workflow, None);
+        let mut stack = vec![workflow.path.clone()];
+        expand_calls(&mut found, workflows, workflow, workflow, &mut stack);
+    }
+    dedupe_findings(&mut found);
+    found.sort_by(cmp_finding);
+    found
+}
+
+fn emit_workflow_findings(found: &mut Vec<Finding>, workflow: &Workflow, caller_key: Option<&str>) {
+    let start = found.len();
+    if pulls_without_cancel(workflow) {
+        if let Some(line) = workflow.on_line {
+            push(
+                found,
+                &workflow.path,
+                line,
+                FindingKind::PullRequestConcurrency,
+                pr_cancel_message(workflow),
+            );
+        }
+    }
+    for dup in &workflow.duplicate_keys {
+        push(
+            found,
+            &workflow.path,
+            dup.second,
+            FindingKind::DuplicateKey,
+            &duplicate_message(&dup.key, dup.first, dup.second),
+        );
+    }
+    for job in &workflow.jobs {
+        if job.uses.is_none() {
+            note_job(found, &workflow.path, job);
+        }
+    }
+    if let Some(key) = caller_key {
+        for item in &mut found[start..] {
+            item.workflow_path = Some(key.to_string());
+        }
+    }
+}
+
+fn duplicate_message(key: &str, first: usize, second: usize) -> String {
+    format!("duplicate key {key} (line {first} and {second})")
+}
+
+/// Walk `uses:` from `current`, attributing every callee finding to `root`.
+///
+/// The stack is the chain of files already entered. A call back into that
+/// chain records a cycle and returns, so a loop cannot run forever.
+fn expand_calls(
+    found: &mut Vec<Finding>,
+    workflows: &[Workflow],
+    root: &Workflow,
+    current: &Workflow,
+    stack: &mut Vec<PathBuf>,
+) {
+    let caller_key = usage_key(&root.path);
+    for job in &current.jobs {
+        let Some(call) = &job.uses else {
+            continue;
+        };
+        if let Some(matrix) = &job.matrix {
+            if let Some(message) = matrix_message(matrix) {
+                push_at(
+                    found,
+                    &current.path,
+                    matrix.line,
+                    FindingKind::MatrixJobs,
+                    &message,
+                    Some(caller_key.clone()),
                 );
             }
         }
-        for dup in &workflow.duplicate_keys {
-            push(
-                &mut found,
-                &workflow.path,
-                dup.second,
-                FindingKind::DuplicateKey,
-                &format!(
-                    "duplicate key {} (line {} and {})",
-                    dup.key, dup.first, dup.second
-                ),
-            );
-        }
-        for job in &workflow.jobs {
-            note_job(&mut found, &workflow.path, job);
+        match find_callee(workflows, &call.file_name) {
+            None => push_at(
+                found,
+                &current.path,
+                call.line,
+                FindingKind::CalleeNotFound,
+                &missing_callee_message(&job.name, &call.spec),
+                Some(caller_key.clone()),
+            ),
+            Some(callee) => {
+                if stack.iter().any(|path| path == &callee.path) {
+                    push_at(
+                        found,
+                        &current.path,
+                        call.line,
+                        FindingKind::ReusableCycle,
+                        &cycle_message(stack, &callee.path),
+                        Some(caller_key.clone()),
+                    );
+                    continue;
+                }
+                emit_workflow_findings(found, callee, Some(&caller_key));
+                stack.push(callee.path.clone());
+                expand_calls(found, workflows, root, callee, stack);
+                stack.pop();
+            }
         }
     }
-    found.sort_by(cmp_finding);
-    found
+}
+
+fn missing_callee_message(job: &str, spec: &str) -> String {
+    format!("callee not found: job {job} uses {spec}")
+}
+
+fn cycle_message(stack: &[PathBuf], next: &Path) -> String {
+    let mut names: Vec<&str> = stack.iter().map(|path| display_name(path)).collect();
+    names.push(display_name(next));
+    let chain = names.join(" -> ");
+    format!("reusable workflow cycle: {chain}")
+}
+
+fn display_name(path: &Path) -> &str {
+    file_name(path).unwrap_or("workflow")
+}
+
+fn usage_key(path: &Path) -> String {
+    format!(".github/workflows/{}", display_name(path))
+}
+
+fn file_name(path: &Path) -> Option<&str> {
+    path.file_name().and_then(|name| name.to_str())
+}
+
+fn find_callee<'a>(workflows: &'a [Workflow], file_name_wanted: &str) -> Option<&'a Workflow> {
+    if let Some(exact) = workflows
+        .iter()
+        .find(|workflow| file_name(&workflow.path) == Some(file_name_wanted))
+    {
+        return Some(exact);
+    }
+    workflows.iter().find(|workflow| {
+        file_name(&workflow.path).is_some_and(|name| name.eq_ignore_ascii_case(file_name_wanted))
+    })
+}
+
+fn dedupe_findings(found: &mut Vec<Finding>) {
+    let mut kept: Vec<Finding> = Vec::new();
+    for item in found.drain(..) {
+        if !kept.iter().any(|other| same_recorded(other, &item)) {
+            kept.push(item);
+        }
+    }
+    *found = kept;
+}
+
+fn same_recorded(left: &Finding, right: &Finding) -> bool {
+    left.path == right.path
+        && left.line == right.line
+        && left.kind == right.kind
+        && left.message == right.message
+        && left.repository == right.repository
+        && left.workflow_path == right.workflow_path
 }
 
 /// Invoice check for every usage row.
@@ -481,22 +625,37 @@ fn label_set_os(labels: &[String]) -> (bool, bool) {
 }
 
 fn push(found: &mut Vec<Finding>, path: &Path, line: usize, kind: FindingKind, message: &str) {
+    push_at(found, path, line, kind, message, None);
+}
+
+fn push_at(
+    found: &mut Vec<Finding>,
+    path: &Path,
+    line: usize,
+    kind: FindingKind,
+    message: &str,
+    workflow_path: Option<String>,
+) {
     found.push(Finding {
         path: path.to_path_buf(),
         line,
         kind,
         message: message.to_string(),
         repository: None,
-        workflow_path: None,
+        workflow_path,
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usage::UsageRow;
-    use crate::workflow::{scan_dir, scan_yaml};
-    use std::path::Path;
+    use crate::money::Micros;
+    use crate::rank::rank;
+    use crate::report::{render, render_json};
+    use crate::usage::{read_usage, UsageRow};
+    use crate::workflow::{scan_dir, scan_yaml, Workflow};
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     fn analyze(yaml: &str) -> Vec<Finding> {
         let workflow = scan_yaml(Path::new("fixture.yml"), yaml).expect("valid fixture");
@@ -2316,5 +2475,1226 @@ jobs:
         let flow_cancelled = "on: [pull_request_target]\nconcurrency: {cancel-in-progress: \"${{ github.event_name == 'pull_request_target' }}\"}\njobs: {test: {runs-on: ubuntu-latest, timeout-minutes: 1}}\n";
         assert_no_f3(&analyze(flow_cancelled));
         assert_no_f3(&analyze(&crlf(flow_cancelled)));
+    }
+
+    const LINT_CALLEE: &str = "\
+name: Lint
+on: workflow_call
+jobs:
+  lint:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - run: cargo fmt --check
+";
+
+    const MATRIX_CALLEE: &str = "\
+name: Wide
+on: workflow_call
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [14, 16, 18]
+    steps:
+      - run: echo build
+";
+
+    fn workflows_dir(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join("ci-bill-b4a").join(name);
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join(".github").join("workflows");
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_workflow(dir: &Path, name: &str, text: &str, crlf_file: bool, bom: bool) {
+        let mut body = if crlf_file {
+            text.replace('\n', "\r\n")
+        } else {
+            text.to_string()
+        };
+        if bom {
+            body.insert(0, '\u{feff}');
+        }
+        fs::write(dir.join(name), body).unwrap();
+    }
+
+    fn load_dir(dir: &Path) -> (Vec<Workflow>, Vec<Finding>) {
+        let workflows = scan_dir(dir).expect("scan workflows");
+        let found = findings(&workflows);
+        (workflows, found)
+    }
+
+    fn job_named<'a>(workflows: &'a [Workflow], file: &str, job: &str) -> &'a crate::workflow::Job {
+        let workflow = workflows
+            .iter()
+            .find(|item| item.path.file_name().and_then(|name| name.to_str()) == Some(file))
+            .unwrap_or_else(|| panic!("missing {file}"));
+        workflow
+            .jobs
+            .iter()
+            .find(|item| item.name == job)
+            .unwrap_or_else(|| panic!("missing job {job} in {file}"))
+    }
+
+    fn caller_key(file: &str) -> String {
+        format!(".github/workflows/{file}")
+    }
+
+    fn attributed<'a>(
+        found: &'a [Finding],
+        caller_file: &str,
+        kind: FindingKind,
+    ) -> Vec<&'a Finding> {
+        let key = caller_key(caller_file);
+        found
+            .iter()
+            .filter(|item| item.kind == kind && item.workflow_path.as_deref() == Some(key.as_str()))
+            .collect()
+    }
+
+    fn usage(path: &str, net: &str, price: &str) -> UsageRow {
+        UsageRow {
+            line: 2,
+            date: "2026-09-01".into(),
+            product: "actions".into(),
+            sku: "actions_linux".into(),
+            quantity: Micros::parse("10").unwrap(),
+            unit_type: "minutes".into(),
+            applied_cost_per_quantity: Micros::parse(price).unwrap(),
+            gross: Micros::parse(net).unwrap(),
+            discount: Micros::ZERO,
+            net: Micros::parse(net).unwrap(),
+            username: "ci".into(),
+            organization: "example-org".into(),
+            repository: "example-org/app".into(),
+            workflow_path: path.into(),
+        }
+    }
+
+    fn report_for(found: &[Finding], rows: &[UsageRow]) -> (String, serde_json::Value) {
+        let ranking = rank(rows, None);
+        let text = render(&ranking.workflows, &ranking.bill, Some(found), None);
+        let json: serde_json::Value = serde_json::from_str(
+            render_json(&ranking.workflows, &ranking.bill, Some(found), None, None).trim_end(),
+        )
+        .expect("json report");
+        (text, json)
+    }
+
+    fn section_after<'a>(text: &'a str, label: &str) -> &'a str {
+        let start = text
+            .find(label)
+            .unwrap_or_else(|| panic!("missing {label} in {text}"));
+        &text[start..]
+    }
+
+    fn assert_no_timeout_on_call(found: &[Finding], workflow_file: &str, job_line: usize) {
+        assert!(
+            found.iter().all(|item| {
+                !(item.kind == FindingKind::MissingTimeout
+                    && item.line == job_line
+                    && item.path.ends_with(workflow_file))
+            }),
+            "uses job must not be flagged for the default timeout: {found:?}"
+        );
+    }
+
+    #[test]
+    fn local_callee_macos_lint_is_f1_under_caller() {
+        let callee_runs_on = 5;
+        let cases = [
+            ("lint-plain", "caller.yml", "lint.yml", "uses: ./.github/workflows/lint.yml\n", false, false, 5),
+            ("lint-yaml", "caller.yaml", "lint.yaml", "uses: ./.github/workflows/lint.yaml\n", false, false, 5),
+            ("lint-with", "caller.yml", "lint.yml", "uses: ./.github/workflows/lint.yml\nwith:\n  extra: \"1\"\n", false, false, 5),
+            ("lint-secrets-inherit", "caller.yml", "lint.yml", "uses: ./.github/workflows/lint.yml\nsecrets: inherit\n", false, false, 5),
+            ("lint-secrets-map", "caller.yml", "lint.yml", "uses: ./.github/workflows/lint.yml\nsecrets:\n  token: value\n", false, false, 5),
+            ("lint-with-and-secrets", "caller.yml", "lint.yml", "uses: ./.github/workflows/lint.yml\nwith:\n  extra: \"1\"\nsecrets: inherit\n", false, false, 5),
+            ("lint-empty-with-secrets", "caller.yml", "lint.yml", "uses: ./.github/workflows/lint.yml\nwith: {}\nsecrets: {}\n", false, false, 5),
+            ("lint-secrets-before-uses", "caller.yml", "lint.yml", "secrets: inherit\nwith:\n  extra: \"1\"\nuses: ./.github/workflows/lint.yml\n", false, false, 8),
+            ("lint-with-before-uses", "caller.yml", "lint.yml", "with:\n  extra: \"1\"\nuses: ./.github/workflows/lint.yml\nsecrets:\n  token: value\n", false, false, 7),
+            ("lint-quoted", "caller.yml", "lint.yml", "uses: \"./.github/workflows/lint.yml\"\n", false, false, 5),
+            ("lint-single-quoted", "caller.yml", "lint.yml", "uses: './.github/workflows/lint.yml'\n", false, false, 5),
+            ("lint-capitals", "caller.yml", "lint.yml", "uses: ./.GitHub/Workflows/lint.YML\n", false, false, 5),
+            ("lint-backslash", "caller.yml", "lint.yml", "uses: ./.github\\workflows\\lint.yml\n", false, false, 5),
+            ("lint-dot-segments", "caller.yml", "lint.yml", "uses: ./.github/workflows/../workflows/./lint.yml\n", false, false, 5),
+            ("lint-double-slash", "caller.yml", "lint.yml", "uses: ./.github//workflows/lint.yml\n", false, false, 5),
+            ("lint-crlf", "caller.yml", "lint.yml", "uses: ./.github/workflows/lint.yml\nwith:\n  extra: \"1\"\nsecrets: inherit\n", true, false, 5),
+            ("lint-bom", "caller.yml", "lint.yml", "uses: ./.github/workflows/lint.yml\n", false, true, 5),
+            ("lint-block-scalar", "caller.yml", "lint.yml", "uses: |\n  ./.github/workflows/lint.yml\n", false, false, 5),
+        ];
+        for (name, caller_file, callee_file, job_body, crlf_file, bom, uses_line) in cases {
+            let dir = workflows_dir(name);
+            let caller = format!("name: Caller\non: push\njobs:\n  call-lint:\n{job_body}");
+            let caller = indent_job_body(&caller);
+            write_workflow(&dir, caller_file, &caller, crlf_file, false);
+            write_workflow(&dir, callee_file, LINT_CALLEE, crlf_file, bom);
+            let (workflows, found) = load_dir(&dir);
+            let call = job_named(&workflows, caller_file, "call-lint");
+            assert!(call.uses.is_some(), "{name}");
+            assert_eq!(call.uses.as_ref().unwrap().line, uses_line, "{name}");
+            assert_no_timeout_on_call(&found, caller_file, call.line);
+            let f1 = attributed(&found, caller_file, FindingKind::LintOnRunner);
+            assert_eq!(f1.len(), 1, "{name}: {found:?}");
+            assert_eq!(f1[0].line, callee_runs_on, "{name}");
+            assert!(
+                f1[0].path.ends_with(callee_file),
+                "{name}: {}",
+                f1[0].path.display()
+            );
+            assert_eq!(f1[0].message, "lint on macOS", "{name}");
+            let rows = [usage(&caller_key(caller_file), "0.06", "0.006")];
+            let (text, json) = report_for(&found, &rows);
+            let label = format!("example-org/app .github/workflows/{caller_file}");
+            let section = section_after(&text, &label);
+            let needle = format!(
+                "F1 {}:{}: lint on macOS",
+                f1[0].path.display(),
+                callee_runs_on
+            );
+            assert!(section.contains(&needle), "{name}: {text}");
+            assert!(!text.contains("Workflows without usage"), "{name}: {text}");
+            assert_eq!(
+                json["workflows"][0]["path"],
+                caller_key(caller_file),
+                "{name}"
+            );
+            assert_eq!(json["workflows"][0]["net"], "0.060000", "{name}");
+            assert_eq!(json["workflows"].as_array().unwrap().len(), 1, "{name}");
+            assert!(
+                json["unattached_findings"].as_array().unwrap().is_empty(),
+                "{name}"
+            );
+            let listed = json["workflows"][0]["findings"].as_array().unwrap();
+            assert!(
+                listed.iter().any(|item| {
+                    item["id"] == "F1"
+                        && item["line"] == callee_runs_on
+                        && item["message"] == "lint on macOS"
+                        && item["file"].as_str().unwrap().ends_with(callee_file)
+                }),
+                "{name}: {listed:?}"
+            );
+        }
+
+        let flow_dir = workflows_dir("lint-flow");
+        write_workflow(
+            &flow_dir,
+            "caller.yml",
+            "on: push\njobs: {call-lint: {uses: ./.github/workflows/lint.yml, with: {extra: \"1\"}, secrets: inherit}}\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &flow_dir,
+            "lint.yml",
+            "on: workflow_call\njobs: {lint: {runs-on: macos-latest, timeout-minutes: 10, steps: [{run: cargo fmt --check}]}}\n",
+            false,
+            false,
+        );
+        let (workflows, found) = load_dir(&flow_dir);
+        let call = job_named(&workflows, "caller.yml", "call-lint");
+        let callee = job_named(&workflows, "lint.yml", "lint");
+        let runs_on = callee.runs_on.as_ref().unwrap().line;
+        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, runs_on);
+        assert_eq!(
+            call.uses.as_ref().unwrap().spec,
+            "./.github/workflows/lint.yml"
+        );
+        let (text, _) = report_for(&found, &[usage(&caller_key("caller.yml"), "0.06", "0.006")]);
+        assert!(text.contains("lint on macOS"), "{text}");
+        assert!(text.contains(&format!("lint.yml:{runs_on}:")), "{text}");
+        assert!(!text.contains("Workflows without usage"), "{text}");
+
+        let nested = workflows_dir("lint-nested");
+        write_workflow(
+            &nested,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-mid:\n    uses: ./.github/workflows/mid.yml\n    secrets: inherit\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &nested,
+            "mid.yml",
+            "name: Mid\non: workflow_call\njobs:\n  forward:\n    with:\n      extra: \"1\"\n    secrets:\n      token: value\n    uses: ./.github/workflows/lint.yml\n",
+            false,
+            false,
+        );
+        write_workflow(&nested, "lint.yml", LINT_CALLEE, false, false);
+        let (workflows, found) = load_dir(&nested);
+        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, callee_runs_on);
+        assert!(f1[0].path.ends_with("lint.yml"), "{}", f1[0].path.display());
+        assert_no_timeout_on_call(
+            &found,
+            "caller.yml",
+            job_named(&workflows, "caller.yml", "call-mid").line,
+        );
+        assert_no_timeout_on_call(
+            &found,
+            "mid.yml",
+            job_named(&workflows, "mid.yml", "forward").line,
+        );
+        let (text, _) = report_for(&found, &[usage(&caller_key("caller.yml"), "0.06", "0.006")]);
+        assert!(
+            section_after(&text, "example-org/app .github/workflows/caller.yml")
+                .contains("lint.yml:5: lint on macOS"),
+            "{text}"
+        );
+        assert!(!text.contains("Workflows without usage"), "{text}");
+
+        let anchor = workflows_dir("lint-anchor");
+        write_workflow(
+            &anchor,
+            "caller.yml",
+            "call: &call\n  uses: ./.github/workflows/missing.yml\njobs:\n  call-lint:\n    <<: *call\n    uses: ./.github/workflows/lint.yml\n    secrets: inherit\n",
+            false,
+            false,
+        );
+        write_workflow(&anchor, "lint.yml", LINT_CALLEE, false, false);
+        let (workflows, found) = load_dir(&anchor);
+        let call = job_named(&workflows, "caller.yml", "call-lint");
+        assert_eq!(
+            call.uses.as_ref().unwrap().spec,
+            "./.github/workflows/lint.yml"
+        );
+        assert!(
+            attributed(&found, "caller.yml", FindingKind::CalleeNotFound).is_empty(),
+            "{found:?}"
+        );
+        assert!(
+            attributed(&found, "caller.yml", FindingKind::DuplicateKey).is_empty(),
+            "{found:?}"
+        );
+        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].message, "lint on macOS");
+
+        let windows = workflows_dir("lint-windows");
+        write_workflow(
+            &windows,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: ./.github/workflows/lint.yml\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &windows,
+            "lint.yml",
+            "name: Lint\non: workflow_call\njobs:\n  fmt:\n    runs-on: windows-latest\n    timeout-minutes: 10\n    steps:\n      - run: cargo fmt --check\n",
+            false,
+            false,
+        );
+        let (_, found) = load_dir(&windows);
+        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert_eq!(f1[0].line, 5);
+        assert_eq!(f1[0].message, "lint on Windows");
+
+        let hosted = workflows_dir("lint-self-hosted");
+        write_workflow(
+            &hosted,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: ./.github/workflows/lint.yml\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &hosted,
+            "lint.yml",
+            "name: Lint\non: workflow_call\njobs:\n  lint:\n    runs-on: [self-hosted, macos]\n    timeout-minutes: 5\n    steps:\n      - run: cargo fmt --check\n",
+            false,
+            false,
+        );
+        let (_, found) = load_dir(&hosted);
+        assert!(
+            attributed(&found, "caller.yml", FindingKind::LintOnRunner).is_empty(),
+            "{found:?}"
+        );
+        assert!(
+            attributed(&found, "caller.yml", FindingKind::CalleeNotFound).is_empty(),
+            "{found:?}"
+        );
+
+        let step = workflows_dir("lint-step-uses");
+        write_workflow(
+            &step,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - uses: ./.github/workflows/lint.yml\n",
+            false,
+            false,
+        );
+        write_workflow(&step, "lint.yml", LINT_CALLEE, false, false);
+        let (workflows, found) = load_dir(&step);
+        assert!(job_named(&workflows, "caller.yml", "lint").uses.is_none());
+        assert!(
+            attributed(&found, "caller.yml", FindingKind::LintOnRunner).is_empty(),
+            "{found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .all(|item| item.kind != FindingKind::CalleeNotFound),
+            "{found:?}"
+        );
+
+        let rows = vec![
+            usage(".github/workflows/caller.yml", "0.06", "0.006"),
+            usage(".github/workflows/lint.yml", "1.00", "0.100"),
+        ];
+        let dir = workflows_dir("lint-both-rows");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: ./.github/workflows/lint.yml\n    with:\n      extra: \"1\"\n    secrets: inherit\n",
+            false,
+            false,
+        );
+        write_workflow(&dir, "lint.yml", LINT_CALLEE, false, false);
+        let (_, found) = load_dir(&dir);
+        let ranking = rank(&rows, None);
+        assert_eq!(ranking.workflows.len(), 2);
+        let caller = ranking
+            .workflows
+            .iter()
+            .find(|item| item.workflow_path == ".github/workflows/caller.yml")
+            .unwrap();
+        let lint = ranking
+            .workflows
+            .iter()
+            .find(|item| item.workflow_path == ".github/workflows/lint.yml")
+            .unwrap();
+        assert_eq!(caller.net, Micros::parse("0.06").unwrap());
+        assert_eq!(lint.net, Micros::parse("1.00").unwrap());
+        let (text, json) = report_for(&found, &rows);
+        let caller_at = text
+            .find("example-org/app .github/workflows/caller.yml")
+            .unwrap();
+        let lint_at = text
+            .find("example-org/app .github/workflows/lint.yml")
+            .unwrap();
+        assert!(lint_at < caller_at, "{text}");
+        let lint_section = &text[lint_at..caller_at];
+        let caller_section = &text[caller_at..];
+        assert!(lint_section.contains("1.00"), "{lint_section}");
+        assert!(caller_section.contains("0.06"), "{caller_section}");
+        assert!(
+            caller_section.contains("lint.yml:5: lint on macOS"),
+            "{text}"
+        );
+        assert!(lint_section.contains("lint.yml:5: lint on macOS"), "{text}");
+        assert!(!caller_section.contains("1.00"), "{caller_section}");
+        assert_eq!(json["workflows"].as_array().unwrap().len(), 2);
+        let caller_json = json["workflows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["path"] == ".github/workflows/caller.yml")
+            .unwrap();
+        assert_eq!(caller_json["net"], "0.060000");
+        assert!(caller_json["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "F1" && item["line"] == 5));
+    }
+
+    /// Indent every line under the job key by four spaces.
+    ///
+    /// Nested lines in `body` already carry their own two-space indent, so
+    /// they land six spaces in, under a job key that is two spaces in.
+    fn indent_job_body(text: &str) -> String {
+        let mut out = String::new();
+        let mut job_started = false;
+        for line in text.lines() {
+            if !job_started {
+                out.push_str(line);
+                out.push('\n');
+                if line.starts_with("  ")
+                    && !line.starts_with("    ")
+                    && line.trim_end().ends_with(':')
+                {
+                    job_started = true;
+                }
+                continue;
+            }
+            if line.is_empty() {
+                out.push('\n');
+                continue;
+            }
+            out.push_str("    ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn missing_local_callee_is_visible_at_the_uses_line() {
+        let cases = [
+            (
+                "miss-yml",
+                "caller.yml",
+                "uses: ./.github/workflows/missing.yml\n",
+                false,
+                5,
+                "call-lint",
+                "./.github/workflows/missing.yml",
+            ),
+            (
+                "miss-yaml",
+                "caller.yaml",
+                "uses: ./.github/workflows/missing.yaml\n",
+                false,
+                5,
+                "call-lint",
+                "./.github/workflows/missing.yaml",
+            ),
+            (
+                "miss-with",
+                "caller.yml",
+                "uses: ./.github/workflows/missing.yml\nwith:\n  extra: \"1\"\n",
+                false,
+                5,
+                "call-lint",
+                "./.github/workflows/missing.yml",
+            ),
+            (
+                "miss-secrets",
+                "caller.yml",
+                "secrets: inherit\nuses: ./.github/workflows/missing.yml\n",
+                false,
+                6,
+                "call-lint",
+                "./.github/workflows/missing.yml",
+            ),
+            (
+                "miss-both",
+                "caller.yml",
+                "with: {}\nsecrets: {}\nuses: ./.github/workflows/gone.yaml\n",
+                false,
+                7,
+                "call-lint",
+                "./.github/workflows/gone.yaml",
+            ),
+            (
+                "miss-crlf",
+                "caller.yml",
+                "uses: ./.github/workflows/missing.yml\nsecrets:\n  token: value\n",
+                true,
+                5,
+                "call-lint",
+                "./.github/workflows/missing.yml",
+            ),
+            (
+                "miss-capitals",
+                "caller.yml",
+                "uses: ./.GitHub/Workflows/Missing.YML\n",
+                false,
+                5,
+                "call-lint",
+                "./.GitHub/Workflows/Missing.YML",
+            ),
+            (
+                "miss-quoted",
+                "caller.yml",
+                "uses: \"./.github/workflows/missing.yml\"\n",
+                false,
+                5,
+                "call-lint",
+                "./.github/workflows/missing.yml",
+            ),
+            (
+                "miss-empty-file-name-not",
+                "caller.yml",
+                "uses: ./.github/workflows/no-such.yml\nwith:\nsecrets: inherit\n",
+                false,
+                5,
+                "call-lint",
+                "./.github/workflows/no-such.yml",
+            ),
+        ];
+        for (name, caller_file, job_body, crlf_file, uses_line, job, spec) in cases {
+            let dir = workflows_dir(name);
+            let caller = format!("name: Caller\non: push\njobs:\n  {job}:\n{job_body}");
+            let caller = indent_job_body(&caller);
+            write_workflow(&dir, caller_file, &caller, crlf_file, false);
+            let (workflows, found) = load_dir(&dir);
+            let call = job_named(&workflows, caller_file, job);
+            assert_eq!(
+                call.uses.as_ref().unwrap().line,
+                uses_line,
+                "{name}\n{caller}"
+            );
+            assert_eq!(call.uses.as_ref().unwrap().spec, spec, "{name}");
+            let missing = attributed(&found, caller_file, FindingKind::CalleeNotFound);
+            assert_eq!(missing.len(), 1, "{name}: {found:?}");
+            assert_eq!(missing[0].line, uses_line, "{name}");
+            assert!(missing[0].path.ends_with(caller_file), "{name}");
+            assert!(
+                missing[0].message.starts_with("callee not found"),
+                "{name}: {}",
+                missing[0].message
+            );
+            assert!(
+                missing[0].message.contains(job),
+                "{name}: {}",
+                missing[0].message
+            );
+            assert!(
+                missing[0].message.contains(spec),
+                "{name}: {}",
+                missing[0].message
+            );
+            assert_eq!(missing[0].kind.code(), "F6");
+            let (text, json) =
+                report_for(&found, &[usage(&caller_key(caller_file), "0.06", "0.006")]);
+            let section = section_after(
+                &text,
+                &format!("example-org/app .github/workflows/{caller_file}"),
+            );
+            let needle = format!(
+                "F6 {}:{}: {}",
+                missing[0].path.display(),
+                uses_line,
+                missing[0].message
+            );
+            assert!(section.contains(&needle), "{name}: {text}");
+            assert!(section.contains(job), "{name}: {text}");
+            assert!(!text.contains("Workflows without usage"), "{name}: {text}");
+            let listed = json["workflows"][0]["findings"].as_array().unwrap();
+            assert_eq!(listed[0]["id"], "F6", "{name}");
+            assert_eq!(listed[0]["line"], uses_line, "{name}");
+            assert!(
+                listed[0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("callee not found"),
+                "{name}"
+            );
+            assert!(
+                json["unattached_findings"].as_array().unwrap().is_empty(),
+                "{name}"
+            );
+        }
+
+        let nested = workflows_dir("miss-nested");
+        write_workflow(
+            &nested,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-mid:\n    uses: ./.github/workflows/mid.yml\n    with:\n      extra: \"1\"\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &nested,
+            "mid.yml",
+            "name: Mid\non: workflow_call\njobs:\n  forward:\n    secrets: inherit\n    uses: ./.github/workflows/missing.yml\n",
+            true,
+            false,
+        );
+        let (workflows, found) = load_dir(&nested);
+        let forward = job_named(&workflows, "mid.yml", "forward");
+        let missing = attributed(&found, "caller.yml", FindingKind::CalleeNotFound);
+        assert_eq!(missing.len(), 1, "{found:?}");
+        assert_eq!(missing[0].line, forward.uses.as_ref().unwrap().line);
+        assert!(
+            missing[0].path.ends_with("mid.yml"),
+            "{}",
+            missing[0].path.display()
+        );
+        assert!(
+            missing[0].message.contains("callee not found"),
+            "{}",
+            missing[0].message
+        );
+        assert!(
+            missing[0].message.contains("forward"),
+            "{}",
+            missing[0].message
+        );
+        let (text, _) = report_for(&found, &[usage(&caller_key("caller.yml"), "0.06", "0.006")]);
+        assert!(
+            section_after(&text, "example-org/app .github/workflows/caller.yml")
+                .contains("callee not found"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("mid.yml:{}:", forward.uses.as_ref().unwrap().line)),
+            "{text}"
+        );
+        assert!(!text.contains("Workflows without usage"), "{text}");
+
+        let empty = workflows_dir("miss-empty-callee");
+        write_workflow(
+            &empty,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: ./.github/workflows/empty.yml\n    secrets: inherit\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &empty,
+            "empty.yml",
+            "name: Empty\non: workflow_call\n",
+            false,
+            false,
+        );
+        let (workflows, found) = load_dir(&empty);
+        assert!(job_named(&workflows, "caller.yml", "call-lint")
+            .uses
+            .is_some());
+        assert!(
+            found
+                .iter()
+                .all(|item| item.kind != FindingKind::CalleeNotFound),
+            "{found:?}"
+        );
+
+        let ignored = workflows_dir("miss-not-local");
+        write_workflow(
+            &ignored,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  blank:\n    uses: \"\"\n    timeout-minutes: 1\n  remote:\n    uses: owner/repo/.github/workflows/x.yml@main\n    timeout-minutes: 1\n  action:\n    uses: actions/checkout@v4\n    timeout-minutes: 1\n  other:\n    uses: ./foo.yml\n    timeout-minutes: 1\n  list:\n    uses:\n      - ./.github/workflows/lint.yml\n    timeout-minutes: 1\n",
+            false,
+            false,
+        );
+        let (_, found) = load_dir(&ignored);
+        assert!(
+            found
+                .iter()
+                .all(|item| item.kind != FindingKind::CalleeNotFound),
+            "{found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .all(|item| item.kind != FindingKind::ReusableCycle),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn reusable_cycle_stops_with_a_finding() {
+        let pairs = [
+            ("cycle-yml", "a.yml", "b.yml", false),
+            ("cycle-yaml", "a.yaml", "b.yaml", false),
+            ("cycle-crlf", "a.yml", "b.yml", true),
+        ];
+        for (name, a_file, b_file, crlf_file) in pairs {
+            let dir = workflows_dir(name);
+            let a = format!(
+                "name: A\non: push\njobs:\n  call-b:\n    uses: ./.github/workflows/{b_file}\n    with:\n      extra: \"1\"\n    secrets: inherit\n"
+            );
+            let b = format!(
+                "name: B\non: workflow_call\njobs:\n  lint:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - run: cargo fmt --check\n  call-a:\n    secrets:\n      token: value\n    uses: ./.github/workflows/{a_file}\n"
+            );
+            write_workflow(&dir, a_file, &a, crlf_file, false);
+            write_workflow(&dir, b_file, &b, crlf_file, false);
+            let (workflows, found) = load_dir(&dir);
+            assert!(found.len() < 12, "{name}: {found:?}");
+            let call_b = job_named(&workflows, a_file, "call-b");
+            let call_a = job_named(&workflows, b_file, "call-a");
+            let cycles = attributed(&found, a_file, FindingKind::ReusableCycle);
+            assert_eq!(cycles.len(), 1, "{name}: {found:?}");
+            assert_eq!(cycles[0].line, call_a.uses.as_ref().unwrap().line, "{name}");
+            assert!(cycles[0].path.ends_with(b_file), "{name}");
+            assert_eq!(cycles[0].kind.code(), "F7");
+            assert!(
+                cycles[0].message.contains("reusable workflow cycle"),
+                "{name}"
+            );
+            assert!(
+                cycles[0].message.contains(a_file),
+                "{name}: {}",
+                cycles[0].message
+            );
+            assert!(
+                cycles[0].message.contains(b_file),
+                "{name}: {}",
+                cycles[0].message
+            );
+            assert!(cycles[0].message.contains(" -> "), "{name}");
+            let f1 = attributed(&found, a_file, FindingKind::LintOnRunner);
+            assert_eq!(f1.len(), 1, "{name}: {found:?}");
+            assert!(f1[0].path.ends_with(b_file), "{name}");
+            assert_eq!(f1[0].message, "lint on macOS");
+            assert_no_timeout_on_call(&found, a_file, call_b.line);
+            assert_no_timeout_on_call(&found, b_file, call_a.line);
+            let (text, json) = report_for(&found, &[usage(&caller_key(a_file), "0.06", "0.006")]);
+            let section = section_after(
+                &text,
+                &format!("example-org/app .github/workflows/{a_file}"),
+            );
+            assert!(
+                section.contains("reusable workflow cycle"),
+                "{name}: {text}"
+            );
+            assert!(section.contains("lint on macOS"), "{name}: {text}");
+            assert!(section.contains(&format!("{b_file}:")), "{name}: {text}");
+            let listed = json["workflows"][0]["findings"].as_array().unwrap();
+            assert!(
+                listed.iter().any(|item| item["id"] == "F7"),
+                "{name}: {listed:?}"
+            );
+            assert!(
+                listed
+                    .iter()
+                    .any(|item| item["id"] == "F1"
+                        && item["file"].as_str().unwrap().ends_with(b_file)),
+                "{name}"
+            );
+        }
+
+        let self_dir = workflows_dir("cycle-self");
+        write_workflow(
+            &self_dir,
+            "loop.yml",
+            "name: Loop\non: push\njobs:\n  again:\n    uses: ./.github/workflows/loop.yml\n    secrets: inherit\n",
+            false,
+            false,
+        );
+        let (workflows, found) = load_dir(&self_dir);
+        assert!(found.len() < 6, "{found:?}");
+        let again = job_named(&workflows, "loop.yml", "again");
+        let cycles = attributed(&found, "loop.yml", FindingKind::ReusableCycle);
+        assert_eq!(cycles.len(), 1, "{found:?}");
+        assert_eq!(cycles[0].line, again.uses.as_ref().unwrap().line);
+        assert!(
+            cycles[0].message.contains("loop.yml -> loop.yml"),
+            "{}",
+            cycles[0].message
+        );
+        let (text, _) = report_for(&found, &[usage(&caller_key("loop.yml"), "0.06", "0.006")]);
+        assert!(
+            section_after(&text, "example-org/app .github/workflows/loop.yml")
+                .contains("reusable workflow cycle"),
+            "{text}"
+        );
+
+        let three = workflows_dir("cycle-three");
+        write_workflow(
+            &three,
+            "a.yml",
+            "name: A\non: push\njobs:\n  call-b:\n    uses: ./.github/workflows/b.yml\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &three,
+            "b.yml",
+            "name: B\non: workflow_call\njobs:\n  call-c:\n    uses: ./.github/workflows/c.yml\n    with:\n      extra: \"1\"\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &three,
+            "c.yml",
+            "name: C\non: workflow_call\njobs:\n  lint:\n    runs-on: macos-latest\n    timeout-minutes: 10\n    steps:\n      - run: cargo fmt --check\n  call-b:\n    uses: ./.github/workflows/b.yml\n    secrets: inherit\n",
+            false,
+            false,
+        );
+        let (_, found) = load_dir(&three);
+        assert!(found.len() < 16, "{found:?}");
+        let cycles = attributed(&found, "a.yml", FindingKind::ReusableCycle);
+        assert_eq!(cycles.len(), 1, "{found:?}");
+        assert!(
+            cycles[0].path.ends_with("c.yml"),
+            "{}",
+            cycles[0].path.display()
+        );
+        assert!(cycles[0].message.contains("b.yml"), "{}", cycles[0].message);
+        assert!(cycles[0].message.contains("c.yml"), "{}", cycles[0].message);
+        let f1 = attributed(&found, "a.yml", FindingKind::LintOnRunner);
+        assert_eq!(f1.len(), 1, "{found:?}");
+        assert!(f1[0].path.ends_with("c.yml"));
+        let (text, _) = report_for(&found, &[usage(&caller_key("a.yml"), "0.06", "0.006")]);
+        assert!(
+            section_after(&text, "example-org/app .github/workflows/a.yml")
+                .contains("reusable workflow cycle"),
+            "{text}"
+        );
+        assert!(text.contains("lint on macOS"), "{text}");
+
+        let flow = workflows_dir("cycle-flow");
+        write_workflow(
+            &flow,
+            "a.yml",
+            "on: push\njobs: {call-b: {uses: ./.github/workflows/b.yml, secrets: inherit}}\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &flow,
+            "b.yml",
+            "on: workflow_call\njobs: {call-a: {with: {extra: \"1\"}, uses: ./.github/workflows/a.yml}}\n",
+            false,
+            false,
+        );
+        let (_, found) = load_dir(&flow);
+        assert!(found.len() < 8, "{found:?}");
+        let cycles = attributed(&found, "a.yml", FindingKind::ReusableCycle);
+        assert_eq!(cycles.len(), 1, "{found:?}");
+        assert!(cycles[0].message.contains("a.yml"), "{}", cycles[0].message);
+        assert!(cycles[0].message.contains("b.yml"), "{}", cycles[0].message);
+    }
+
+    #[test]
+    fn callee_matrix_is_reported_under_caller() {
+        let canonical_matrix_line = 8;
+        let cases = [
+            (
+                "matrix-plain",
+                "caller.yml",
+                "wide.yml",
+                "uses: ./.github/workflows/wide.yml\n",
+                false,
+            ),
+            (
+                "matrix-yaml",
+                "caller.yaml",
+                "wide.yaml",
+                "uses: ./.github/workflows/wide.yaml\n",
+                false,
+            ),
+            (
+                "matrix-with-secrets",
+                "caller.yml",
+                "wide.yml",
+                "secrets: inherit\nwith:\n  extra: \"1\"\nuses: ./.github/workflows/wide.yml\n",
+                false,
+            ),
+            (
+                "matrix-crlf",
+                "caller.yml",
+                "wide.yml",
+                "uses: ./.github/workflows/wide.yml\nwith: {}\nsecrets: {}\n",
+                true,
+            ),
+            (
+                "matrix-capitals",
+                "caller.yml",
+                "wide.yml",
+                "uses: ./.GitHub/Workflows/wide.YML\n",
+                false,
+            ),
+            (
+                "matrix-quoted",
+                "caller.yml",
+                "wide.yml",
+                "uses: \"./.github/workflows/wide.yml\"\n",
+                false,
+            ),
+        ];
+        for (name, caller_file, callee_file, job_body, crlf_file) in cases {
+            let dir = workflows_dir(name);
+            let caller = format!("name: Caller\non: push\njobs:\n  call-wide:\n{job_body}");
+            write_workflow(
+                &dir,
+                caller_file,
+                &indent_job_body(&caller),
+                crlf_file,
+                false,
+            );
+            write_workflow(&dir, callee_file, MATRIX_CALLEE, crlf_file, false);
+            let (workflows, found) = load_dir(&dir);
+            let matrix_line = job_named(&workflows, callee_file, "build")
+                .matrix
+                .as_ref()
+                .unwrap()
+                .line;
+            if !crlf_file && job_body.starts_with("uses:") {
+                assert_eq!(matrix_line, canonical_matrix_line, "{name}");
+            }
+            let f4 = attributed(&found, caller_file, FindingKind::MatrixJobs);
+            assert_eq!(f4.len(), 1, "{name}: {found:?}");
+            assert_eq!(f4[0].line, matrix_line, "{name}");
+            assert!(f4[0].path.ends_with(callee_file), "{name}");
+            assert_eq!(f4[0].message, f4_message(6), "{name}");
+            assert_eq!(f4[0].kind.code(), "F4");
+            let (text, json) =
+                report_for(&found, &[usage(&caller_key(caller_file), "0.06", "0.006")]);
+            let section = section_after(
+                &text,
+                &format!("example-org/app .github/workflows/{caller_file}"),
+            );
+            let needle = format!(
+                "F4 {}:{}: {}",
+                f4[0].path.display(),
+                matrix_line,
+                f4_message(6)
+            );
+            assert!(section.contains(&needle), "{name}: {text}");
+            assert!(!text.contains("Workflows without usage"), "{name}: {text}");
+            assert_eq!(json["workflows"][0]["net"], "0.060000", "{name}");
+            let listed = json["workflows"][0]["findings"].as_array().unwrap();
+            assert!(
+                listed.iter().any(|item| {
+                    item["id"] == "F4"
+                        && item["line"] == matrix_line
+                        && item["message"] == f4_message(6)
+                        && item["file"].as_str().unwrap().ends_with(callee_file)
+                }),
+                "{name}: {listed:?}"
+            );
+        }
+
+        let narrow = workflows_dir("matrix-narrow");
+        write_workflow(
+            &narrow,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-wide:\n    uses: ./.github/workflows/wide.yml\n    secrets: inherit\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &narrow,
+            "wide.yml",
+            "name: Wide\non: workflow_call\njobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16]\n",
+            false,
+            false,
+        );
+        let (workflows, found) = load_dir(&narrow);
+        assert_eq!(
+            job_named(&workflows, "wide.yml", "build")
+                .matrix
+                .as_ref()
+                .unwrap()
+                .jobs,
+            4
+        );
+        assert!(
+            attributed(&found, "caller.yml", FindingKind::MatrixJobs).is_empty(),
+            "{found:?}"
+        );
+        assert!(
+            attributed(&found, "caller.yml", FindingKind::CalleeNotFound).is_empty(),
+            "{found:?}"
+        );
+
+        let flow = workflows_dir("matrix-flow");
+        write_workflow(
+            &flow,
+            "caller.yml",
+            "on: push\njobs: {call-wide: {uses: ./.github/workflows/wide.yml, with: {extra: \"1\"}, secrets: inherit}}\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &flow,
+            "wide.yml",
+            "on: workflow_call\njobs: {build: {runs-on: ubuntu-latest, timeout-minutes: 5, strategy: {matrix: {os: [ubuntu-latest, windows-latest], node: [14, 16, 18]}}}}\n",
+            false,
+            false,
+        );
+        let (workflows, found) = load_dir(&flow);
+        let matrix_line = job_named(&workflows, "wide.yml", "build")
+            .matrix
+            .as_ref()
+            .unwrap()
+            .line;
+        let f4 = attributed(&found, "caller.yml", FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, matrix_line);
+        assert_eq!(f4[0].message, f4_message(6));
+        let (text, _) = report_for(&found, &[usage(&caller_key("caller.yml"), "0.06", "0.006")]);
+        assert!(text.contains(&format!("wide.yml:{matrix_line}:")), "{text}");
+        assert!(text.contains(&f4_message(6)), "{text}");
+        assert!(!text.contains("Workflows without usage"), "{text}");
+
+        let at_least = workflows_dir("matrix-at-least");
+        write_workflow(
+            &at_least,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-wide:\n    uses: ./.github/workflows/wide.yml\n",
+            true,
+            false,
+        );
+        write_workflow(
+            &at_least,
+            "wide.yml",
+            "name: Wide\non: workflow_call\njobs:\n  build:\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: ${{ fromJSON(needs.setup.outputs.node) }}\n",
+            true,
+            false,
+        );
+        let (workflows, found) = load_dir(&at_least);
+        let matrix_line = job_named(&workflows, "wide.yml", "build")
+            .matrix
+            .as_ref()
+            .unwrap()
+            .line;
+        let f4 = attributed(&found, "caller.yml", FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, matrix_line);
+        assert_eq!(f4[0].message, f4_at_least(2));
+        let (text, json) = report_for(&found, &[usage(&caller_key("caller.yml"), "0.06", "0.006")]);
+        assert!(
+            section_after(&text, "example-org/app .github/workflows/caller.yml")
+                .contains(&f4_at_least(2)),
+            "{text}"
+        );
+        assert_eq!(
+            json["workflows"][0]["findings"][0]["message"],
+            f4_at_least(2)
+        );
+
+        let between = workflows_dir("matrix-between");
+        write_workflow(
+            &between,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-wide:\n    uses: ./.github/workflows/wide.yml\n    with:\n      extra: \"1\"\n    secrets: inherit\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &between,
+            "wide.yml",
+            "name: Wide\non: workflow_call\njobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n        exclude: ${{ inputs.rules }}\n",
+            false,
+            false,
+        );
+        let (workflows, found) = load_dir(&between);
+        let matrix_line = job_named(&workflows, "wide.yml", "build")
+            .matrix
+            .as_ref()
+            .unwrap()
+            .line;
+        let f4 = attributed(&found, "caller.yml", FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, matrix_line);
+        assert_eq!(f4[0].message, f4_between(0, 6));
+        let (text, _) = report_for(&found, &[usage(&caller_key("caller.yml"), "0.06", "0.006")]);
+        assert!(text.contains(&f4_between(0, 6)), "{text}");
+        assert!(!text.contains("Workflows without usage"), "{text}");
+
+        let nested = workflows_dir("matrix-nested");
+        write_workflow(
+            &nested,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-mid:\n    uses: ./.github/workflows/mid.yml\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &nested,
+            "mid.yml",
+            "name: Mid\non: workflow_call\njobs:\n  forward:\n    uses: ./.github/workflows/wide.yml\n    secrets: inherit\n",
+            false,
+            false,
+        );
+        write_workflow(&nested, "wide.yml", MATRIX_CALLEE, false, false);
+        let (workflows, found) = load_dir(&nested);
+        let matrix_line = job_named(&workflows, "wide.yml", "build")
+            .matrix
+            .as_ref()
+            .unwrap()
+            .line;
+        let f4 = attributed(&found, "caller.yml", FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, matrix_line);
+        assert!(f4[0].path.ends_with("wide.yml"));
+        assert_eq!(f4[0].message, f4_message(6));
+        let (text, _) = report_for(&found, &[usage(&caller_key("caller.yml"), "0.06", "0.006")]);
+        assert!(
+            section_after(&text, "example-org/app .github/workflows/caller.yml")
+                .contains("wide.yml:8:"),
+            "{text}"
+        );
+        assert!(!text.contains("Workflows without usage"), "{text}");
+
+        let caller_matrix = workflows_dir("matrix-on-caller");
+        write_workflow(
+            &caller_matrix,
+            "caller.yml",
+            "name: Caller\non: push\njobs:\n  call-wide:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n        node: [14, 16, 18]\n    uses: ./.github/workflows/wide.yml\n    secrets: inherit\n",
+            false,
+            false,
+        );
+        write_workflow(
+            &caller_matrix,
+            "wide.yml",
+            "name: Wide\non: workflow_call\njobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - run: echo build\n",
+            false,
+            false,
+        );
+        let (workflows, found) = load_dir(&caller_matrix);
+        let call = job_named(&workflows, "caller.yml", "call-wide");
+        let f4 = attributed(&found, "caller.yml", FindingKind::MatrixJobs);
+        assert_eq!(f4.len(), 1, "{found:?}");
+        assert_eq!(f4[0].line, call.matrix.as_ref().unwrap().line);
+        assert!(f4[0].path.ends_with("caller.yml"));
+        assert_eq!(f4[0].message, f4_message(6));
+    }
+
+    #[test]
+    fn caller_costs_stay_on_the_caller_csv_path() {
+        let dir = workflows_dir("costs-stay");
+        write_workflow(
+            &dir,
+            "caller.yml",
+            "name: Caller\non: [push, pull_request]\njobs:\n  call-lint:\n    uses: ./.github/workflows/lint.yml\n    with:\n      extra: \"1\"\n    secrets: inherit\n",
+            true,
+            false,
+        );
+        write_workflow(&dir, "lint.yml", LINT_CALLEE, true, false);
+        let csv = dir.join("usage.csv");
+        fs::write(
+            &csv,
+            "\
+workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,product,date,repository,organization,username,applied_cost_per_quantity\r\n\
+.github/workflows/caller.yml,0.06,0.06,0,10,Minutes,actions_linux,Actions,2026-09-01,example-org/app,example-org,ci,0.006\r\n\
+.github/workflows/lint.yml,1.00,1.00,0,10,minutes,actions_macos,actions,2026-09-30,example-org/app,example-org,ci,0.100\r\n",
+        )
+        .unwrap();
+        let rows = read_usage(&csv).unwrap();
+        let (_, found) = load_dir(&dir);
+        let ranking = rank(&rows, None);
+        assert_eq!(ranking.workflows.len(), 2);
+        assert_eq!(ranking.bill.period_from.as_deref(), Some("2026-09-01"));
+        assert_eq!(ranking.bill.period_to.as_deref(), Some("2026-09-30"));
+        let caller = ranking
+            .workflows
+            .iter()
+            .find(|item| item.workflow_path == ".github/workflows/caller.yml")
+            .unwrap();
+        let lint = ranking
+            .workflows
+            .iter()
+            .find(|item| item.workflow_path == ".github/workflows/lint.yml")
+            .unwrap();
+        assert_eq!(caller.net, Micros::parse("0.06").unwrap());
+        assert_eq!(caller.gross, Micros::parse("0.06").unwrap());
+        assert_eq!(lint.net, Micros::parse("1.00").unwrap());
+        assert_ne!(caller.net, lint.net);
+        let (text, json) = report_for(&found, &rows);
+        let caller_at = text
+            .find("example-org/app .github/workflows/caller.yml")
+            .unwrap();
+        let lint_at = text
+            .find("example-org/app .github/workflows/lint.yml")
+            .unwrap();
+        assert!(lint_at < caller_at, "{text}");
+        assert!(text[caller_at..].contains("0.06"), "{text}");
+        assert!(
+            text[caller_at..].contains("lint.yml:5: lint on macOS"),
+            "{text}"
+        );
+        assert!(!text[caller_at..].contains("1.00"), "{text}");
+        let caller_json = json["workflows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["path"] == ".github/workflows/caller.yml")
+            .unwrap();
+        assert_eq!(caller_json["net"], "0.060000");
+        assert_eq!(caller_json["gross"], "0.060000");
     }
 }
