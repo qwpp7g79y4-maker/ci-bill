@@ -583,14 +583,14 @@ jobs:
             period_to: None,
             repositories: Vec::new(),
         };
-        let text = crate::report::render(&[], &bill, Some(&found));
+        let text = crate::report::render(&[], &bill, Some(&found), None);
         assert!(
             text.contains(
                 "F4 fixture.yml:6: matrix runs 6 jobs; each job is billed in whole minutes"
             ),
             "{text}"
         );
-        let json = crate::report::render_json(&[], &bill, Some(&found), None);
+        let json = crate::report::render_json(&[], &bill, Some(&found), None, None);
         let value: serde_json::Value = serde_json::from_str(&json).expect("json");
         assert_eq!(value["unattached_findings"][0]["id"], "F4");
         assert_eq!(value["unattached_findings"][0]["line"], 6);

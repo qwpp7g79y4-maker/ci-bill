@@ -9,16 +9,24 @@ use crate::rank::{Bill, WorkflowTotal};
 /// Text report. Money is rounded to cents here. Totals are sums of raw micros.
 ///
 /// `bill.total_net` and `bill.total_minutes` are the Actions bill. `workflows`
-/// may already be limited by `--top`; each share is still that workflow's part
-/// of the Actions net. Other products are one line, outside that total.
+/// is the full ranked list. `top` limits the table to that many rows; each
+/// share is still that workflow's part of the Actions net. Workflows past the
+/// limit are one line, `N more workflows (X USD)`, and their findings are
+/// listed under `Findings outside the top N`. Other products are one line,
+/// outside the Actions total.
 /// Each workflow row shows net, gross, and discount, so a storage row whose
 /// net is zero still shows a positive gross.
 /// Findings attach to a workflow when the YAML path ends in
 /// `.github/workflows/<file>` and that suffix matches `workflow_path`.
 /// Invoice findings attach by repository and workflow path instead.
-/// Anything left over is listed under "Workflows without usage".
-pub fn render(workflows: &[WorkflowTotal], bill: &Bill, findings: Option<&[Finding]>) -> String {
-    render_report(workflows, bill, findings, None)
+/// A finding with no usage row is listed under "Workflows without usage".
+pub fn render(
+    workflows: &[WorkflowTotal],
+    bill: &Bill,
+    findings: Option<&[Finding]>,
+    top: Option<usize>,
+) -> String {
+    render_report(workflows, bill, findings, None, top)
 }
 
 /// Text report plus saved Actions runs and jobs.
@@ -30,8 +38,9 @@ pub fn render_with_runs(
     bill: &Bill,
     findings: Option<&[Finding]>,
     api: &ApiData,
+    top: Option<usize>,
 ) -> String {
-    render_report(workflows, bill, findings, Some(api))
+    render_report(workflows, bill, findings, Some(api), top)
 }
 
 fn render_report(
@@ -39,8 +48,14 @@ fn render_report(
     bill: &Bill,
     findings: Option<&[Finding]>,
     api: Option<&ApiData>,
+    top: Option<usize>,
 ) -> String {
+    let limit = shown_limit(workflows.len(), top);
     let attached = attach(workflows, findings);
+    let shown = &workflows[..limit];
+    let omitted = &workflows[limit..];
+    let shown_findings = &attached.by_workflow[..limit];
+    let omitted_findings = &attached.by_workflow[limit..];
     let mut out = String::new();
     let _ = writeln!(out, "USD (from net_amount)");
     let _ = writeln!(out, "{}", period_line(bill));
@@ -59,7 +74,7 @@ fn render_report(
     );
     let _ = writeln!(out);
 
-    let blocks: Vec<Vec<Row>> = workflows
+    let blocks: Vec<Vec<Row>> = shown
         .iter()
         .map(|workflow| workflow_rows(workflow, bill.total_net))
         .collect();
@@ -76,7 +91,7 @@ fn render_report(
         },
         widths,
     );
-    for (rows, found) in blocks.iter().zip(&attached.by_workflow) {
+    for (rows, found) in blocks.iter().zip(shown_findings) {
         for row in rows {
             emit_row(&mut out, row, widths);
         }
@@ -85,6 +100,9 @@ fn render_report(
         }
     }
 
+    if let Some(limit_n) = top.filter(|_| !omitted.is_empty()) {
+        append_outside(&mut out, omitted, omitted_findings, limit_n);
+    }
     if !attached.unattached.is_empty() {
         let _ = writeln!(out);
         let _ = writeln!(out, "Workflows without usage");
@@ -99,13 +117,19 @@ fn render_report(
 }
 
 /// One JSON object. Money is a 6-decimal string. Minutes stay a JSON number when whole.
+///
+/// `workflows` lists only the rows `--top` keeps. When that limit omits
+/// workflows, `outside_top` holds their count, their net, and the same
+/// workflow objects, findings included. `unattached_findings` is only
+/// findings with no usage row.
 pub fn render_json(
     workflows: &[WorkflowTotal],
     bill: &Bill,
     findings: Option<&[Finding]>,
     budget: Option<Micros>,
+    top: Option<usize>,
 ) -> String {
-    render_json_report(workflows, bill, findings, budget, None)
+    render_json_report(workflows, bill, findings, budget, None, top)
 }
 
 /// JSON report plus `workflow_runs` and `in_progress`.
@@ -118,8 +142,9 @@ pub fn render_json_with_runs(
     findings: Option<&[Finding]>,
     budget: Option<Micros>,
     api: &ApiData,
+    top: Option<usize>,
 ) -> String {
-    render_json_report(workflows, bill, findings, budget, Some(api))
+    render_json_report(workflows, bill, findings, budget, Some(api), top)
 }
 
 fn render_json_report(
@@ -128,11 +153,17 @@ fn render_json_report(
     findings: Option<&[Finding]>,
     budget: Option<Micros>,
     api: Option<&ApiData>,
+    top: Option<usize>,
 ) -> String {
+    let limit = shown_limit(workflows.len(), top);
     let attached = attach(workflows, findings);
-    let workflow_json: Vec<serde_json::Value> = workflows
+    let shown = &workflows[..limit];
+    let omitted = &workflows[limit..];
+    let shown_findings = &attached.by_workflow[..limit];
+    let omitted_findings = &attached.by_workflow[limit..];
+    let shown_json: Vec<serde_json::Value> = shown
         .iter()
-        .zip(&attached.by_workflow)
+        .zip(shown_findings)
         .map(|(workflow, found)| workflow_json(workflow, bill.total_net, found))
         .collect();
     let unattached: Vec<serde_json::Value> = attached
@@ -149,13 +180,25 @@ fn render_json_report(
         "total_net": bill.total_net.to_decimal_string(),
         "total_minutes": minutes_json(bill.total_minutes),
         "other_products_net": bill.other_products_net.to_decimal_string(),
-        "workflows": workflow_json,
+        "workflows": shown_json,
         "unattached_findings": unattached,
     });
     if let Some(api) = api {
         let (runs, in_progress) = api_json(api);
         value["workflow_runs"] = runs;
         value["in_progress"] = in_progress;
+    }
+    if !omitted.is_empty() {
+        let outside: Vec<serde_json::Value> = omitted
+            .iter()
+            .zip(omitted_findings)
+            .map(|(workflow, found)| workflow_json(workflow, bill.total_net, found))
+            .collect();
+        value["outside_top"] = serde_json::json!({
+            "count": omitted.len(),
+            "net": omitted_net(omitted).to_decimal_string(),
+            "workflows": outside,
+        });
     }
     if let Some(amount) = budget {
         value["budget"] = serde_json::Value::from(amount.to_decimal_string());
@@ -300,6 +343,59 @@ fn finding_text(finding: &Finding) -> String {
         finding.line,
         finding.message
     )
+}
+
+/// How many ranked workflows the table shows. `None` shows every workflow.
+fn shown_limit(len: usize, top: Option<usize>) -> usize {
+    match top {
+        Some(limit) => limit.min(len),
+        None => len,
+    }
+}
+
+fn omitted_net(workflows: &[WorkflowTotal]) -> Micros {
+    workflows.iter().map(|workflow| workflow.net).sum()
+}
+
+fn more_workflows_line(count: usize, net: Micros) -> String {
+    let noun = if count == 1 { "workflow" } else { "workflows" };
+    format!("{count} more {noun} ({} USD)", net.format_cents())
+}
+
+/// Summary of workflows `--top` left out, then their findings.
+///
+/// The money is the sum of those workflows' nets, rounded to cents only here.
+/// A workflow with no findings still counts in the summary. The findings block
+/// is omitted when none of them have a finding.
+fn append_outside(
+    out: &mut String,
+    omitted: &[WorkflowTotal],
+    findings: &[Vec<&Finding>],
+    top: usize,
+) {
+    if omitted.is_empty() {
+        return;
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{}",
+        more_workflows_line(omitted.len(), omitted_net(omitted))
+    );
+    if findings.iter().all(|group| group.is_empty()) {
+        return;
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Findings outside the top {top}");
+    for (workflow, group) in omitted.iter().zip(findings) {
+        if group.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "{}", workflow_label(workflow));
+        for finding in group {
+            let _ = writeln!(out, "  {}", finding_text(finding));
+        }
+    }
 }
 
 struct Row {
@@ -666,7 +762,7 @@ mod tests {
             FindingKind::MissingTimeout,
             "default timeout is 360 minutes",
         )];
-        let text = render(&workflows, &bill("4", "10"), Some(&findings));
+        let text = render(&workflows, &bill("4", "10"), Some(&findings), None);
         assert!(text.starts_with("USD (from net_amount)\n"), "{text}");
         assert!(text.contains("Total net: 4.00\n"), "{text}");
         assert!(text.contains("Total minutes: 10\n"), "{text}");
@@ -704,7 +800,7 @@ mod tests {
                 "default timeout is 360 minutes",
             ),
         ];
-        let text = render(&workflows, &bill("4", "14"), Some(&findings));
+        let text = render(&workflows, &bill("4", "14"), Some(&findings), None);
         let lint = text.find(".github/workflows/lint.yml").expect("lint row");
         let lint_finding = text
             .find("  F1 samples/.github/workflows/lint.yml:8: lint on macOS")
@@ -740,7 +836,7 @@ mod tests {
         };
         let mut totals = bill("0", "0");
         totals.repositories = vec!["example-org/app".to_string()];
-        let text = render(&[storage], &totals, None);
+        let text = render(&[storage], &totals, None, None);
         assert!(text.contains("Gross"), "{text}");
         assert!(text.contains("Discount"), "{text}");
         let storage_line = text
@@ -806,7 +902,7 @@ mod tests {
             "example-org/alpha".to_string(),
             "example-org/zeta".to_string(),
         ];
-        let text = render(&workflows, &totals, Some(&findings));
+        let text = render(&workflows, &totals, Some(&findings), None);
         let alpha = text
             .find("example-org/alpha .github/workflows/ci.yml")
             .expect("alpha");
@@ -829,7 +925,7 @@ mod tests {
             "3712",
             "actions_macos",
         )];
-        let text = render(&workflows, &bill("284.208", "12208"), None);
+        let text = render(&workflows, &bill("284.208", "12208"), None, None);
         assert!(text.contains("Total net: 284.21\n"), "{text}");
         assert!(text.contains("80.98%"), "{text}");
         assert!(text.contains("230.14"), "{text}");
@@ -843,7 +939,7 @@ mod tests {
 
     #[test]
     fn empty_scan_has_no_finding_section() {
-        let text = render(&[], &bill("0", "0"), Some(&[]));
+        let text = render(&[], &bill("0", "0"), Some(&[]), None);
         assert!(text.contains("Total net: 0.00\n"), "{text}");
         assert!(!text.contains("Findings"), "{text}");
         assert!(!text.contains("Workflows without usage"), "{text}");
@@ -870,7 +966,13 @@ mod tests {
                 "default timeout is 360 minutes",
             ),
         ];
-        let text = render_json(&workflows, &bill("2.112", "10"), Some(&findings), None);
+        let text = render_json(
+            &workflows,
+            &bill("2.112", "10"),
+            Some(&findings),
+            None,
+            None,
+        );
         assert!(!text.contains("USD (from net_amount)"), "{text}");
         assert!(!text.contains("0000000001"), "{text}");
         assert!(!text.contains("9999999"), "{text}");
@@ -939,7 +1041,7 @@ mod tests {
         let workflows = vec![workflow("a.yml", "10", "1", "actions_linux")];
         let totals = bill("10", "1");
 
-        let under = render_json(&workflows, &totals, None, Some(usd("10.125")));
+        let under = render_json(&workflows, &totals, None, Some(usd("10.125")), None);
         let under_value: serde_json::Value = serde_json::from_str(under.trim_end()).unwrap();
         assert_eq!(under_value["budget"], "10.125000");
         assert_eq!(under_value["budget_exceeded"], false);
@@ -948,20 +1050,20 @@ mod tests {
         assert_eq!(under_value["currency"], "USD");
         assert_eq!(under_value["money_unit"], "USD");
 
-        let equal = render_json(&workflows, &totals, None, Some(usd("10")));
+        let equal = render_json(&workflows, &totals, None, Some(usd("10")), None);
         let equal_value: serde_json::Value = serde_json::from_str(equal.trim_end()).unwrap();
         assert_eq!(equal_value["budget_exceeded"], false);
         assert_eq!(equal_value["budget"], "10.000000");
         assert_eq!(equal_value["total_net"], "10.000000");
 
-        let over = render_json(&workflows, &totals, None, Some(usd("9.5")));
+        let over = render_json(&workflows, &totals, None, Some(usd("9.5")), None);
         let over_value: serde_json::Value = serde_json::from_str(over.trim_end()).unwrap();
         assert_eq!(over_value["budget_exceeded"], true);
         assert_eq!(over_value["budget"], "9.500000");
         assert!(over_value["budget_exceeded"].is_boolean());
         assert_eq!(over_value["workflows"][0]["net"], "10.000000");
 
-        let absent = render_json(&workflows, &totals, None, None);
+        let absent = render_json(&workflows, &totals, None, None, None);
         let absent_value: serde_json::Value = serde_json::from_str(absent.trim_end()).unwrap();
         assert!(absent_value.get("budget").is_none(), "{absent_value}");
         assert!(
@@ -1060,7 +1162,7 @@ mod tests {
             "lint on macOS",
         )];
         let api = sample_api();
-        let text = render_with_runs(&workflows, &bill("3", "10"), Some(&findings), &api);
+        let text = render_with_runs(&workflows, &bill("3", "10"), Some(&findings), &api, None);
         assert!(text.contains("USD (from net_amount)\n"), "{text}");
         assert!(text.contains("Total net: 3.00\n"), "{text}");
         let finding_at = text.find("lint on macOS").unwrap();
@@ -1113,7 +1215,7 @@ mod tests {
     #[test]
     fn json_puts_in_progress_jobs_outside_the_counted_list() {
         let api = sample_api();
-        let text = render_json_with_runs(&[], &bill("0", "0"), None, Some(usd("1.5")), &api);
+        let text = render_json_with_runs(&[], &bill("0", "0"), None, Some(usd("1.5")), &api, None);
         let value: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
         assert_eq!(value["schema_version"], 2);
         assert_eq!(value["money_unit"], "USD");
@@ -1173,7 +1275,7 @@ mod tests {
             runs: Vec::new(),
             jobs: Vec::new(),
         };
-        let text = render_with_runs(&[], &bill("0", "0"), None, &api);
+        let text = render_with_runs(&[], &bill("0", "0"), None, &api, None);
         assert!(text.contains("\nRuns\n(none)\n"), "{text}");
         assert!(text.contains("\nJobs\n(none)\n"), "{text}");
         assert!(text.contains("\nIn progress\n(none)\n"), "{text}");
@@ -1181,16 +1283,407 @@ mod tests {
 
     #[test]
     fn report_without_runs_omits_actions_sections() {
-        let text = render(&[], &bill("0", "0"), None);
+        let text = render(&[], &bill("0", "0"), None, None);
         assert!(!text.contains("\nRuns\n"), "{text}");
         assert!(!text.contains("\nJobs\n"), "{text}");
         assert!(!text.contains("In progress"), "{text}");
         assert!(text.contains("Period: (none)\n"), "{text}");
         assert!(text.contains("Repositories: (none)\n"), "{text}");
 
-        let json = render_json(&[], &bill("0", "0"), None, None);
+        let json = render_json(&[], &bill("0", "0"), None, None, None);
         let value: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
         assert!(value.get("workflow_runs").is_none(), "{value}");
         assert!(value.get("in_progress").is_none(), "{value}");
+        assert!(value.get("outside_top").is_none(), "{value}");
+    }
+
+    fn named(repository: &str, path: &str, net: &str) -> WorkflowTotal {
+        let mut workflow = workflow(path, net, "1", "actions_linux");
+        workflow.repository = repository.to_string();
+        workflow.gross = workflow.net;
+        workflow
+    }
+
+    fn outside_heading(text: &str) -> usize {
+        text.find("Findings outside the top")
+            .unwrap_or_else(|| panic!("missing outside heading in {text}"))
+    }
+
+    #[test]
+    fn top_one_keeps_an_omitted_finding_off_workflows_without_usage() {
+        let workflows = vec![
+            named("example-org/app", ".github/workflows/lint.yml", "10"),
+            named("example-org/app", ".github/workflows/docs.yml", "2.112"),
+            named("example-org/app", "(no workflow)", "0"),
+        ];
+        let findings = vec![
+            finding(
+                "samples/.github/workflows/lint.yml",
+                8,
+                FindingKind::LintOnRunner,
+                "lint on macOS",
+            ),
+            finding(
+                "samples/.github/workflows/docs.yml",
+                4,
+                FindingKind::MissingTimeout,
+                "default timeout is 360 minutes",
+            ),
+            finding(
+                "samples/.github/workflows/nightly.yml",
+                3,
+                FindingKind::MissingTimeout,
+                "default timeout is 360 minutes",
+            ),
+        ];
+        let totals = bill("12.112", "3");
+        let text = render(&workflows, &totals, Some(&findings), Some(1));
+        let outside = outside_heading(&text);
+        let docs = text
+            .find("F2 samples/.github/workflows/docs.yml:4: default timeout is 360 minutes")
+            .expect("docs finding");
+        let lint = text
+            .find("  F1 samples/.github/workflows/lint.yml:8: lint on macOS")
+            .expect("lint finding");
+        let without = text
+            .find("Workflows without usage")
+            .expect("nightly has no usage row");
+        let nightly = text
+            .find("F2 samples/.github/workflows/nightly.yml:3: default timeout is 360 minutes")
+            .expect("nightly");
+        assert!(
+            lint < outside && outside < docs && docs < without && without < nightly,
+            "{text}"
+        );
+        assert!(text.contains("2 more workflows (2.11 USD)\n"), "{text}");
+        assert!(text.contains("Findings outside the top 1\n"), "{text}");
+        assert!(
+            text.contains(
+                "example-org/app .github/workflows/docs.yml\n  F2 samples/.github/workflows/docs.yml:4: default timeout is 360 minutes\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(text.matches("docs.yml:4").count(), 1, "{text}");
+        let without_block = &text[without..];
+        assert!(!without_block.contains("docs.yml"), "{text}");
+        assert!(text.contains("10.00"), "{text}");
+        assert!(text.contains("Total net: 12.11\n"), "{text}");
+
+        let full = render(&workflows, &totals, Some(&findings), None);
+        assert!(!full.contains("more workflow"), "{full}");
+        assert!(!full.contains("Findings outside"), "{full}");
+        assert!(full.contains("Workflows without usage"), "{full}");
+        assert!(full.find("docs.yml:4").unwrap() < full.find("Workflows without usage").unwrap());
+    }
+
+    #[test]
+    fn top_zero_puts_every_usage_finding_outside_the_table() {
+        let workflows = vec![
+            named("example-org/app", ".github/workflows/lint.yml", "10"),
+            named("example-org/app", ".github/workflows/docs.yml", "2.112"),
+        ];
+        let findings = vec![
+            finding(
+                "app/.github/workflows/lint.yml",
+                8,
+                FindingKind::LintOnRunner,
+                "lint on macOS",
+            ),
+            finding(
+                "app/.github/workflows/docs.yml",
+                4,
+                FindingKind::MissingTimeout,
+                "default timeout is 360 minutes",
+            ),
+            finding(
+                "app/.github/workflows/nightly.yml",
+                2,
+                FindingKind::MissingTimeout,
+                "default timeout is 360 minutes",
+            ),
+        ];
+        let totals = bill("12.112", "2");
+        let text = render(&workflows, &totals, Some(&findings), Some(0));
+        assert!(text.contains("2 more workflows (12.11 USD)\n"), "{text}");
+        assert!(text.contains("Findings outside the top 0\n"), "{text}");
+        let outside = outside_heading(&text);
+        let lint = text.find("lint on macOS").unwrap();
+        let docs = text.find("docs.yml:4").unwrap();
+        let without = text.find("Workflows without usage").unwrap();
+        assert!(outside < lint && lint < docs && docs < without, "{text}");
+        assert!(!text.contains("10.00"), "{text}");
+        let table = &text[..outside];
+        assert!(!table.contains("lint.yml"), "{text}");
+        assert!(!table.contains("docs.yml"), "{text}");
+        let without_block = &text[without..];
+        assert!(without_block.contains("nightly.yml:2"), "{without_block}");
+        assert!(!without_block.contains("docs.yml"), "{text}");
+        assert!(!without_block.contains("lint.yml"), "{text}");
+    }
+
+    #[test]
+    fn top_at_or_above_the_workflow_count_matches_the_full_report() {
+        let workflows = vec![
+            named("example-org/app", ".github/workflows/lint.yml", "10"),
+            named("example-org/app", ".github/workflows/docs.yml", "2.112"),
+            named("", "(no workflow)", "0.004"),
+        ];
+        let findings = vec![finding(
+            "repo/.github/workflows/docs.yml",
+            4,
+            FindingKind::MissingTimeout,
+            "default timeout is 360 minutes",
+        )];
+        let totals = bill("12.116", "3");
+        let full = render(&workflows, &totals, Some(&findings), None);
+        let full_json = render_json(&workflows, &totals, Some(&findings), None, None);
+        for limit in [3_usize, 4, 100] {
+            let text = render(&workflows, &totals, Some(&findings), Some(limit));
+            assert_eq!(text, full, "top {limit}");
+            let json = render_json(&workflows, &totals, Some(&findings), None, Some(limit));
+            assert_eq!(json, full_json, "top {limit}");
+        }
+        assert!(!full.contains("Workflows without usage"), "{full}");
+        assert!(!full.contains("more workflow"), "{full}");
+        assert!(!full.contains("Findings outside"), "{full}");
+        assert!(full.contains("docs.yml:4"), "{full}");
+        let value: serde_json::Value = serde_json::from_str(full_json.trim_end()).unwrap();
+        assert!(value.get("outside_top").is_none(), "{value}");
+        assert_eq!(value["workflows"].as_array().unwrap().len(), 3);
+        assert_eq!(value["workflows"][1]["findings"][0]["line"], 4);
+    }
+
+    #[test]
+    fn one_omitted_workflow_uses_a_singular_summary() {
+        let workflows = vec![
+            named("example-org/app", ".github/workflows/lint.yml", "10"),
+            named("example-org/app", ".github/workflows/docs.yml", "2.112"),
+        ];
+        let findings = vec![finding(
+            "app/.github/workflows/docs.yml",
+            4,
+            FindingKind::MissingTimeout,
+            "default timeout is 360 minutes",
+        )];
+        let text = render(&workflows, &bill("12.112", "2"), Some(&findings), Some(1));
+        assert!(text.contains("1 more workflow (2.11 USD)\n"), "{text}");
+        assert!(!text.contains("1 more workflows"), "{text}");
+        assert!(text.contains("Findings outside the top 1\n"), "{text}");
+        assert!(!text.contains("Workflows without usage"), "{text}");
+    }
+
+    #[test]
+    fn omitted_workflows_without_findings_skip_the_findings_block() {
+        let workflows = vec![
+            named("example-org/app", ".github/workflows/lint.yml", "3"),
+            named("example-org/app", ".github/workflows/ci.yml", "1"),
+        ];
+        let text = render(&workflows, &bill("4", "2"), None, Some(1));
+        assert!(text.contains("1 more workflow (1.00 USD)\n"), "{text}");
+        assert!(!text.contains("Findings outside"), "{text}");
+        assert!(!text.contains("Workflows without usage"), "{text}");
+    }
+
+    #[test]
+    fn outside_summary_rounds_the_unrounded_sum() {
+        let workflows = vec![
+            named("example-org/app", ".github/workflows/lint.yml", "10"),
+            named("example-org/app", ".github/workflows/ci.yml", "0.004"),
+            named("example-org/app", ".github/workflows/docs.yml", "0.004"),
+        ];
+        let text = render(&workflows, &bill("10.008", "3"), None, Some(1));
+        assert!(text.contains("2 more workflows (0.01 USD)\n"), "{text}");
+        assert!(!text.contains("0.00 USD"), "{text}");
+
+        let quiet = vec![
+            named("example-org/app", ".github/workflows/lint.yml", "10"),
+            named("example-org/app", ".github/workflows/ci.yml", "0.002"),
+            named("example-org/app", ".github/workflows/docs.yml", "0.002"),
+        ];
+        let quiet_text = render(&quiet, &bill("10.004", "3"), None, Some(1));
+        assert!(
+            quiet_text.contains("2 more workflows (0.00 USD)\n"),
+            "{quiet_text}"
+        );
+    }
+
+    #[test]
+    fn invoice_finding_on_an_omitted_workflow_stays_with_that_workflow() {
+        let workflows = vec![
+            named("example-org/alpha", ".github/workflows/lint.yml", "10"),
+            named("example-org/zeta", ".github/workflows/ci.yml", "2.112"),
+        ];
+        let findings = vec![Finding {
+            path: PathBuf::from("usage.csv"),
+            line: 3,
+            kind: FindingKind::InvoiceMismatch,
+            message: "invoice row mismatch: sku \"actions_linux\", date \"2026-09-02\", gross 2.112000 != quantity * applied_cost_per_quantity 9.000000".to_string(),
+            repository: Some("example-org/zeta".to_string()),
+            workflow_path: Some(".github/workflows/ci.yml".to_string()),
+        }];
+        let text = render(&workflows, &bill("12.112", "2"), Some(&findings), Some(1));
+        assert!(text.contains("1 more workflow (2.11 USD)\n"), "{text}");
+        assert!(
+            text.contains(
+                "example-org/zeta .github/workflows/ci.yml\n  F9 usage.csv:3: invoice row mismatch"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("Workflows without usage"), "{text}");
+        let outside = outside_heading(&text);
+        assert!(text.find("F9 usage.csv:3").unwrap() > outside, "{text}");
+
+        let value: serde_json::Value = serde_json::from_str(
+            render_json(
+                &workflows,
+                &bill("12.112", "2"),
+                Some(&findings),
+                None,
+                Some(1),
+            )
+            .trim_end(),
+        )
+        .unwrap();
+        assert!(value["unattached_findings"].as_array().unwrap().is_empty());
+        assert_eq!(
+            value["outside_top"]["workflows"][0]["repository"],
+            "example-org/zeta"
+        );
+        assert_eq!(
+            value["outside_top"]["workflows"][0]["findings"][0]["id"],
+            "F9"
+        );
+        assert_eq!(value["workflows"].as_array().unwrap().len(), 1);
+        assert!(value["workflows"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn json_outside_top_keeps_findings_on_the_omitted_workflows() {
+        let workflows = vec![
+            named("example-org/app", ".github/workflows/lint.yml", "10"),
+            named("example-org/app", ".github/workflows/docs.yml", "2.112"),
+            named("example-org/app", "(no workflow)", "0"),
+        ];
+        let findings = vec![
+            finding(
+                "app/.github/workflows/lint.yml",
+                8,
+                FindingKind::LintOnRunner,
+                "lint on macOS",
+            ),
+            finding(
+                "app/.github/workflows/docs.yml",
+                4,
+                FindingKind::MissingTimeout,
+                "default timeout is 360 minutes",
+            ),
+            finding(
+                "app/.github/workflows/nightly.yml",
+                2,
+                FindingKind::MissingTimeout,
+                "default timeout is 360 minutes",
+            ),
+        ];
+        let totals = bill("12.112", "3");
+        let text = render_json(
+            &workflows,
+            &totals,
+            Some(&findings),
+            Some(usd("1")),
+            Some(1),
+        );
+        assert!(!text.contains("0000000001"), "{text}");
+        let value: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["workflows"].as_array().unwrap().len(), 1);
+        assert_eq!(value["workflows"][0]["path"], ".github/workflows/lint.yml");
+        assert_eq!(value["workflows"][0]["findings"][0]["id"], "F1");
+        assert_eq!(value["outside_top"]["count"], 2);
+        assert_eq!(value["outside_top"]["net"], "2.112000");
+        let omitted = value["outside_top"]["workflows"].as_array().unwrap();
+        assert_eq!(omitted.len(), 2);
+        assert_eq!(omitted[0]["path"], ".github/workflows/docs.yml");
+        assert_eq!(omitted[0]["net"], "2.112000");
+        assert_eq!(
+            omitted[0]["findings"][0]["file"],
+            "app/.github/workflows/docs.yml"
+        );
+        assert_eq!(omitted[0]["findings"][0]["line"], 4);
+        assert_eq!(omitted[1]["path"], "(no workflow)");
+        assert!(omitted[1]["findings"].as_array().unwrap().is_empty());
+        assert_eq!(
+            value["unattached_findings"][0]["file"],
+            "app/.github/workflows/nightly.yml"
+        );
+        assert_eq!(value["unattached_findings"].as_array().unwrap().len(), 1);
+        assert_eq!(value["budget"], "1.000000");
+        assert_eq!(value["budget_exceeded"], true);
+
+        let zero = render_json(&workflows, &totals, Some(&findings), None, Some(0));
+        let zero_value: serde_json::Value = serde_json::from_str(zero.trim_end()).unwrap();
+        assert!(zero_value["workflows"].as_array().unwrap().is_empty());
+        assert_eq!(zero_value["outside_top"]["count"], 3);
+        assert_eq!(zero_value["outside_top"]["net"], "12.112000");
+        assert_eq!(
+            zero_value["outside_top"]["workflows"][0]["findings"][0]["id"],
+            "F1"
+        );
+        assert_eq!(
+            zero_value["outside_top"]["workflows"][1]["findings"][0]["id"],
+            "F2"
+        );
+        assert!(zero_value["outside_top"]["workflows"][2]["findings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            zero_value["unattached_findings"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn runs_section_stays_after_findings_outside_the_top() {
+        let workflows = vec![
+            named("example-org/app", ".github/workflows/ci.yml", "3"),
+            named("example-org/app", ".github/workflows/docs.yml", "1"),
+        ];
+        let findings = vec![finding(
+            "samples/.github/workflows/docs.yml",
+            4,
+            FindingKind::MissingTimeout,
+            "default timeout is 360 minutes",
+        )];
+        let api = sample_api();
+        let text = render_with_runs(&workflows, &bill("4", "2"), Some(&findings), &api, Some(1));
+        let outside = outside_heading(&text);
+        let runs = text.find("\nRuns\n").unwrap();
+        assert!(outside < runs, "{text}");
+        assert!(text.contains("1 more workflow (1.00 USD)\n"), "{text}");
+        assert!(
+            section(&text, "In progress").contains("601  lint"),
+            "{text}"
+        );
+        assert!(section(&text, "Jobs").contains("501  build"), "{text}");
+
+        let json = render_json_with_runs(
+            &workflows,
+            &bill("4", "2"),
+            Some(&findings),
+            None,
+            &api,
+            Some(1),
+        );
+        let value: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
+        assert_eq!(value["outside_top"]["count"], 1);
+        assert!(value.get("workflow_runs").is_some(), "{value}");
+        assert!(value.get("in_progress").is_some(), "{value}");
+        assert_eq!(
+            value["outside_top"]["workflows"][0]["findings"][0]["line"],
+            4
+        );
     }
 }

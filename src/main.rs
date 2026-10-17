@@ -63,10 +63,6 @@ fn report(
         }
     };
     let ranking = rank::rank(&rows, None);
-    let shown = match top {
-        Some(limit) => &ranking.workflows[..limit.min(ranking.workflows.len())],
-        None => ranking.workflows.as_slice(),
-    };
     let yaml = match workflows {
         Some(dir) => match workflow::scan_dir(dir) {
             Ok(scanned) => Some(findings::findings(&scanned)),
@@ -89,17 +85,25 @@ fn report(
         },
         None => None,
     };
+    let ranked = ranking.workflows.as_slice();
     let text = if json {
         match api.as_ref() {
-            Some(data) => {
-                report::render_json_with_runs(shown, &ranking.bill, found.as_deref(), budget, data)
-            }
-            None => report::render_json(shown, &ranking.bill, found.as_deref(), budget),
+            Some(data) => report::render_json_with_runs(
+                ranked,
+                &ranking.bill,
+                found.as_deref(),
+                budget,
+                data,
+                top,
+            ),
+            None => report::render_json(ranked, &ranking.bill, found.as_deref(), budget, top),
         }
     } else {
         match api.as_ref() {
-            Some(data) => report::render_with_runs(shown, &ranking.bill, found.as_deref(), data),
-            None => report::render(shown, &ranking.bill, found.as_deref()),
+            Some(data) => {
+                report::render_with_runs(ranked, &ranking.bill, found.as_deref(), data, top)
+            }
+            None => report::render(ranked, &ranking.bill, found.as_deref(), top),
         }
     };
     print!("{text}");
