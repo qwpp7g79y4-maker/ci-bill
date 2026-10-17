@@ -97,6 +97,24 @@ fn unreadable_usage_exits_2() {
 }
 
 #[test]
+fn top_flag_exits_0() {
+    let output = run(&[
+        "report",
+        "--usage",
+        "samples/usage-sample.csv",
+        "--top",
+        "2",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+}
+
+#[test]
 fn sample_usage_exits_0() {
     let output = run(&["report", "--usage", "samples/usage-sample.csv"]);
     assert_eq!(

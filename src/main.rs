@@ -1,3 +1,4 @@
+mod rank;
 mod usage;
 
 use std::path::{Path, PathBuf};
@@ -32,7 +33,8 @@ fn usage_exit(err: clap::Error) -> ExitCode {
 fn report(usage_path: &Path, workflows: Option<&Path>, top: Option<usize>) -> ExitCode {
     match usage::read_usage(usage_path) {
         Ok(rows) => {
-            let _ = (rows.len(), workflows, top);
+            let ranked = rank::rank(&rows, top);
+            let _ = (ranked.len(), workflows);
             ExitCode::SUCCESS
         }
         Err(err) => {
