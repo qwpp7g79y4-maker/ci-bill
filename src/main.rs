@@ -4,6 +4,7 @@ mod findings;
 mod fix_diff;
 mod job_cost;
 mod matrix_cost;
+mod md;
 mod money;
 mod overlap;
 mod prices;
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
                 json,
                 budget,
                 fix_diff,
+                md,
             } => report(
                 &usage,
                 workflows.as_deref(),
@@ -41,6 +43,7 @@ fn main() -> ExitCode {
                 json,
                 budget,
                 fix_diff,
+                md,
             ),
             Command::Prices {
                 json,
@@ -90,6 +93,7 @@ fn usage_exit(err: clap::Error) -> ExitCode {
     ExitCode::from(3)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn report(
     usage_path: &Path,
     workflows: Option<&Path>,
@@ -98,6 +102,7 @@ fn report(
     json: bool,
     budget: Option<Micros>,
     fix_diff: bool,
+    md: bool,
 ) -> ExitCode {
     let rows = match usage::read_usage(usage_path) {
         Ok(rows) => rows,
@@ -169,7 +174,16 @@ fn report(
         let public_repo = api.as_ref().is_some_and(|data| data.public);
         savings::apply(items, ranked, &scanned, public_repo);
     }
-    let text = if fix_diff {
+    let text = if md {
+        md::render(
+            ranked,
+            &ranking.bill,
+            found.as_deref(),
+            api.as_ref(),
+            &scanned,
+            workflows,
+        )
+    } else if fix_diff {
         found
             .as_deref()
             .and_then(|items| fix_diff::render(items, workflows))
@@ -299,6 +313,9 @@ enum Command {
         /// Print a unified diff fixing the highest-savings finding instead of the report.
         #[arg(long)]
         fix_diff: bool,
+        /// Print a one-page Markdown teardown instead of the report.
+        #[arg(long)]
+        md: bool,
     },
     /// Show Actions runner prices and the minute rate for a label or SKU.
     Prices {

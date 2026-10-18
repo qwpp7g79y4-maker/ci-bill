@@ -42,6 +42,8 @@ fn help_shows_options() {
     assert!(text.contains("--top"), "{text}");
     assert!(text.contains("--json"), "{text}");
     assert!(text.contains("--budget"), "{text}");
+    assert!(text.contains("--fix-diff"), "{text}");
+    assert!(text.contains("--md"), "{text}");
 }
 
 #[test]

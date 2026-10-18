@@ -269,14 +269,14 @@ pub(crate) fn budget_exceeded_line(total_net: Micros, budget: Micros) -> String 
     )
 }
 
-fn period_line(bill: &Bill) -> String {
+pub(crate) fn period_line(bill: &Bill) -> String {
     match (&bill.period_from, &bill.period_to) {
         (Some(from), Some(to)) => format!("Period: {from} .. {to}"),
         _ => "Period: (none)".to_string(),
     }
 }
 
-fn repositories_line(bill: &Bill) -> String {
+pub(crate) fn repositories_line(bill: &Bill) -> String {
     if bill.repositories.is_empty() {
         "Repositories: (none)".to_string()
     } else {
