@@ -5,16 +5,33 @@ by PEPAI (pep_ai@icloud.com).
 
 ## Tests
 
-`cargo test` (debug, stable 1.99 and MSRV 1.85, both green):
+`cargo test` (debug and release, stable 1.99 and MSRV 1.85, all green):
 
-- 302 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
-- 167 integration tests across 23 files under `tests/`, driving the real
+- 309 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
+- 167 integration tests across 22 files under `tests/`, driving the real
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
-- 469 tests total, 0 failing.
+- 476 tests total, 0 failing.
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are both
 clean, for the main crate and for `fuzz/`.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push and pull request (and is
+callable from a release workflow later):
+
+- `test`: stable toolchain on `ubuntu-latest`, `windows-latest`,
+  `macos-latest`, and `macos-15-intel` — `cargo fmt --check`, clippy with
+  `-D warnings`, `cargo test --locked`, `cargo test --release --locked`.
+- `msrv`: the same clippy and test steps on `ubuntu-latest` with Rust 1.85.
+- `audit`: `cargo audit` against the advisory database.
+- `fuzz-build`: `cargo +nightly fuzz build` for every fuzz target, to catch
+  fuzz-target bitrot without running a full campaign in CI.
+
+This repository has no remote, so the workflow has not actually run yet;
+every job's commands were run locally first (see above and below) with
+`-j 2`/`--test-threads=2` to bound memory and CPU use.
 
 ## Fuzzing
 
@@ -130,6 +147,33 @@ a crafted reproducer:
   cannot reach anywhere near `i64::MAX` within a parseable timestamp range.
   No regression test is claimed for this one since no crash was shown.
 
+## EC15: atomic fetch cache writes
+
+`fetch`'s cache writers (`write_merged_runs`, `write_job_batch`) used to
+delete the old cache files for a chunk before renaming the new temp files
+over them. An interruption between the delete and the rename (a crash, a
+killed process) could leave that chunk missing entirely. Fixed in
+`src/fetch.rs` by writing and `fsync`-ing every new file to a temp path
+first, renaming each temp over its destination (a `rename` replaces the
+destination atomically on every supported OS, including Windows), and only
+removing whichever old files the new set no longer needs once every rename
+has landed. Tests:
+`write_merged_runs_leaves_old_cache_intact_if_a_temp_write_fails`,
+`write_job_batch_leaves_old_cache_intact_if_a_temp_write_fails`,
+`write_merged_runs_drops_stale_files_only_after_new_ones_land`,
+`write_merged_runs_keeps_every_old_file_if_a_rename_fails`.
+
+## Overflow error wording
+
+The "sum of all rows" overflow error (the grand total across an entire
+report) printed a `line 0` that named no real row. Fixed in `src/usage.rs`
+(`UsageError`'s `Display` impl drops the line number for this case) and
+`src/rank.rs` (a comment at the one call site that can reach it). Tests:
+`no_overflow_error_message_prints_line_zero`,
+`amount_overflow_with_a_known_line_names_it`,
+`amount_overflow_with_no_known_line_drops_it`, and the updated
+`tests/cli.rs::amount_overflow_exits_2_for_text_json_and_md`.
+
 ## Open points
 
 - The fuzz targets are smoke-tested for 60 seconds each, not run as a
@@ -140,6 +184,10 @@ a crafted reproducer:
   iteration, which caps its throughput well below the other targets; a
   pure in-memory unified-diff applier would let it run far more iterations
   per second at the cost of fidelity to the real `git apply` behavior.
-- The prior review's two "not reproduced" items (a fetch write interrupted
-  between delete and rename, and two concurrent `fetch` processes to the
-  same `--out` directory) are still open; this pass did not attempt them.
+- The prior review's other "not reproduced" item (two concurrent `fetch`
+  processes writing to the same `--out` directory) is still open; this
+  pass did not attempt it. EC15 above fixes the single-process interrupted
+  write, not concurrent-writer races.
+- The CI workflow has not run on real Windows/macOS runners yet (no
+  remote); the portability review for this pass was local reading plus the
+  local Linux test run, not a cross-OS CI run.
