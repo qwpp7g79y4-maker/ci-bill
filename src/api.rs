@@ -326,7 +326,7 @@ fn read_text(path: &Path) -> Result<String, ApiError> {
     String::from_utf8(without_bom.to_vec()).map_err(|_| ApiError::json(path))
 }
 
-fn is_runs_file(name: &str) -> bool {
+pub(crate) fn is_runs_file(name: &str) -> bool {
     let Some(middle) = name
         .strip_prefix("runs-")
         .and_then(|rest| rest.strip_suffix(".json"))
@@ -358,7 +358,7 @@ fn name_has_attempt_segment(name: &str) -> bool {
 ///
 /// The id is the leading digit run. `jobs-15-2.json` is run 15 and
 /// `jobs-150.json` is run 150.
-fn job_file_run_id(name: &str) -> Option<u64> {
+pub(crate) fn job_file_run_id(name: &str) -> Option<u64> {
     let rest = name.strip_prefix("jobs-")?.strip_suffix(".json")?;
     if rest.is_empty() {
         return None;

@@ -1,4 +1,5 @@
 mod api;
+mod fetch;
 mod findings;
 mod job_cost;
 mod matrix_cost;
@@ -53,6 +54,21 @@ fn main() -> ExitCode {
                 repository.as_deref(),
                 workflow.as_deref(),
             ),
+            Command::Fetch {
+                repo,
+                out,
+                since,
+                until,
+            } => match fetch::fetch(&repo, &out, since, until) {
+                Ok(text) => {
+                    print!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("ci-bill: {err}");
+                    ExitCode::from(err.code())
+                }
+            },
         },
         Err(err) => usage_exit(err),
     }
@@ -283,5 +299,20 @@ enum Command {
         /// Workflow path inside the usage report.
         #[arg(long, value_name = "PATH")]
         workflow: Option<String>,
+    },
+    /// Save Actions runs, jobs, and referenced reusable workflows.
+    Fetch {
+        /// Repository to read, as `OWNER/REPO`.
+        #[arg(long, value_name = "OWNER/REPO", value_parser = fetch::parse_repo_arg)]
+        repo: String,
+        /// Directory for `repo.json`, `runs-*.json`, `jobs-<run_id>*.json`, and callee files.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// First day to fetch, as `YYYY-MM-DD` in UTC.
+        #[arg(long, value_name = "DATE", value_parser = fetch::parse_utc_date)]
+        since: fetch::UtcDate,
+        /// Last day to fetch, as `YYYY-MM-DD` in UTC. Defaults to today.
+        #[arg(long, value_name = "DATE", value_parser = fetch::parse_utc_date)]
+        until: Option<fetch::UtcDate>,
     },
 }
