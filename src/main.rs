@@ -1,4 +1,5 @@
 mod api;
+mod display;
 mod fetch;
 mod findings;
 mod fix_diff;

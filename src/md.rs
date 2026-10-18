@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::api::ApiData;
+use crate::display::escape_display;
 use crate::findings::Finding;
 use crate::fix_diff;
 use crate::rank::{Bill, WorkflowTotal};
@@ -137,11 +138,11 @@ fn job_location(job: &JobCost) -> String {
     }
 }
 
-/// Escape a Markdown table cell: a `|` would otherwise end the cell early,
-/// and a newline would otherwise end the row early. Both can appear here
-/// because messages and job names are built from scanned YAML content.
+/// Escape a Markdown table cell: a `|` would otherwise end the cell early.
+/// `escape_display` already turns a raw newline or other control character
+/// into a visible escape, which also keeps the row from ending early.
 fn escape_cell(text: &str) -> String {
-    text.replace('|', "\\|").replace(['\n', '\r'], " ")
+    escape_display(text).replace('|', "\\|")
 }
 
 #[cfg(test)]
@@ -324,12 +325,36 @@ mod tests {
             "0",
         )];
         let text = render(&[], &bill("0"), Some(&findings), None, &[], None);
-        assert!(text.contains("job a\\|b uses c d"), "{text}");
+        assert!(text.contains("job a\\|b uses c\\nd"), "{text}");
         let row = text
             .lines()
             .find(|line| line.starts_with("| F11"))
             .expect("row");
         // 5 delimiters plus the one escaped `\|` inside the message cell.
+        assert_eq!(row.matches('|').count(), 6, "{row}");
+    }
+
+    #[test]
+    fn control_characters_and_pipes_in_file_paths_are_escaped() {
+        let findings = vec![finding(
+            "weird|path\r\nwith\tcontrol\u{1b}\u{7f}\u{202e}.yml",
+            1,
+            FindingKind::InvalidUses,
+            "fine",
+            "0",
+        )];
+        let text = render(&[], &bill("0"), Some(&findings), None, &[], None);
+        for raw in ['\r', '\t', '\u{1b}', '\u{7f}', '\u{202e}'] {
+            assert!(!text.contains(raw), "{raw:?} leaked raw into {text:?}");
+        }
+        assert!(
+            text.contains("weird\\|path\\r\\nwith\\tcontrol\\x1b\\x7f\\u{202e}.yml"),
+            "{text}"
+        );
+        let row = text
+            .lines()
+            .find(|line| line.starts_with("| F11"))
+            .expect("row");
         assert_eq!(row.matches('|').count(), 6, "{row}");
     }
 

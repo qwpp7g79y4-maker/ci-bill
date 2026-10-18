@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::api::{repository_from_run_path, workflow_paths_match, ApiData, Job as ApiJob};
+use crate::display::escape_display;
 use crate::job_cost::bill_job;
 use crate::money::Micros;
 use crate::prices::{billed_on_public, embedded_table, sku_for_labels};
@@ -131,13 +132,14 @@ pub fn text_lines(cost: &WorkflowCost) -> Vec<String> {
 fn job_text(job: &JobCost) -> String {
     let amount = job.amount.micros.format_cents();
     let name = if job.name.is_empty() {
-        "job"
+        "job".to_string()
     } else {
-        job.name.as_str()
+        escape_display(&job.name)
     };
     if !job.file.is_empty() {
         if let Some(line) = job.line {
-            return format!("  {name}  {}:{} = {amount}", job.file, line);
+            let file = escape_display(&job.file);
+            return format!("  {name}  {file}:{line} = {amount}");
         }
     }
     if let Some(id) = job.job_id {

@@ -2,6 +2,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 use crate::api::{linked_workflow_path, ApiData, Job, WorkflowRun, IN_PROGRESS, UNKNOWN_WORKFLOW};
+use crate::display::escape_display;
 use crate::findings::Finding;
 use crate::job_cost::bill_job;
 use crate::money::{percent_fixed, Micros};
@@ -280,7 +281,12 @@ pub(crate) fn repositories_line(bill: &Bill) -> String {
     if bill.repositories.is_empty() {
         "Repositories: (none)".to_string()
     } else {
-        format!("Repositories: {}", bill.repositories.join(", "))
+        let names: Vec<String> = bill
+            .repositories
+            .iter()
+            .map(|repository| escape_display(repository))
+            .collect();
+        format!("Repositories: {}", names.join(", "))
     }
 }
 
@@ -497,9 +503,9 @@ fn finding_text(finding: &Finding) -> String {
     format!(
         "{} {}:{}: {}",
         finding.kind.code(),
-        finding.path.display(),
+        escape_display(&finding.path.display().to_string()),
         finding.line,
-        finding.message
+        escape_display(&finding.message)
     )
 }
 
@@ -586,10 +592,11 @@ struct Widths {
 }
 
 fn workflow_label(workflow: &WorkflowTotal) -> String {
+    let workflow_path = escape_display(&workflow.workflow_path);
     if workflow.repository.is_empty() {
-        workflow.workflow_path.clone()
+        workflow_path
     } else {
-        format!("{} {}", workflow.repository, workflow.workflow_path)
+        format!("{} {workflow_path}", escape_display(&workflow.repository))
     }
 }
 
@@ -604,7 +611,7 @@ fn workflow_rows(workflow: &WorkflowTotal, total_net: Micros) -> Vec<Row> {
     }];
     for sku in &workflow.skus {
         rows.push(Row {
-            name: format!("  {}", sku.sku),
+            name: format!("  {}", escape_display(&sku.sku)),
             net: sku.net.format_cents(),
             gross: sku.gross.format_cents(),
             discount: sku.discount.format_cents(),
@@ -763,14 +770,18 @@ fn job_prefix(api: &ApiData, job: &Job) -> String {
     let labels = if job.labels.is_empty() {
         "-".to_string()
     } else {
-        job.labels.join(", ")
+        job.labels
+            .iter()
+            .map(|label| escape_display(label))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
+    let name = escape_display(&job.name);
     let runner = job.runner_name.as_deref().unwrap_or("-");
     let started = job.started_at.as_deref().unwrap_or("-");
     format!(
         "{id}  {name}  run {run_id}  {path}  attempt {attempt}  labels {labels}  runner {runner}  started {started}",
         id = job.id,
-        name = job.name,
         run_id = job.run_id,
         attempt = job.run_attempt,
     )
@@ -1029,6 +1040,35 @@ mod tests {
         assert_eq!(usd("0.005").format_cents(), "0.01");
         assert_eq!(usd("2.112").format_cents(), "2.11");
         assert_eq!(usd("0").format_cents(), "0.00");
+    }
+
+    #[test]
+    fn control_characters_in_input_fields_are_escaped_not_raw() {
+        let evil_path = "evil\u{1b}[31mRED\u{1b}[0m\nFAKE LINE: Budget exceeded: 0 > 0";
+        let mut evil_workflow = workflow(evil_path, "1", "1", "actions_linux");
+        evil_workflow.repository = "org/app\rwith\tcontrol".to_string();
+        evil_workflow.skus[0].sku = "sku\u{7}bell\u{7f}del".to_string();
+        let mut totals = bill("1", "1");
+        totals.repositories = vec!["org/app\u{202e}bidi".to_string()];
+        let findings = vec![finding(
+            "file\r\nwith\u{7f}del.yml",
+            1,
+            FindingKind::MissingTimeout,
+            "message\u{1b}with\u{202e}bidi",
+        )];
+        let text = render(&[evil_workflow], &totals, Some(&findings), None);
+        for raw in ['\u{1b}', '\r', '\t', '\u{7f}', '\u{202e}', '\u{7}'] {
+            assert!(!text.contains(raw), "{raw:?} leaked raw into {text:?}");
+        }
+        assert!(
+            text.contains("evil\\x1b[31mRED\\x1b[0m\\nFAKE LINE: Budget exceeded: 0 > 0"),
+            "{text}"
+        );
+        assert!(text.contains("org/app\\rwith\\tcontrol"), "{text}");
+        assert!(text.contains("sku\\x07bell\\x7fdel"), "{text}");
+        assert!(text.contains("org/app\\u{202e}bidi"), "{text}");
+        assert!(text.contains("file\\r\\nwith\\x7fdel.yml"), "{text}");
+        assert!(text.contains("message\\x1bwith\\u{202e}bidi"), "{text}");
     }
 
     #[test]
