@@ -401,12 +401,18 @@ fn document_root(events: &[(Event, Marker)]) -> Result<Option<Node>, usize> {
         expanded: 0,
     };
     let mut chosen = None;
+    let mut document_seen = false;
     while cursor.index < events.len() {
         let is_document = matches!(events[cursor.index].0, Event::DocumentStart);
         if !is_document {
             cursor.index += 1;
             continue;
         }
+        let line = events[cursor.index].1.line().max(1);
+        if document_seen {
+            return Err(line);
+        }
+        document_seen = true;
         cursor.index += 1;
         if cursor.index >= events.len() {
             break;
@@ -2827,6 +2833,61 @@ jobs:\n  job1:\n    runs-on: ubuntu-latest\n    env: *a8\n";
         assert_eq!(err.path, dir.join("broken.yml"));
         assert_eq!(err.to_string(), "line 4: invalid YAML");
         assert!(!err.to_string().contains(secret), "{err}");
+    }
+
+    #[test]
+    fn a_single_leading_document_marker_or_trailing_end_marker_still_works() {
+        let leading = must_scan(
+            "leading.yml",
+            "---\njobs:\n  a:\n    runs-on: ubuntu-latest\n",
+        );
+        assert_eq!(leading.jobs.len(), 1);
+        assert_eq!(leading.jobs[0].name, "a");
+
+        let trailing_end = must_scan(
+            "trailing-end.yml",
+            "jobs:\n  a:\n    runs-on: ubuntu-latest\n...\n",
+        );
+        assert_eq!(trailing_end.jobs.len(), 1);
+        assert_eq!(trailing_end.jobs[0].name, "a");
+
+        let both = must_scan(
+            "both.yml",
+            "---\njobs:\n  a:\n    runs-on: ubuntu-latest\n...\n",
+        );
+        assert_eq!(both.jobs.len(), 1);
+        assert_eq!(both.jobs[0].name, "a");
+    }
+
+    #[test]
+    fn a_second_yaml_document_is_a_parse_error_instead_of_a_silent_drop() {
+        let cases = [
+            (
+                "two-docs.yml",
+                "jobs:\n  a:\n    runs-on: ubuntu-latest\n---\njobs:\n  b:\n    runs-on: macos-latest\n",
+                4,
+            ),
+            (
+                "second-empty.yml",
+                "jobs:\n  a:\n    runs-on: ubuntu-latest\n---\n",
+                4,
+            ),
+            (
+                "crlf-two-docs.yml",
+                "jobs:\r\n  a:\r\n    runs-on: ubuntu-latest\r\n---\r\njobs:\r\n  b:\r\n    runs-on: macos-latest\r\n",
+                4,
+            ),
+        ];
+        for (name, text, line) in cases {
+            let err = scan_yaml(Path::new(name), text).expect_err(name);
+            assert_eq!(err.path, Path::new(name), "{name}");
+            assert_eq!(
+                err.to_string(),
+                format!("line {line}: invalid YAML"),
+                "{name}"
+            );
+            assert!(!err.to_string().contains("macos"), "{name}: {err}");
+        }
     }
 
     #[test]
