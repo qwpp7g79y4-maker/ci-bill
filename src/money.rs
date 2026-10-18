@@ -102,6 +102,10 @@ impl Micros {
 
     /// `None` when the sum does not fit in `i64` micros, instead of panicking.
     /// Use this to add amounts from untrusted input, such as CSV rows.
+    ///
+    /// `Micros` deliberately has no `Add`, `AddAssign` or `Sum` impl: every sum
+    /// must choose between this checked form and an explicit saturating one,
+    /// so no `+` on money can panic on overflow.
     pub fn checked_add(self, rhs: Self) -> Option<Self> {
         self.0.checked_add(rhs.0).map(Self)
     }
@@ -118,30 +122,6 @@ impl std::str::FromStr for Micros {
 impl std::fmt::Display for Micros {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.to_decimal_string())
-    }
-}
-
-impl std::ops::Add for Micros {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self {
-        Self(
-            self.0
-                .checked_add(rhs.0)
-                .expect("money total fits in i64 micros"),
-        )
-    }
-}
-
-impl std::ops::AddAssign for Micros {
-    fn add_assign(&mut self, rhs: Self) {
-        *self = *self + rhs;
-    }
-}
-
-impl std::iter::Sum for Micros {
-    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Self::ZERO, |acc, item| acc + item)
     }
 }
 
@@ -422,5 +402,16 @@ mod tests {
         assert_eq!(percent_fixed(usd("2"), usd("3"), 6), "66.666667");
         assert_eq!(percent_fixed(usd("1"), Micros::ZERO, 2), "0.00");
         assert_eq!(percent_fixed(usd("230.144"), usd("284.208"), 2), "80.98");
+    }
+    #[test]
+    fn checked_add_reports_overflow_instead_of_panicking() {
+        assert_eq!(usd("1.25").checked_add(usd("2.5")), Some(usd("3.75")));
+        assert_eq!(usd("-1").checked_add(usd("1")), Some(Micros::ZERO));
+        assert_eq!(Micros(i64::MAX).checked_add(Micros(1)), None);
+        assert_eq!(Micros(i64::MIN).checked_add(Micros(-1)), None);
+        assert_eq!(
+            Micros(i64::MAX).checked_add(Micros(i64::MIN)),
+            Some(Micros(-1))
+        );
     }
 }

@@ -7,11 +7,11 @@ by PEPAI (pep_ai@icloud.com).
 
 `cargo test` (debug and release, stable 1.99 and MSRV 1.85, all green):
 
-- 309 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
+- 310 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
 - 167 integration tests across 22 files under `tests/`, driving the real
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
-- 476 tests total, 0 failing.
+- 477 tests total, 0 failing.
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are both
 clean, for the main crate and for `fuzz/`.
@@ -146,6 +146,11 @@ a crafted reproducer:
   own (already-bounded) total exactly, and the list-price fallback path
   cannot reach anywhere near `i64::MAX` within a parseable timestamp range.
   No regression test is claimed for this one since no crash was shown.
+- The panicking `impl Add for Micros` (and the `AddAssign`/`Sum` impls
+  built on it) had no callers left after the fixes above, so it was removed.
+  Every money sum now has to use `checked_add` or an explicit saturating
+  form, which makes an overflow panic on `Micros` impossible to reintroduce
+  by accident. Test: `money::tests::checked_add_reports_overflow_instead_of_panicking`.
 
 ## EC15: atomic fetch cache writes
 
