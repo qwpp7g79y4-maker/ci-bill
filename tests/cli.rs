@@ -209,9 +209,9 @@ fn amount_overflow_exits_2_for_text_json_and_md() {
             stderr(&output)
         );
         let err = stderr(&output);
-        assert!(err.contains("line 0"), "{args:?}: {err}");
+        assert!(!err.contains("line 0"), "{args:?}: {err}");
         assert!(
-            err.contains("net_amount total is out of range"),
+            err.contains("net_amount total is out of range (sum of all rows)"),
             "{args:?}: {err}"
         );
         assert!(stdout(&output).is_empty(), "{args:?}: {}", stdout(&output));

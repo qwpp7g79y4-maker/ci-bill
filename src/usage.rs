@@ -45,7 +45,9 @@ pub enum UsageErrorKind {
     TooManyDecimals(&'static str),
     InvalidCsv,
     /// A running total overflowed `i64` micros. `line` is the row that caused
-    /// it, or 0 for a total summed across the whole report.
+    /// it, or 0 when the overflow is in a total summed across the whole
+    /// report and no single row is to blame. The `Display` impl drops the
+    /// line number in that case instead of printing the meaningless `line 0`.
     AmountOverflow(&'static str),
 }
 
@@ -68,7 +70,11 @@ impl std::fmt::Display for UsageError {
             }
             UsageErrorKind::InvalidCsv => write!(f, "line {}: invalid CSV", self.line),
             UsageErrorKind::AmountOverflow(column) => {
-                write!(f, "line {}: {column} total is out of range", self.line)
+                if self.line == 0 {
+                    write!(f, "{column} total is out of range (sum of all rows)")
+                } else {
+                    write!(f, "line {}: {column} total is out of range", self.line)
+                }
             }
         }
     }
@@ -574,6 +580,28 @@ date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,disco
         assert_eq!(rows[0].workflow_path, "(no workflow)");
         assert_eq!(rows[1].workflow_path, "(no workflow)");
         assert_eq!(rows[0].unit_type, "gigabyte-hours");
+    }
+
+    #[test]
+    fn amount_overflow_with_a_known_line_names_it() {
+        let err = UsageError {
+            line: 3,
+            kind: UsageErrorKind::AmountOverflow("net_amount"),
+        };
+        assert_eq!(err.to_string(), "line 3: net_amount total is out of range");
+    }
+
+    #[test]
+    fn amount_overflow_with_no_known_line_drops_it() {
+        let err = UsageError {
+            line: 0,
+            kind: UsageErrorKind::AmountOverflow("net_amount"),
+        };
+        assert_eq!(
+            err.to_string(),
+            "net_amount total is out of range (sum of all rows)"
+        );
+        assert!(!err.to_string().contains("line 0"));
     }
 
     #[test]

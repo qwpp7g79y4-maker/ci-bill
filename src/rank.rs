@@ -94,6 +94,8 @@ pub fn rank(rows: &[UsageRow], top: Option<usize>) -> Result<Ranking, UsageError
             .then_with(|| left.workflow_path.cmp(&right.workflow_path))
     });
     for workflow in &workflows {
+        // Each `workflow.net`/`workflow.minutes` is already a sum over many rows, so
+        // no single line is to blame if adding it to the grand total overflows.
         bill.total_net = checked_total(bill.total_net, workflow.net, 0, "net_amount")?;
         bill.total_minutes = checked_total(bill.total_minutes, workflow.minutes, 0, "quantity")?;
     }
@@ -556,6 +558,7 @@ mod tests {
         let err = rank(&rows, None).unwrap_err();
         assert_eq!(err.line, 3);
         assert_eq!(err.kind, UsageErrorKind::AmountOverflow("net_amount"));
+        assert_eq!(err.to_string(), "line 3: net_amount total is out of range");
     }
 
     #[test]
@@ -589,6 +592,7 @@ mod tests {
         let err = rank(&rows, None).unwrap_err();
         assert_eq!(err.line, 3);
         assert_eq!(err.kind, UsageErrorKind::AmountOverflow("quantity"));
+        assert_eq!(err.to_string(), "line 3: quantity total is out of range");
     }
 
     #[test]
@@ -600,6 +604,10 @@ mod tests {
         let err = rank(&rows, None).unwrap_err();
         assert_eq!(err.line, 0);
         assert_eq!(err.kind, UsageErrorKind::AmountOverflow("net_amount"));
+        assert_eq!(
+            err.to_string(),
+            "net_amount total is out of range (sum of all rows)"
+        );
     }
 
     #[test]
@@ -611,6 +619,20 @@ mod tests {
         let err = rank(&rows, None).unwrap_err();
         assert_eq!(err.line, 0);
         assert_eq!(err.kind, UsageErrorKind::AmountOverflow("quantity"));
+        assert_eq!(
+            err.to_string(),
+            "quantity total is out of range (sum of all rows)"
+        );
+    }
+
+    #[test]
+    fn no_overflow_error_message_prints_line_zero() {
+        let rows = vec![
+            huge(2, "a.yml", "1", "minutes", HUGE, "0", "0"),
+            huge(3, "b.yml", "1", "minutes", HUGE, "0", "0"),
+        ];
+        let err = rank(&rows, None).unwrap_err();
+        assert!(!err.to_string().contains("line 0"), "{err}");
     }
 
     #[test]
