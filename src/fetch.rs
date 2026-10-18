@@ -818,17 +818,17 @@ fn decide(wire: &Wire, attempt: u32, now: SystemTime) -> Decision {
         }
         return Decision::Proceed;
     }
+    if let Some(raw) = wire.retry_after.as_deref() {
+        if let Some(delay) = parse_retry_after(raw, now) {
+            return Decision::Wait(delay);
+        }
+    }
     if wire.remaining.as_deref().is_some_and(remaining_is_zero) {
         let delay = match wire.reset.as_deref().and_then(parse_u64_header) {
             Some(reset) => Duration::from_secs(reset.saturating_sub(unix_now(now))),
             None => secondary_delay(attempt),
         };
         return Decision::Wait(delay);
-    }
-    if let Some(raw) = wire.retry_after.as_deref() {
-        if let Some(delay) = parse_retry_after(raw, now) {
-            return Decision::Wait(delay);
-        }
     }
     if wire.status == 429 || contains_secondary(&wire.body) {
         return Decision::Wait(secondary_delay(attempt));
@@ -2011,8 +2011,25 @@ mod tests {
         primary.reset = Some("1700000005".to_string());
         primary.retry_after = Some("30".to_string());
         match decide(&primary, 1, now) {
+            Decision::Wait(delay) => assert_eq!(delay, Duration::from_secs(30)),
+            other => panic!("retry-after should win over remaining==0/reset: {other:?}"),
+        }
+
+        let mut primary_no_retry = wire(403, r#"{"message":"secondary rate limit"}"#);
+        primary_no_retry.remaining = Some(" 0 ".to_string());
+        primary_no_retry.reset = Some("1700000005".to_string());
+        match decide(&primary_no_retry, 1, now) {
             Decision::Wait(delay) => assert_eq!(delay, Duration::from_secs(5)),
-            other => panic!("primary limit should wait until reset: {other:?}"),
+            other => panic!("remaining==0 without retry-after should wait until reset: {other:?}"),
+        }
+
+        let mut secondary_429_retry_after = wire(429, "secondary rate limit");
+        secondary_429_retry_after.remaining = Some("0".to_string());
+        secondary_429_retry_after.reset = Some("1700000999".to_string());
+        secondary_429_retry_after.retry_after = Some("3".to_string());
+        match decide(&secondary_429_retry_after, 1, now) {
+            Decision::Wait(delay) => assert_eq!(delay, Duration::from_secs(3)),
+            other => panic!("retry-after on 429 with remaining==0 should still win: {other:?}"),
         }
 
         let mut secondary = wire(429, "You have exceeded a SECONDARY RATE LIMIT.");

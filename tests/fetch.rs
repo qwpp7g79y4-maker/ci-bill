@@ -1167,11 +1167,11 @@ fn primary_limit_waits_until_reset() {
 }
 
 #[test]
-fn primary_limit_wins_when_the_body_also_says_secondary() {
+fn retry_after_wins_over_primary_limit_remaining_zero() {
     assert_rate_wait(
-        "primary-wins",
+        "retry-after-wins",
         Duration::from_millis(1500),
-        Duration::from_secs(12),
+        Duration::from_secs(4),
         |hit, earlier| {
             if earlier == 0 {
                 return json_reply(
@@ -1181,9 +1181,35 @@ fn primary_limit_wins_when_the_body_also_says_secondary() {
                         ("X-RateLimit-Remaining".to_string(), " 0 ".to_string()),
                         (
                             "X-RateLimit-Reset".to_string(),
-                            format!("{}", unix_now() + 2),
+                            format!("{}", unix_now() + 10),
                         ),
-                        ("Retry-After".to_string(), "30".to_string()),
+                        ("Retry-After".to_string(), "2".to_string()),
+                    ],
+                );
+            }
+            quiet_success(hit)
+        },
+    );
+}
+
+#[test]
+fn retry_after_wins_over_secondary_status_429_with_remaining_zero() {
+    assert_rate_wait(
+        "retry-after-wins-429",
+        Duration::from_millis(1500),
+        Duration::from_secs(4),
+        |hit, earlier| {
+            if earlier == 0 {
+                return json_reply(
+                    429,
+                    b"secondary rate limit".to_vec(),
+                    vec![
+                        ("X-RateLimit-Remaining".to_string(), "0".to_string()),
+                        (
+                            "X-RateLimit-Reset".to_string(),
+                            format!("{}", unix_now() + 10),
+                        ),
+                        ("Retry-After".to_string(), "2".to_string()),
                     ],
                 );
             }
