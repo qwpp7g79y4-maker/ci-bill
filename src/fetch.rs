@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1571,6 +1571,12 @@ fn commit(
     Ok(())
 }
 
+/// Write every new runs file to a temp path first, `rename` each temp over its
+/// destination (replacing it atomically, on Windows too), and only once every
+/// rename has landed remove whichever old runs files the new set dropped.
+/// The old cache is never missing a file: either a temp write fails and
+/// nothing on disk has changed yet, or every rename succeeds before any old
+/// file is touched.
 fn write_merged_runs(
     out: &Path,
     cache: &Cache,
@@ -1587,35 +1593,36 @@ fn write_merged_runs(
         );
         let bytes = serde_json::to_vec(&Value::Object(body)).map_err(|_| invalid_json())?;
         let temp = out.join(format!(".part-runs-{}.tmp", index + 1));
-        if let Err(error) = write_bytes(&temp, &bytes) {
+        if let Err(error) = write_temp(&temp, &bytes) {
             remove_temps(&temps);
             return Err(error);
         }
         temps.push(temp);
     }
-    for path in &cache.runs_files {
-        if let Err(error) = fs::remove_file(path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                remove_temps(&temps);
-                return Err(path_error(path, "cannot write file"));
-            }
-        }
-    }
+    let mut new_paths = Vec::with_capacity(temps.len());
     for (index, temp) in temps.iter().enumerate() {
         let dest = out.join(format!("runs-{}.json", index + 1));
         if let Err(_error) = fs::rename(temp, &dest) {
-            remove_temps(&temps);
+            remove_temps(&temps[index..]);
             return Err(path_error(&dest, "cannot write file"));
+        }
+        new_paths.push(dest);
+    }
+    for path in &cache.runs_files {
+        if !new_paths.contains(path) {
+            let _ = fs::remove_file(path);
         }
     }
     Ok(())
 }
 
+/// Same write-temp/rename/clean-up-stale ordering as [`write_merged_runs`],
+/// for one run's job pages.
 fn write_job_batch(out: &Path, batch: &JobBatch) -> Result<(), FetchError> {
     let mut temps = Vec::new();
     for (index, body) in batch.bodies.iter().enumerate() {
         let temp = out.join(format!(".part-jobs-{}-{}.tmp", batch.id, index + 1));
-        if let Err(error) = write_bytes(&temp, body) {
+        if let Err(error) = write_temp(&temp, body) {
             remove_temps(&temps);
             return Err(error);
         }
@@ -1628,14 +1635,7 @@ fn write_job_batch(out: &Path, batch: &JobBatch) -> Result<(), FetchError> {
             return Err(error);
         }
     };
-    for path in &old {
-        if let Err(error) = fs::remove_file(path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                remove_temps(&temps);
-                return Err(path_error(path, "cannot write file"));
-            }
-        }
-    }
+    let mut new_paths = Vec::with_capacity(temps.len());
     for (index, temp) in temps.iter().enumerate() {
         let name = if index == 0 {
             format!("jobs-{}.json", batch.id)
@@ -1644,8 +1644,14 @@ fn write_job_batch(out: &Path, batch: &JobBatch) -> Result<(), FetchError> {
         };
         let dest = out.join(name);
         if let Err(_error) = fs::rename(temp, &dest) {
-            remove_temps(&temps);
+            remove_temps(&temps[index..]);
             return Err(path_error(&dest, "cannot write file"));
+        }
+        new_paths.push(dest);
+    }
+    for path in &old {
+        if !new_paths.contains(path) {
+            let _ = fs::remove_file(path);
         }
     }
     Ok(())
@@ -1675,6 +1681,17 @@ fn remove_temps(paths: &[PathBuf]) {
 
 fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), FetchError> {
     fs::write(path, bytes).map_err(|_| path_error(path, "cannot write file"))
+}
+
+/// Write and `fsync` a temp file before it is renamed over a cache file, so
+/// the rename always has durable content to make live.
+fn write_temp(path: &Path, bytes: &[u8]) -> Result<(), FetchError> {
+    let mut file = fs::File::create(path).map_err(|_| path_error(path, "cannot write file"))?;
+    file.write_all(bytes)
+        .map_err(|_| path_error(path, "cannot write file"))?;
+    file.sync_all()
+        .map_err(|_| path_error(path, "cannot write file"))?;
+    Ok(())
 }
 
 fn path_error(path: &Path, message: &str) -> FetchError {
@@ -2128,5 +2145,135 @@ mod tests {
             window.created_param(),
             "2026-01-01T00:00:00Z..2026-01-01T00:00:00Z"
         );
+    }
+
+    fn cache_scratch(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("ci-bill-fetch-unit-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("scratch dir");
+        path
+    }
+
+    fn stored_run(id: u64) -> StoredRun {
+        StoredRun {
+            attempt: 1,
+            value: serde_json::json!({"id": id, "run_attempt": 1}),
+        }
+    }
+
+    #[test]
+    fn write_merged_runs_leaves_old_cache_intact_if_a_temp_write_fails() {
+        let out = cache_scratch("runs-temp-failure");
+        let old_body = br#"{"total_count":1,"workflow_runs":[{"id":999,"run_attempt":1}]}"#;
+        fs::write(out.join("runs-1.json"), old_body).unwrap();
+        let cache = Cache {
+            runs_files: vec![out.join("runs-1.json")],
+            ..Cache::default()
+        };
+        // Force a second chunk, then block its temp write by occupying its path
+        // with a non-empty directory before any rename has a chance to run.
+        let merged: BTreeMap<u64, StoredRun> = (0..150).map(|id| (id, stored_run(id))).collect();
+        let blocker = out.join(".part-runs-2.tmp");
+        fs::create_dir_all(blocker.join("occupied")).unwrap();
+
+        let err = write_merged_runs(&out, &cache, &merged).unwrap_err();
+        assert!(err.message.contains("cannot write file"), "{err:?}");
+        assert!(!out.join(".part-runs-1.tmp").exists());
+        assert!(!out.join("runs-2.json").exists());
+        assert_eq!(fs::read(out.join("runs-1.json")).unwrap(), old_body);
+    }
+
+    #[test]
+    fn write_job_batch_leaves_old_cache_intact_if_a_temp_write_fails() {
+        let out = cache_scratch("jobs-temp-failure");
+        let old_body = br#"{"jobs":["old"]}"#;
+        fs::write(out.join("jobs-7.json"), old_body).unwrap();
+        let blocker = out.join(".part-jobs-7-2.tmp");
+        fs::create_dir_all(blocker.join("occupied")).unwrap();
+        let batch = JobBatch {
+            id: 7,
+            bodies: vec![
+                b"{\"jobs\":[\"new-1\"]}".to_vec(),
+                b"{\"jobs\":[]}".to_vec(),
+            ],
+            jobs: 1,
+        };
+
+        let err = write_job_batch(&out, &batch).unwrap_err();
+        assert!(err.message.contains("cannot write file"), "{err:?}");
+        assert!(!out.join(".part-jobs-7-1.tmp").exists());
+        assert!(!out.join("jobs-7-2.json").exists());
+        assert_eq!(fs::read(out.join("jobs-7.json")).unwrap(), old_body);
+    }
+
+    #[test]
+    fn write_merged_runs_drops_stale_files_only_after_new_ones_land() {
+        let out = cache_scratch("runs-shrink");
+        let mut runs_files = Vec::new();
+        for index in 1..=5 {
+            let path = out.join(format!("runs-{index}.json"));
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"total_count":0,"workflow_runs":[{{"id":{index},"run_attempt":1}}]}}"#
+                ),
+            )
+            .unwrap();
+            runs_files.push(path);
+        }
+        let cache = Cache {
+            runs_files,
+            ..Cache::default()
+        };
+        let merged: BTreeMap<u64, StoredRun> = [(1, stored_run(1))].into_iter().collect();
+
+        write_merged_runs(&out, &cache, &merged).unwrap();
+
+        assert!(out.join("runs-1.json").exists());
+        for index in 2..=5 {
+            assert!(
+                !out.join(format!("runs-{index}.json")).exists(),
+                "runs-{index}.json should have been dropped as stale"
+            );
+        }
+        let saved: Value =
+            serde_json::from_slice(&fs::read(out.join("runs-1.json")).unwrap()).unwrap();
+        assert_eq!(saved["workflow_runs"][0]["id"], 1);
+    }
+
+    #[test]
+    fn write_merged_runs_keeps_every_old_file_if_a_rename_fails() {
+        let out = cache_scratch("runs-shrink-failed-rename");
+        let mut runs_files = Vec::new();
+        for index in 1..=5 {
+            let path = out.join(format!("runs-{index}.json"));
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"total_count":0,"workflow_runs":[{{"id":{index},"run_attempt":1}}]}}"#
+                ),
+            )
+            .unwrap();
+            runs_files.push(path);
+        }
+        let cache = Cache {
+            runs_files,
+            ..Cache::default()
+        };
+        let merged: BTreeMap<u64, StoredRun> = [(1, stored_run(1))].into_iter().collect();
+        // runs-1.json is a non-empty directory, so the rename that would
+        // replace it with the new temp file fails.
+        fs::remove_file(out.join("runs-1.json")).unwrap();
+        fs::create_dir_all(out.join("runs-1.json").join("occupied")).unwrap();
+
+        let err = write_merged_runs(&out, &cache, &merged).unwrap_err();
+        assert!(err.message.contains("cannot write file"), "{err:?}");
+        for index in 2..=5 {
+            assert!(
+                out.join(format!("runs-{index}.json")).exists(),
+                "runs-{index}.json should not be dropped before every rename lands"
+            );
+        }
     }
 }
