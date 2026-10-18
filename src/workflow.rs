@@ -369,13 +369,37 @@ struct Entry {
     value: Node,
 }
 
+/// Upper bound on the total number of nodes a document may expand to, counting
+/// every node reached through an alias as many times as it is aliased. This
+/// caps "billion laughs" style anchor/alias chains: expanding past the budget
+/// is a normal parse error rather than unbounded cloning.
+const MAX_EXPANDED_NODES: usize = 100_000;
+
 struct Cursor<'a> {
     events: &'a [(Event, Marker)],
     index: usize,
+    expanded: usize,
+}
+
+fn node_size(node: &Node) -> usize {
+    match node {
+        Node::Scalar { .. } => 1,
+        Node::Sequence { items, .. } => 1 + items.iter().map(node_size).sum::<usize>(),
+        Node::Mapping { entries, .. } => {
+            1 + entries
+                .iter()
+                .map(|entry| node_size(&entry.value))
+                .sum::<usize>()
+        }
+    }
 }
 
 fn document_root(events: &[(Event, Marker)]) -> Result<Option<Node>, usize> {
-    let mut cursor = Cursor { events, index: 0 };
+    let mut cursor = Cursor {
+        events,
+        index: 0,
+        expanded: 0,
+    };
     let mut chosen = None;
     while cursor.index < events.len() {
         let is_document = matches!(events[cursor.index].0, Event::DocumentStart);
@@ -422,6 +446,7 @@ impl Cursor<'_> {
         self.index += 1;
         match event {
             Event::Scalar(value, _, anchor, _) => {
+                self.charge(1, line)?;
                 let node = Node::Scalar { value, line };
                 self.store_anchor(anchors, anchor, &node);
                 Ok(node)
@@ -436,7 +461,9 @@ impl Cursor<'_> {
                 if building.contains(&id) {
                     return Err(line);
                 }
-                anchors.get(&id).cloned().ok_or(line)
+                let node = anchors.get(&id).ok_or(line)?;
+                self.charge(node_size(node), line)?;
+                Ok(node.clone())
             }
             _ => Err(line),
         }
@@ -462,6 +489,7 @@ impl Cursor<'_> {
             }
             items.push(self.parse_node(anchors, building, depth + 1)?);
         }
+        self.charge(1, line)?;
         let node = Node::Sequence { line, items };
         self.finish_anchor(anchors, building, anchor, &node);
         Ok(node)
@@ -500,6 +528,7 @@ impl Cursor<'_> {
             }
         }
         let (entries, duplicates) = resolve_merge(raw);
+        self.charge(1, line)?;
         let node = Node::Mapping {
             line,
             entries,
@@ -507,6 +536,15 @@ impl Cursor<'_> {
         };
         self.finish_anchor(anchors, building, anchor, &node);
         Ok(node)
+    }
+
+    fn charge(&mut self, amount: usize, line: usize) -> Result<(), usize> {
+        self.expanded = self.expanded.saturating_add(amount);
+        if self.expanded > MAX_EXPANDED_NODES {
+            Err(line)
+        } else {
+            Ok(())
+        }
     }
 
     fn push_anchor(
@@ -2670,6 +2708,60 @@ jobs:
         assert_eq!(named.jobs[0].display_name.as_deref(), Some("clippy"));
         assert_eq!(named.jobs[0].runs_on.as_ref().unwrap().line, 3);
         assert!(named.jobs[0].has_timeout_minutes);
+    }
+
+    #[test]
+    fn billion_laughs_sequence_aliases_are_a_parse_error() {
+        let text = "a0: &a0 [\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\"]\n\
+a1: &a1 [*a0,*a0,*a0,*a0,*a0,*a0,*a0,*a0,*a0,*a0]\n\
+a2: &a2 [*a1,*a1,*a1,*a1,*a1,*a1,*a1,*a1,*a1,*a1]\n\
+a3: &a3 [*a2,*a2,*a2,*a2,*a2,*a2,*a2,*a2,*a2,*a2]\n\
+a4: &a4 [*a3,*a3,*a3,*a3,*a3,*a3,*a3,*a3,*a3,*a3]\n\
+a5: &a5 [*a4,*a4,*a4,*a4,*a4,*a4,*a4,*a4,*a4,*a4]\n\
+a6: &a6 [*a5,*a5,*a5,*a5,*a5,*a5,*a5,*a5,*a5,*a5]\n\
+a7: &a7 [*a6,*a6,*a6,*a6,*a6,*a6,*a6,*a6,*a6,*a6]\n\
+a8: &a8 [*a7,*a7,*a7,*a7,*a7,*a7,*a7,*a7,*a7,*a7]\n\
+jobs:\n  job1:\n    runs-on: ubuntu-latest\n    env: *a8\n";
+        let err = scan_yaml(Path::new("laughs.yml"), text).expect_err("laughs.yml");
+        assert_eq!(err.path, Path::new("laughs.yml"));
+        assert!(matches!(err.kind, ScanErrorKind::Yaml { .. }), "{err}");
+    }
+
+    #[test]
+    fn billion_laughs_merge_key_aliases_are_a_parse_error() {
+        let mut text =
+            String::from("a0: &a0 [\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\"]\n");
+        for level in 1..=8 {
+            let previous = level - 1;
+            text.push_str(&format!("a{level}: &a{level} ["));
+            for i in 0..10 {
+                if i > 0 {
+                    text.push(',');
+                }
+                text.push_str(&format!("*a{previous}"));
+            }
+            text.push_str("]\n");
+        }
+        text.push_str("jobs:\n  job1:\n    runs-on: ubuntu-latest\n    <<: *a8\n");
+        let err = scan_yaml(Path::new("laughs-merge.yml"), &text).expect_err("laughs-merge.yml");
+        assert_eq!(err.path, Path::new("laughs-merge.yml"));
+        assert!(matches!(err.kind, ScanErrorKind::Yaml { .. }), "{err}");
+    }
+
+    #[test]
+    fn repeated_non_multiplying_alias_reuse_stays_within_budget() {
+        let mut text =
+            String::from("defaults: &defaults\n  runs-on: ubuntu-latest\n  timeout-minutes: 5\n");
+        text.push_str("jobs:\n");
+        for i in 0..500 {
+            text.push_str(&format!("  job{i}:\n    <<: *defaults\n"));
+        }
+        let workflow = must_scan("many-jobs.yml", &text);
+        assert_eq!(workflow.jobs.len(), 500);
+        for job in &workflow.jobs {
+            assert_eq!(job.runs_on.as_ref().unwrap().value, "ubuntu-latest");
+            assert!(job.has_timeout_minutes);
+        }
     }
 
     #[test]
