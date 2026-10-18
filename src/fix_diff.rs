@@ -319,6 +319,17 @@ fn block_extent(lines: &[(&str, bool)], key_idx: usize) -> usize {
     end
 }
 
+/// `path` with `/` separators, as `git apply` expects in `--- a/`/`+++ b/`
+/// headers. On Windows a `\` in those headers is an invalid path for git.
+fn diff_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '\\' {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_diff(
     path: &Path,
@@ -332,7 +343,7 @@ fn build_diff(
     let ctx_end = (end + CONTEXT).min(lines.len());
     let old_count = ctx_end - ctx_start;
     let new_count = (start - ctx_start) + new_lines.len() + (ctx_end - end);
-    let display = path.display();
+    let display = diff_path(path);
     let mut out = String::new();
     let _ = writeln!(out, "--- a/{display}");
     let _ = writeln!(out, "+++ b/{display}");
@@ -408,7 +419,20 @@ mod tests {
         let diff = render(&found, None).expect("diff");
         assert!(diff.contains("-    runs-on: macos-latest\n"), "{diff}");
         assert!(diff.contains("+    runs-on: ubuntu-latest\n"), "{diff}");
-        assert!(diff.starts_with(&format!("--- a/{}\n", path.display())));
+        assert!(diff.starts_with(&format!("--- a/{}\n", diff_path(&path))));
+    }
+
+    #[test]
+    fn diff_headers_use_forward_slashes() {
+        assert_eq!(
+            diff_path(Path::new(".github/workflows/ci.yml")),
+            ".github/workflows/ci.yml"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            diff_path(Path::new(".github\\workflows\\ci.yml")),
+            ".github/workflows/ci.yml"
+        );
     }
 
     #[test]
@@ -586,7 +610,7 @@ mod tests {
         item.workflow_path = Some(".github/workflows/lint.yml".to_string());
         let diff = render(&[item], Some(&workflows)).expect("diff");
         assert!(
-            diff.starts_with(&format!("--- a/{}\n", caller_path.display())),
+            diff.starts_with(&format!("--- a/{}\n", diff_path(&caller_path))),
             "{diff}"
         );
         assert!(diff.contains("+    runs-on: ubuntu-latest\n"), "{diff}");
