@@ -4495,6 +4495,16 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
         (workflows, runs)
     }
 
+    /// Whether `dir` tells `a.txt` and `A.TXT` apart.
+    fn filesystem_is_case_sensitive(dir: &Path) -> bool {
+        std::fs::create_dir_all(dir).unwrap();
+        let probe = dir.join("case-probe.tmp");
+        std::fs::write(&probe, "").unwrap();
+        let sensitive = !dir.join("CASE-PROBE.TMP").exists();
+        std::fs::remove_file(&probe).unwrap();
+        sensitive
+    }
+
     fn path_from_slash(relative: &str) -> PathBuf {
         relative
             .split('/')
@@ -4834,39 +4844,44 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
             f1[0].path.display()
         );
 
+        // Two cache files that differ only in case cannot both exist on a
+        // case-insensitive filesystem (default on macOS and Windows), so the
+        // exact-spelling-wins case only runs where they can.
         let (dir, runs) = b4b_dirs("hit-exact-wins");
-        write_workflow(
-            &dir,
-            "caller.yml",
-            "name: Caller\non: push\njobs:\n  call-lint:\n    uses: Acme/Tools/.GitHub/Workflows/Lint.YML@V1\n",
-            false,
-            false,
-        );
-        write_cache(
-            &runs,
-            "Acme/Tools/.GitHub/Workflows/Lint.YML@V1",
-            LINT_CALLEE,
-            false,
-            false,
-        );
-        write_cache(
-            &runs,
-            "acme/tools/.github/workflows/lint.yml@v1",
-            "name: Lint\non: workflow_call\njobs:\n  fmt:\n    runs-on: windows-latest\n    timeout-minutes: 10\n    steps:\n      - run: cargo fmt --check\n",
-            false,
-            false,
-        );
-        let (_, found) = load_cached_pair(&dir, Some(&runs));
-        let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
-        assert_eq!(f1.len(), 1, "{found:?}");
-        assert_eq!(f1[0].message, "lint on macOS");
-        assert!(
-            f1[0]
-                .path
-                .ends_with(path_from_slash("Acme/Tools/.GitHub/Workflows/Lint.YML@V1")),
-            "{}",
-            f1[0].path.display()
-        );
+        if filesystem_is_case_sensitive(&runs) {
+            write_workflow(
+                &dir,
+                "caller.yml",
+                "name: Caller\non: push\njobs:\n  call-lint:\n    uses: Acme/Tools/.GitHub/Workflows/Lint.YML@V1\n",
+                false,
+                false,
+            );
+            write_cache(
+                &runs,
+                "Acme/Tools/.GitHub/Workflows/Lint.YML@V1",
+                LINT_CALLEE,
+                false,
+                false,
+            );
+            write_cache(
+                &runs,
+                "acme/tools/.github/workflows/lint.yml@v1",
+                "name: Lint\non: workflow_call\njobs:\n  fmt:\n    runs-on: windows-latest\n    timeout-minutes: 10\n    steps:\n      - run: cargo fmt --check\n",
+                false,
+                false,
+            );
+            let (_, found) = load_cached_pair(&dir, Some(&runs));
+            let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
+            assert_eq!(f1.len(), 1, "{found:?}");
+            assert_eq!(f1[0].message, "lint on macOS");
+            assert!(
+                f1[0]
+                    .path
+                    .ends_with(path_from_slash("Acme/Tools/.GitHub/Workflows/Lint.YML@V1")),
+                "{}",
+                f1[0].path.display()
+            );
+        }
 
         let bodies = [
             (
@@ -6282,7 +6297,7 @@ runs:
             &found,
             &[usage(".github/workflows/caller.yml", "0.06", "0.006")],
         );
-        // The report prints the OS path, so on Windows the separator is `\\`.
+        // The report prints the OS path, so on Windows the separator is `\`.
         let needle = format!(
             "{}:5: lint on macOS",
             path_from_slash("inner/action.yml").display()
