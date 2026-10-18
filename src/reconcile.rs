@@ -512,8 +512,81 @@ struct YamlSlot {
     name: String,
     file: String,
     line: usize,
+    job_line: usize,
     sku: String,
+    cells: u64,
     weight: i128,
+}
+
+/// One runner share of a workflow, after the CSV minutes and net are split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunnerPortion {
+    pub file: String,
+    /// Line of `runs-on`.
+    pub runs_on_line: usize,
+    /// Line of the job key.
+    pub job_line: usize,
+    pub sku: String,
+    pub cells: u64,
+    pub minutes: Micros,
+    pub net: Micros,
+}
+
+/// YAML jobs for `workflow`, with that workflow's CSV minutes and net attached.
+///
+/// Jobs that share a SKU split both figures by matrix cells times the table
+/// rate, the same weights as `yaml_weight`. A job with no CSV row keeps zero
+/// minutes and zero net; its cell count stays, so a stuck-run price can still
+/// use the table rate.
+pub(crate) fn runner_portions(
+    workflow: &WorkflowTotal,
+    scanned: &[Workflow],
+) -> Vec<RunnerPortion> {
+    let slots = yaml_slots(scanned, &workflow.workflow_path);
+    let mut portions: Vec<RunnerPortion> = slots
+        .iter()
+        .map(|slot| RunnerPortion {
+            file: slot.file.clone(),
+            runs_on_line: slot.line,
+            job_line: slot.job_line,
+            sku: slot.sku.clone(),
+            cells: slot.cells,
+            minutes: Micros::ZERO,
+            net: Micros::ZERO,
+        })
+        .collect();
+    for sku in &workflow.skus {
+        let indexes: Vec<usize> = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.sku.eq_ignore_ascii_case(&sku.sku))
+            .map(|(index, _)| index)
+            .collect();
+        if indexes.is_empty() {
+            continue;
+        }
+        let parts: Vec<Part> = indexes
+            .iter()
+            .map(|index| {
+                let slot = &slots[*index];
+                Part {
+                    weight: slot.weight,
+                    rank: slot.weight,
+                    tie: i64::try_from(slot.line).unwrap_or(i64::MAX),
+                }
+            })
+            .collect();
+        let minute_shares = allocate(sku.minutes.0, &parts);
+        let net_shares = allocate(sku.net.0, &parts);
+        for (index, (minutes, net)) in indexes
+            .iter()
+            .zip(minute_shares.into_iter().zip(net_shares))
+        {
+            portions[*index].minutes = Micros(minutes);
+            portions[*index].net = Micros(net);
+        }
+    }
+    portions
 }
 
 fn yaml_slots(scanned: &[Workflow], workflow_path: &str) -> Vec<YamlSlot> {
@@ -623,7 +696,9 @@ fn yaml_slot(
         name: job.name.clone(),
         file: file.to_string(),
         line,
+        job_line: job.line,
         sku: sku.to_string(),
+        cells,
         weight: i128::from(cells).saturating_mul(i128::from(rate.0)).max(0),
     }
 }

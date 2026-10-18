@@ -23,21 +23,27 @@
       "findings": [
         {
           "file": "samples/.github/workflows/lint.yml",
-          "id": "F3",
-          "line": 2,
-          "message": "pull_request without concurrency cancel-in-progress"
+          "id": "F1",
+          "line": 8,
+          "message": "lint on macOS",
+          "method": "linux_rate",
+          "savings": "207.872000"
         },
         {
           "file": "samples/.github/workflows/lint.yml",
           "id": "F2",
           "line": 7,
-          "message": "default timeout is 360 minutes"
+          "message": "default timeout is 360 minutes",
+          "method": "stuck_run",
+          "savings": "22.320000"
         },
         {
           "file": "samples/.github/workflows/lint.yml",
-          "id": "F1",
-          "line": 8,
-          "message": "lint on macOS"
+          "id": "F3",
+          "line": 2,
+          "message": "pull_request without concurrency cancel-in-progress",
+          "method": "overlap",
+          "savings": "0.000000"
         }
       ],
       "gross": "230.144000",
@@ -198,7 +204,9 @@
           "file": "samples/.github/workflows/docs.yml",
           "id": "F2",
           "line": 4,
-          "message": "default timeout is 360 minutes"
+          "message": "default timeout is 360 minutes",
+          "method": "stuck_run",
+          "savings": "2.160000"
         }
       ],
       "gross": "2.112000",

@@ -10,6 +10,7 @@ mod rank;
 mod reconcile;
 mod report;
 mod rerun;
+mod savings;
 mod usage;
 mod workflow;
 
@@ -154,12 +155,16 @@ fn report(
         matrix_cost::supersede(items, &measured);
     }
     let found = findings::append(found, measured);
-    let found = findings::append(
+    let mut found = findings::append(
         found,
         api.as_ref()
             .map(|data| overlap::findings(data, ranked, &scanned))
             .unwrap_or_default(),
     );
+    if let Some(items) = found.as_mut() {
+        let public_repo = api.as_ref().is_some_and(|data| data.public);
+        savings::apply(items, ranked, &scanned, public_repo);
+    }
     let text = if json {
         match api.as_ref() {
             Some(data) => report::render_json_with_runs(

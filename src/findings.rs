@@ -65,6 +65,38 @@ impl FindingKind {
     }
 }
 
+/// How `savings` was priced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SavingsMethod {
+    /// Paid minutes minus the same minutes at the Linux rate.
+    LinuxRate,
+    /// One stuck run: 360 minutes times the runner rate times the matrix size.
+    StuckRun,
+    /// Minutes cancel-in-progress would have stopped billing.
+    Overlap,
+    /// Billed minutes above the raw runtime, at the runner rate.
+    Rounding,
+    /// Extra execution of a job inside one workflow run.
+    Rerun,
+    /// The finding does not change the bill. Savings are zero.
+    #[default]
+    Recorded,
+}
+
+impl SavingsMethod {
+    /// Stable name stored on the finding and in JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LinuxRate => "linux_rate",
+            Self::StuckRun => "stuck_run",
+            Self::Overlap => "overlap",
+            Self::Rounding => "rounding",
+            Self::Rerun => "rerun",
+            Self::Recorded => "recorded",
+        }
+    }
+}
+
 /// One cause, pointing at a file line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
@@ -81,6 +113,48 @@ pub struct Finding {
     /// (`.github/workflows/<file>`) and leave `repository` empty. `path` and
     /// `line` stay on the callee file.
     pub workflow_path: Option<String>,
+    /// USD this finding would avoid.
+    pub savings: money::Micros,
+    /// Rule that produced `savings`.
+    pub method: SavingsMethod,
+    /// `runs-on` line when `line` points at an action step instead.
+    pub(crate) anchor: Option<usize>,
+}
+
+impl Finding {
+    /// A finding with zero savings until [`crate::savings::apply`] prices it.
+    pub(crate) fn record(
+        path: impl Into<PathBuf>,
+        line: usize,
+        kind: FindingKind,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            line,
+            kind,
+            message: message.into(),
+            repository: None,
+            workflow_path: None,
+            savings: money::Micros::ZERO,
+            method: SavingsMethod::Recorded,
+            anchor: None,
+        }
+    }
+
+    pub(crate) fn placed(
+        path: impl Into<PathBuf>,
+        line: usize,
+        kind: FindingKind,
+        message: impl Into<String>,
+        repository: Option<String>,
+        workflow_path: Option<String>,
+    ) -> Self {
+        let mut finding = Self::record(path, line, kind, message);
+        finding.repository = repository;
+        finding.workflow_path = workflow_path;
+        finding
+    }
 }
 
 const LINT_TOOLS: [&str; 5] = ["lint", "fmt", "clippy", "eslint", "prettier"];
@@ -547,14 +621,14 @@ pub fn invoice_findings(path: &Path, rows: &[UsageRow]) -> Vec<Finding> {
         let Some(message) = mismatch_message(row) else {
             continue;
         };
-        found.push(Finding {
-            path: path.to_path_buf(),
-            line: usize::try_from(row.line).unwrap_or(usize::MAX),
-            kind: FindingKind::InvoiceMismatch,
+        found.push(Finding::placed(
+            path,
+            usize::try_from(row.line).unwrap_or(usize::MAX),
+            FindingKind::InvoiceMismatch,
             message,
-            repository: Some(row.repository.clone()),
-            workflow_path: Some(row.workflow_path.clone()),
-        });
+            Some(row.repository.clone()),
+            Some(row.workflow_path.clone()),
+        ));
     }
     found
 }
@@ -764,6 +838,8 @@ fn note_action_runner(
     if self_hosted(&runs_on.labels) {
         return;
     }
+    let anchor = runs_on.line;
+    let start = found.len();
     let (macos, windows) = label_set_os(&runs_on.labels);
     if macos {
         push_action(
@@ -785,29 +861,33 @@ fn note_action_runner(
             "lint on Windows",
         );
     }
-    let Some(matrix) = &job.matrix else {
-        return;
-    };
-    for hit in matrix_runner_hits(runs_on, matrix) {
-        if hit.macos {
-            push_action(
-                found,
-                workflow,
-                action_path,
-                line,
-                FindingKind::LintOnRunner,
-                &axis_lint_message("macOS", runs_on.line, &hit.axis, hit.line),
-            );
+    if let Some(matrix) = &job.matrix {
+        for hit in matrix_runner_hits(runs_on, matrix) {
+            if hit.macos {
+                push_action(
+                    found,
+                    workflow,
+                    action_path,
+                    line,
+                    FindingKind::LintOnRunner,
+                    &axis_lint_message("macOS", runs_on.line, &hit.axis, hit.line),
+                );
+            }
+            if hit.windows {
+                push_action(
+                    found,
+                    workflow,
+                    action_path,
+                    line,
+                    FindingKind::LintOnRunner,
+                    &axis_lint_message("Windows", runs_on.line, &hit.axis, hit.line),
+                );
+            }
         }
-        if hit.windows {
-            push_action(
-                found,
-                workflow,
-                action_path,
-                line,
-                FindingKind::LintOnRunner,
-                &axis_lint_message("Windows", runs_on.line, &hit.axis, hit.line),
-            );
+    }
+    for item in &mut found[start..] {
+        if item.kind == FindingKind::LintOnRunner {
+            item.anchor = Some(anchor);
         }
     }
 }
@@ -1139,14 +1219,14 @@ fn push_at(
     message: &str,
     workflow_path: Option<String>,
 ) {
-    found.push(Finding {
-        path: path.to_path_buf(),
+    found.push(Finding::placed(
+        path,
         line,
         kind,
-        message: message.to_string(),
-        repository: None,
+        message,
+        None,
         workflow_path,
-    });
+    ));
 }
 
 #[cfg(test)]

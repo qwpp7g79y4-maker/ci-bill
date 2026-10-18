@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use crate::api::{parse_github_time, workflow_paths_match, ApiData, Job as ApiJob};
-use crate::findings::{Finding, FindingKind};
+use crate::findings::{Finding, FindingKind, SavingsMethod};
 use crate::job_cost::bill_job;
 use crate::money::Micros;
 use crate::rank::WorkflowTotal;
@@ -177,6 +177,9 @@ impl Acc {
     fn into_finding(self) -> Finding {
         let runs = self.runs.len();
         let groups = ordered_groups(&self.groups);
+        let savings = groups.iter().fold(Micros::ZERO, |total, group| {
+            Micros(total.0.saturating_add(group.loss_usd().0))
+        });
         Finding {
             path: self.path,
             line: self.line,
@@ -184,6 +187,9 @@ impl Acc {
             message: message(self.n, runs, &groups),
             repository: self.repository,
             workflow_path: Some(self.workflow_path),
+            savings,
+            method: SavingsMethod::Rounding,
+            anchor: None,
         }
     }
 }
@@ -823,6 +829,8 @@ jobs:
         assert_eq!(found[0].line, matrix_line(YAML));
         assert_ne!(found[0].line, job_line(YAML));
         assert_eq!(found[0].kind.code(), "F4");
+        assert_eq!(found[0].savings, Micros::parse("0.030").unwrap());
+        assert_eq!(found[0].method, crate::findings::SavingsMethod::Rounding);
         assert_eq!(found[0].workflow_path.as_deref(), Some(PATH));
         assert_eq!(found[0].repository.as_deref(), Some(REPO));
         assert!(found[0].path.ends_with("ci.yml"));

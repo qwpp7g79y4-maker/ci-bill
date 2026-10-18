@@ -130,7 +130,7 @@ fn render_report(
             let _ = writeln!(out, "{line}");
         }
         for finding in found {
-            let _ = writeln!(out, "  {}", finding_text(finding));
+            write_finding(&mut out, finding, "  ");
         }
     }
 
@@ -141,7 +141,7 @@ fn render_report(
         let _ = writeln!(out);
         let _ = writeln!(out, "Workflows without usage");
         for finding in &attached.unattached {
-            let _ = writeln!(out, "{}", finding_text(finding));
+            write_finding(&mut out, finding, "");
         }
     }
     if let Some(api) = api {
@@ -488,6 +488,8 @@ fn finding_json(finding: &Finding) -> serde_json::Value {
         "file": finding.path.display().to_string(),
         "line": finding.line,
         "message": finding.message,
+        "savings": finding.savings.to_decimal_string(),
+        "method": finding.method.as_str(),
     })
 }
 
@@ -499,6 +501,16 @@ fn finding_text(finding: &Finding) -> String {
         finding.line,
         finding.message
     )
+}
+
+fn write_finding(out: &mut String, finding: &Finding, indent: &str) {
+    let _ = writeln!(out, "{indent}{}", finding_text(finding));
+    let _ = writeln!(
+        out,
+        "{indent}  savings {} USD ({})",
+        finding.savings.format_cents(),
+        finding.method.as_str()
+    );
 }
 
 /// How many ranked workflows the table shows. `None` shows every workflow.
@@ -549,7 +561,7 @@ fn append_outside(
         }
         let _ = writeln!(out, "{}", workflow_label(workflow));
         for finding in group {
-            let _ = writeln!(out, "  {}", finding_text(finding));
+            write_finding(out, finding, "  ");
         }
     }
 }
@@ -972,7 +984,6 @@ mod tests {
     use crate::findings::{Finding, FindingKind};
     use crate::money::Micros;
     use crate::rank::{Bill, SkuTotal, WorkflowTotal};
-    use std::path::PathBuf;
 
     fn usd(text: &str) -> Micros {
         Micros::parse(text).unwrap()
@@ -1010,14 +1021,7 @@ mod tests {
     }
 
     fn finding(path: &str, line: usize, kind: FindingKind, message: &str) -> Finding {
-        Finding {
-            path: PathBuf::from(path),
-            line,
-            kind,
-            message: message.to_string(),
-            repository: None,
-            workflow_path: None,
-        }
+        Finding::record(path, line, kind, message)
     }
 
     #[test]
@@ -1166,14 +1170,14 @@ mod tests {
                 }],
             },
         ];
-        let findings = vec![Finding {
-            path: PathBuf::from("usage.csv"),
-            line: 2,
-            kind: FindingKind::InvoiceMismatch,
-            message: "invoice row mismatch: sku \"actions_macos\", date \"2026-09-01\", gross 7.316000 != quantity * applied_cost_per_quantity 9.440000".to_string(),
-            repository: Some("example-org/alpha".to_string()),
-            workflow_path: Some(".github/workflows/ci.yml".to_string()),
-        }];
+        let findings = vec![Finding::placed(
+            "usage.csv",
+            2,
+            FindingKind::InvoiceMismatch,
+            "invoice row mismatch: sku \"actions_macos\", date \"2026-09-01\", gross 7.316000 != quantity * applied_cost_per_quantity 9.440000",
+            Some("example-org/alpha".to_string()),
+            Some(".github/workflows/ci.yml".to_string()),
+        )];
         let mut totals = bill("14.632", "236");
         totals.repositories = vec![
             "example-org/alpha".to_string(),
@@ -1807,14 +1811,14 @@ mod tests {
             named("example-org/alpha", ".github/workflows/lint.yml", "10"),
             named("example-org/zeta", ".github/workflows/ci.yml", "2.112"),
         ];
-        let findings = vec![Finding {
-            path: PathBuf::from("usage.csv"),
-            line: 3,
-            kind: FindingKind::InvoiceMismatch,
-            message: "invoice row mismatch: sku \"actions_linux\", date \"2026-09-02\", gross 2.112000 != quantity * applied_cost_per_quantity 9.000000".to_string(),
-            repository: Some("example-org/zeta".to_string()),
-            workflow_path: Some(".github/workflows/ci.yml".to_string()),
-        }];
+        let findings = vec![Finding::placed(
+            "usage.csv",
+            3,
+            FindingKind::InvoiceMismatch,
+            "invoice row mismatch: sku \"actions_linux\", date \"2026-09-02\", gross 2.112000 != quantity * applied_cost_per_quantity 9.000000",
+            Some("example-org/zeta".to_string()),
+            Some(".github/workflows/ci.yml".to_string()),
+        )];
         let text = render(&workflows, &bill("12.112", "2"), Some(&findings), Some(1));
         assert!(text.contains("1 more workflow (2.11 USD)\n"), "{text}");
         assert!(

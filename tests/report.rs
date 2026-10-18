@@ -138,6 +138,8 @@ fn sample_json_matches_snapshot_and_fields() {
             assert!(finding["file"].is_string());
             assert!(finding["line"].is_number());
             assert!(finding["message"].is_string());
+            assert_money(finding.get("savings").expect("savings"));
+            assert!(finding["method"].is_string());
         }
     }
     assert_eq!(net_sum, total_net);
@@ -149,25 +151,27 @@ fn sample_json_matches_snapshot_and_fields() {
     assert_eq!(lint["skus"].as_array().unwrap().len(), 1);
     let lint_findings = lint["findings"].as_array().unwrap();
     assert_eq!(lint_findings.len(), 3);
-    assert_eq!(lint_findings[0]["id"], "F3");
-    assert_eq!(lint_findings[0]["line"], 2);
+    assert_eq!(lint_findings[0]["id"], "F1");
+    assert_eq!(lint_findings[0]["line"], 8);
+    assert_eq!(lint_findings[0]["message"], "lint on macOS");
     assert_eq!(
         lint_findings[0]["file"],
         "samples/.github/workflows/lint.yml"
     );
-    assert_eq!(
-        lint_findings[0]["message"],
-        "pull_request without concurrency cancel-in-progress"
-    );
+    assert_eq!(lint_findings[0]["savings"], "207.872000");
+    assert_eq!(lint_findings[0]["method"], "linux_rate");
     assert_eq!(lint_findings[1]["id"], "F2");
     assert_eq!(lint_findings[1]["line"], 7);
-    assert_eq!(lint_findings[2]["id"], "F1");
-    assert_eq!(lint_findings[2]["line"], 8);
-    assert_eq!(lint_findings[2]["message"], "lint on macOS");
+    assert_eq!(lint_findings[1]["savings"], "22.320000");
+    assert_eq!(lint_findings[1]["method"], "stuck_run");
+    assert_eq!(lint_findings[2]["id"], "F3");
+    assert_eq!(lint_findings[2]["line"], 2);
     assert_eq!(
-        lint_findings[2]["file"],
-        "samples/.github/workflows/lint.yml"
+        lint_findings[2]["message"],
+        "pull_request without concurrency cancel-in-progress"
     );
+    assert_eq!(lint_findings[2]["savings"], "0.000000");
+    assert_eq!(lint_findings[2]["method"], "overlap");
     assert_eq!(
         lint["steps"],
         serde_json::json!([
@@ -218,6 +222,8 @@ fn sample_json_matches_snapshot_and_fields() {
         docs_findings[0]["file"],
         "samples/.github/workflows/docs.yml"
     );
+    assert_eq!(docs_findings[0]["savings"], "2.160000");
+    assert_eq!(docs_findings[0]["method"], "stuck_run");
     assert_eq!(
         docs_findings[0]["message"],
         "default timeout is 360 minutes"

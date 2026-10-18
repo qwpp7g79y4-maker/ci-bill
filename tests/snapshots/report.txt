@@ -11,9 +11,12 @@ example-org/sample-app .github/workflows/lint.yml     230.14  230.14      0.00  
   actions_macos                                       230.14  230.14      0.00     3712        
   measured 0.00  invoice 230.14  difference 230.14
   lint  samples/.github/workflows/lint.yml:8 = 230.14
-  F3 samples/.github/workflows/lint.yml:2: pull_request without concurrency cancel-in-progress
-  F2 samples/.github/workflows/lint.yml:7: default timeout is 360 minutes
   F1 samples/.github/workflows/lint.yml:8: lint on macOS
+    savings 207.87 USD (linux_rate)
+  F2 samples/.github/workflows/lint.yml:7: default timeout is 360 minutes
+    savings 22.32 USD (stuck_run)
+  F3 samples/.github/workflows/lint.yml:2: pull_request without concurrency cancel-in-progress
+    savings 0.00 USD (overlap)
 example-org/sample-app .github/workflows/ci.yml        44.23   44.23      0.00     7372  15.56%
   actions_linux                                        44.23   44.23      0.00     7372        
   measured 0.00  invoice 44.23  difference 44.23
@@ -27,6 +30,7 @@ example-org/sample-app .github/workflows/docs.yml       2.11    2.11      0.00  
   measured 0.00  invoice 2.11  difference 2.11
   docs  samples/.github/workflows/docs.yml:5 = 2.11
   F2 samples/.github/workflows/docs.yml:4: default timeout is 360 minutes
+    savings 2.16 USD (stuck_run)
 example-org/sample-app (no workflow)                    0.00    0.01      0.01        0   0.00%
   actions_storage                                       0.00    0.01      0.01        0        
   measured 0.00  invoice 0.00  difference 0.00

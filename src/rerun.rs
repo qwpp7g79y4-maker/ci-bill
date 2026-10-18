@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::api::{parse_github_time, workflow_paths_match, ApiData, Job as ApiJob};
-use crate::findings::{Finding, FindingKind};
+use crate::findings::{Finding, FindingKind, SavingsMethod};
 use crate::job_cost::bill_job;
 use crate::money::Micros;
 use crate::rank::WorkflowTotal;
@@ -54,6 +54,7 @@ pub fn findings(api: &ApiData, workflows: &[WorkflowTotal], scanned: &[Workflow]
             &summary_message(total, count),
             bucket.repository.clone(),
             &bucket.workflow_path,
+            total,
         ));
         for extra in bucket.extras {
             found.push(make_finding(
@@ -62,6 +63,7 @@ pub fn findings(api: &ApiData, workflows: &[WorkflowTotal], scanned: &[Workflow]
                 &job_message(&extra.name, extra.job_id, extra.attempt, extra.cost),
                 extra.repository,
                 &extra.workflow_path,
+                extra.cost,
             ));
         }
     }
@@ -414,6 +416,7 @@ fn make_finding(
     message: &str,
     repository: Option<String>,
     workflow_path: &str,
+    cost: Micros,
 ) -> Finding {
     Finding {
         path: path.to_path_buf(),
@@ -422,6 +425,9 @@ fn make_finding(
         message: message.to_string(),
         repository,
         workflow_path: Some(workflow_path.to_string()),
+        savings: cost,
+        method: SavingsMethod::Rerun,
+        anchor: None,
     }
 }
 
@@ -581,7 +587,11 @@ jobs:
         assert_eq!(test_hit.line, job_line(YAML, "test"));
         assert!(test_hit.path.ends_with("ci.yml"));
         assert_eq!(test_hit.kind.code(), "F5");
+        assert_eq!(test_hit.savings, Micros::parse("0.060").unwrap());
+        assert_eq!(test_hit.method, crate::findings::SavingsMethod::Rerun);
         let summary = found.iter().find(|item| item.line == 1).unwrap();
+        assert_eq!(summary.savings, Micros::parse("0.060").unwrap());
+        assert_eq!(summary.method, crate::findings::SavingsMethod::Rerun);
         assert_eq!(summary.workflow_path.as_deref(), Some(PATH));
         assert_eq!(summary.repository.as_deref(), Some(REPO));
     }

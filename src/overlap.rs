@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 
 use crate::api::{parse_github_time, workflow_paths_match, ApiData, Job as ApiJob, WorkflowRun};
-use crate::findings::{Finding, FindingKind};
+use crate::findings::{Finding, FindingKind, SavingsMethod};
 use crate::job_cost::{bill_job, billed_minutes, minutes_if_cancelled_at};
 use crate::money::{div_half_away, Micros};
 use crate::rank::WorkflowTotal;
@@ -114,6 +114,9 @@ impl Bucket {
             message: saving_message(self.usd, self.minutes),
             repository: self.repository,
             workflow_path: Some(self.workflow_path),
+            savings: self.usd,
+            method: SavingsMethod::Overlap,
+            anchor: None,
         }
     }
 }
@@ -562,6 +565,8 @@ jobs:
         let found = findings(&canonical(), &[], &scanned(ON_YAML));
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].kind.code(), "F3$");
+        assert_eq!(found[0].savings, Micros::parse("0.012").unwrap());
+        assert_eq!(found[0].method, crate::findings::SavingsMethod::Overlap);
         assert_eq!(found[0].line, 1);
         assert_eq!(found[0].message, EXACT);
         assert!(
