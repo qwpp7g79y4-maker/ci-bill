@@ -21,6 +21,8 @@ pub struct Workflow {
     /// Top-level `concurrency.cancel-in-progress` cancels in-progress runs.
     /// Literal `true` and `github.event_name == 'pull_request'` both count.
     pub cancel_in_progress: bool,
+    /// Line of the top-level `concurrency:` key. The key match ignores ASCII case.
+    pub concurrency_line: Option<usize>,
     pub jobs: Vec<Job>,
     /// Repeated mapping keys, in document order. The later value won.
     pub duplicate_keys: Vec<DuplicateKey>,
@@ -44,6 +46,8 @@ pub struct Job {
     pub matrix: Option<Matrix>,
     /// Job-level `concurrency.cancel-in-progress` cancels in-progress runs.
     pub cancel_in_progress: bool,
+    /// Line of this job's `concurrency:` key. The key match ignores ASCII case.
+    pub concurrency_line: Option<usize>,
     /// `uses:` calling a local or remote reusable workflow.
     pub uses: Option<ReusableCall>,
     /// Job-level `uses:` that is not a reusable workflow call.
@@ -654,6 +658,7 @@ fn workflow_from(path: &Path, root: Option<&Node>) -> Workflow {
         has_pull_request: false,
         has_pull_request_target: false,
         cancel_in_progress: false,
+        concurrency_line: None,
         jobs: Vec::new(),
         duplicate_keys: dedupe_duplicates(duplicate_keys),
     };
@@ -661,11 +666,12 @@ fn workflow_from(path: &Path, root: Option<&Node>) -> Workflow {
         return workflow;
     };
     for item in entries {
-        match item.key.as_str() {
-            "on" => note_on(&mut workflow, item),
-            "concurrency" => note_concurrency(&mut workflow, &item.value),
-            "jobs" => note_jobs(&mut workflow, &item.value),
-            _ => {}
+        if item.key == "on" {
+            note_on(&mut workflow, item);
+        } else if item.key.eq_ignore_ascii_case("concurrency") {
+            note_concurrency(&mut workflow, item.line, &item.value);
+        } else if item.key == "jobs" {
+            note_jobs(&mut workflow, &item.value);
         }
     }
     workflow
@@ -695,10 +701,9 @@ fn has_event(node: &Node, event: &str) -> bool {
     }
 }
 
-fn note_concurrency(workflow: &mut Workflow, node: &Node) {
-    if concurrency_enabled(node) {
-        workflow.cancel_in_progress = true;
-    }
+fn note_concurrency(workflow: &mut Workflow, line: usize, node: &Node) {
+    workflow.concurrency_line = Some(line);
+    workflow.cancel_in_progress = concurrency_enabled(node);
 }
 
 fn concurrency_enabled(node: &Node) -> bool {
@@ -876,6 +881,7 @@ fn note_jobs(workflow: &mut Workflow, node: &Node) {
             steps: Vec::new(),
             matrix: None,
             cancel_in_progress: false,
+            concurrency_line: None,
             uses: None,
             invalid_uses: None,
         };
@@ -917,7 +923,12 @@ fn fill_job(job: &mut Job, entries: &[Entry]) {
     if let Some(item) = entry(entries, "strategy") {
         job.matrix = matrix_from(&item.value);
     }
-    if let Some(item) = entry(entries, "concurrency") {
+    if let Some(item) = entries
+        .iter()
+        .rev()
+        .find(|item| item.key.eq_ignore_ascii_case("concurrency"))
+    {
+        job.concurrency_line = Some(item.line);
         job.cancel_in_progress = concurrency_enabled(&item.value);
     }
     if let Some(item) = entry(entries, "uses") {

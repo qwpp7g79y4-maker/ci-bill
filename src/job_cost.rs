@@ -113,6 +113,37 @@ fn elapsed_nanos(job: &Job) -> Option<i128> {
     Some(end.saturating_sub(start))
 }
 
+/// Billed minutes for `job`, before the inherited-copy rule.
+pub(crate) fn billed_minutes(job: &Job) -> u64 {
+    job_timing(job).minutes
+}
+
+/// Minutes `job` would still bill if it had been cancelled at `at`.
+///
+/// `at` is nanoseconds since the Unix epoch. A job that finished at or before
+/// `at` keeps every minute it billed. A job that had not started bills nothing.
+/// A job that was in progress bills the cancelled-job minutes from its start
+/// through `at` (any partial minute rounds up, and a zero-length cancel bills
+/// nothing).
+pub(crate) fn minutes_if_cancelled_at(job: &Job, at: i128) -> u64 {
+    if !job.counts() || conclusion_is(job, "skipped") {
+        return billed_minutes(job);
+    }
+    let Some(end) = job.completed_at.as_deref().and_then(parse_github_time) else {
+        return billed_minutes(job);
+    };
+    if end <= at {
+        return billed_minutes(job);
+    }
+    let Some(start) = job.started_at.as_deref().and_then(parse_github_time) else {
+        return 0;
+    };
+    if at <= start {
+        return 0;
+    }
+    ceil_minutes(at.saturating_sub(start))
+}
+
 /// Whole minutes, rounding any partial minute up. A non-positive interval is 0.
 fn ceil_minutes(elapsed_ns: i128) -> u64 {
     if elapsed_ns <= 0 {
@@ -161,6 +192,8 @@ mod tests {
                 event: "push".to_string(),
                 conclusion: Some("success".to_string()),
                 run_started_at: Some("2026-01-01T00:00:00Z".to_string()),
+                head_branch: None,
+                pull_requests: Vec::new(),
             }],
             jobs: vec![job.clone()],
         };
@@ -627,6 +660,8 @@ mod tests {
                 event: "push".to_string(),
                 conclusion: Some("success".to_string()),
                 run_started_at: Some("2026-04-01T10:00:00Z".to_string()),
+                head_branch: None,
+                pull_requests: Vec::new(),
             }],
             jobs: vec![earlier.clone(), copied.clone()],
         };

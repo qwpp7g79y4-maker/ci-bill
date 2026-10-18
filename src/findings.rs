@@ -38,6 +38,9 @@ pub enum FindingKind {
     ActionCycle,
     /// Extra execution of the same job inside one workflow run.
     RerunWaste,
+    /// Minutes an earlier run still billed after a later run of the same
+    /// workflow had started on the same branch or pull request.
+    OverlapSavings,
 }
 
 impl FindingKind {
@@ -57,6 +60,7 @@ impl FindingKind {
             Self::ActionNotFound => "F12",
             Self::ActionCycle => "F13",
             Self::RerunWaste => "F5",
+            Self::OverlapSavings => "F3$",
         }
     }
 }

@@ -1363,6 +1363,8 @@ mod tests {
                     event: "pull_request".to_string(),
                     conclusion: None,
                     run_started_at: Some("2026-03-02T11:00:00Z".to_string()),
+                    head_branch: None,
+                    pull_requests: Vec::new(),
                 },
                 WorkflowRun {
                     id: 1001,
@@ -1373,6 +1375,8 @@ mod tests {
                     event: "push".to_string(),
                     conclusion: Some("success".to_string()),
                     run_started_at: Some("2026-03-01T10:00:00Z".to_string()),
+                    head_branch: None,
+                    pull_requests: Vec::new(),
                 },
             ],
             jobs: vec![
@@ -2073,6 +2077,8 @@ mod tests {
                 event: "push".to_string(),
                 conclusion: Some("success".to_string()),
                 run_started_at: Some("2026-04-01T12:00:00Z".to_string()),
+                head_branch: None,
+                pull_requests: Vec::new(),
             }],
             jobs: vec![
                 sample_job(

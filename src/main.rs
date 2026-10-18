@@ -4,6 +4,7 @@ mod findings;
 mod job_cost;
 mod matrix_cost;
 mod money;
+mod overlap;
 mod prices;
 mod rank;
 mod reconcile;
@@ -153,6 +154,12 @@ fn report(
         matrix_cost::supersede(items, &measured);
     }
     let found = findings::append(found, measured);
+    let found = findings::append(
+        found,
+        api.as_ref()
+            .map(|data| overlap::findings(data, ranked, &scanned))
+            .unwrap_or_default(),
+    );
     let text = if json {
         match api.as_ref() {
             Some(data) => report::render_json_with_runs(

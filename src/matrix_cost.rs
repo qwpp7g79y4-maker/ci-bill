@@ -698,6 +698,8 @@ jobs:
             event: "push".to_string(),
             conclusion: Some("success".to_string()),
             run_started_at: Some("2026-04-01T00:00:00Z".to_string()),
+            head_branch: None,
+            pull_requests: Vec::new(),
         }
     }
 

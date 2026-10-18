@@ -13,6 +13,8 @@
 //!
 //! A run `path` is stored so it matches a CSV `workflow_path`: the `@ref`
 //! suffix (including `@refs/heads/...`) and an `owner/repo/` prefix are removed.
+//! `head_branch` and `pull_requests[].number` are kept when present so two runs
+//! of one workflow can be compared on the same branch or pull request.
 
 use std::collections::HashSet;
 use std::fs;
@@ -42,6 +44,11 @@ pub struct WorkflowRun {
     pub event: String,
     pub conclusion: Option<String>,
     pub run_started_at: Option<String>,
+    /// Branch name from `head_branch`. Missing and null stay `None`.
+    pub head_branch: Option<String>,
+    /// Pull request numbers from `pull_requests[].number`, in file order.
+    /// Missing, null, and an empty array are an empty list.
+    pub pull_requests: Vec<u64>,
 }
 
 impl WorkflowRun {
@@ -452,7 +459,39 @@ fn parse_run(value: &Value) -> Result<WorkflowRun, ()> {
         event: require_string(object, "event")?,
         conclusion: optional_string(object, "conclusion")?,
         run_started_at: optional_string(object, "run_started_at")?,
+        head_branch: optional_string(object, "head_branch")?,
+        pull_requests: optional_pull_requests(object)?,
     })
+}
+
+fn optional_pull_requests(object: &Map<String, Value>) -> Result<Vec<u64>, ()> {
+    match object.get("pull_requests") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => {
+            let mut numbers = Vec::new();
+            for item in items {
+                match item {
+                    Value::Null => {}
+                    Value::Object(fields) => {
+                        if let Some(number) = pull_number(fields)? {
+                            numbers.push(number);
+                        }
+                    }
+                    _ => return Err(()),
+                }
+            }
+            Ok(numbers)
+        }
+        Some(_) => Err(()),
+    }
+}
+
+fn pull_number(fields: &Map<String, Value>) -> Result<Option<u64>, ()> {
+    match fields.get("number") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number.as_u64().map(Some).ok_or(()),
+        Some(_) => Err(()),
+    }
 }
 
 fn parse_jobs(text: &str) -> Result<Vec<Job>, ()> {
@@ -830,6 +869,8 @@ mod tests {
                     event: "push".to_string(),
                     conclusion: Some("success".to_string()),
                     run_started_at: Some("2026-03-01T10:00:00Z".to_string()),
+                    head_branch: Some("main".to_string()),
+                    pull_requests: Vec::new(),
                 },
                 WorkflowRun {
                     id: 1002,
@@ -840,6 +881,8 @@ mod tests {
                     event: "pull_request".to_string(),
                     conclusion: None,
                     run_started_at: Some("2026-03-02T11:00:00Z".to_string()),
+                    head_branch: None,
+                    pull_requests: Vec::new(),
                 },
                 WorkflowRun {
                     id: 1003,
@@ -850,6 +893,8 @@ mod tests {
                     event: "release".to_string(),
                     conclusion: Some("failure".to_string()),
                     run_started_at: Some("2026-03-03T12:00:00Z".to_string()),
+                    head_branch: None,
+                    pull_requests: Vec::new(),
                 },
             ]
         );
@@ -1183,6 +1228,13 @@ mod tests {
             ("event", Value::Bool(false)),
             ("conclusion", serde_json::json!(1)),
             ("run_started_at", serde_json::json!(true)),
+            ("head_branch", serde_json::json!(1)),
+            ("head_branch", Value::Bool(true)),
+            ("pull_requests", serde_json::json!("12")),
+            ("pull_requests", serde_json::json!([1])),
+            ("pull_requests", serde_json::json!([{"number": "4"}])),
+            ("pull_requests", serde_json::json!([{"number": 1.5}])),
+            ("pull_requests", serde_json::json!([{"number": -1}])),
         ];
         for (index, (key, replacement)) in bad.iter().enumerate() {
             let dir = scratch(&format!("run-type-{index}"));
@@ -1193,6 +1245,24 @@ mod tests {
             assert_eq!(err.to_string(), "invalid JSON", "{key}");
             assert_eq!(err.path, dir.join("runs-4.json"));
         }
+    }
+
+    #[test]
+    fn head_branch_and_pull_requests_are_optional_and_order_independent() {
+        let dir = scratch("branch-pr");
+        let crlf = "{\r\n\"workflow_runs\": [\r\n{\r\n\"pull_requests\": [{\"id\": 9, \"number\": 12}, null, {\"url\": \"https://example.invalid\"}, {\"number\": 4}],\r\n\"head_branch\": \" Feature \",\r\n\"run_started_at\": \"2026-04-01T00:00:00Z\",\r\n\"conclusion\": \"SUCCESS\",\r\n\"event\": \"PULL_REQUEST\",\r\n\"run_number\": 2,\r\n\"run_attempt\": 1,\r\n\"path\": \"ACME/APP/.github/workflows/CI.yml@MAIN\",\r\n\"id\": 7\r\n},\r\n{\r\n\"id\": 8,\r\n\"path\": \".github/workflows/ci.yml\",\r\n\"run_attempt\": 1,\r\n\"run_number\": 3,\r\n\"event\": \"push\",\r\n\"conclusion\": null,\r\n\"head_branch\": \"\",\r\n\"pull_requests\": []\r\n},\r\n{\r\n\"id\": 9,\r\n\"path\": \".github/workflows/ci.yml\",\r\n\"run_attempt\": 1,\r\n\"run_number\": 4,\r\n\"event\": \"push\",\r\n\"pull_requests\": null\r\n}\r\n]\r\n}\r\n";
+        fs::write(dir.join("runs-1.json"), crlf).unwrap();
+        let data = read_dir(&dir).unwrap();
+        let by_id = |id: u64| data.runs.iter().find(|run| run.id == id).unwrap();
+        assert_eq!(by_id(7).head_branch.as_deref(), Some(" Feature "));
+        assert_eq!(by_id(7).pull_requests, vec![12, 4]);
+        assert_eq!(by_id(7).conclusion.as_deref(), Some("SUCCESS"));
+        assert_eq!(by_id(7).path, ".github/workflows/CI.yml");
+        assert_eq!(by_id(8).head_branch.as_deref(), Some(""));
+        assert!(by_id(8).pull_requests.is_empty());
+        assert!(by_id(8).conclusion.is_none());
+        assert!(by_id(9).head_branch.is_none());
+        assert!(by_id(9).pull_requests.is_empty());
     }
 
     #[test]
