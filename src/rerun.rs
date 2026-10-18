@@ -531,6 +531,7 @@ jobs:
 
     fn waste(jobs: Vec<Job>, minutes: i64, net: &str) -> (Vec<Finding>, Vec<WorkflowTotal>) {
         let api = ApiData {
+            public: false,
             runs: vec![run_record(2)],
             jobs,
         };
@@ -668,6 +669,7 @@ jobs:
         later.runner_name = None;
         let jobs = vec![later, ten(2, 1, "Test", "01"), ten(1, 1, "LINT", "01")];
         let api = ApiData {
+            public: false,
             runs: vec![WorkflowRun {
                 repository: Some("ACME/WIDGETS".to_string()),
                 path: ".GitHub/Workflows/CI.yml".to_string(),
@@ -756,6 +758,7 @@ jobs:
         let mut other = ten(2, 1, "test", "03");
         other.run_id = 10;
         let api = ApiData {
+            public: false,
             runs: vec![
                 run_record(1),
                 WorkflowRun {
@@ -780,6 +783,7 @@ jobs:
         let mut original = ten(3, 1, "test", "03");
         original.run_id = 10;
         let api = ApiData {
+            public: false,
             runs: vec![
                 run_record(2),
                 WorkflowRun {
@@ -819,6 +823,7 @@ jobs:
         let mut other_first = ten(3, 1, "test", "01");
         other_first.run_id = 10;
         let api = ApiData {
+            public: false,
             runs: vec![run_record(2), other_run],
             jobs: vec![
                 ten(1, 1, "test", "01"),
@@ -858,6 +863,7 @@ jobs:
     #[test]
     fn list_price_is_used_when_the_run_has_no_usage_row() {
         let api = ApiData {
+            public: false,
             runs: vec![run_record(2)],
             jobs: vec![ten(1, 1, "test", "01"), ten(2, 2, "test", "02")],
         };
@@ -905,6 +911,7 @@ jobs:
         ];
         let (found, _) = {
             let api = ApiData {
+                public: false,
                 runs: vec![run_record(1)],
                 jobs: once,
             };
@@ -922,6 +929,7 @@ jobs:
             ten(2, 1, "test (windows-latest)", "01"),
         ];
         let api = ApiData {
+            public: false,
             runs: vec![run_record(2)],
             jobs: repeated,
         };
@@ -951,6 +959,7 @@ jobs:
       - run: echo test
 ";
         let api = ApiData {
+            public: false,
             runs: vec![run_record(2)],
             jobs: vec![
                 ten(1, 1, "Test ubuntu-latest", "01"),
@@ -994,6 +1003,7 @@ jobs:
         ];
         let lint_line = scanned[1].jobs[0].line;
         let api = ApiData {
+            public: false,
             runs: vec![WorkflowRun {
                 path: ".github/workflows/caller.yml".to_string(),
                 ..run_record(2)
@@ -1027,6 +1037,7 @@ jobs:
         let yaml =
             "name: CI\non: push\njobs: {test: {runs-on: ubuntu-latest, timeout-minutes: 10}}\n";
         let api = ApiData {
+            public: false,
             runs: vec![run_record(2)],
             jobs: vec![ten(1, 1, "test", "01"), ten(2, 2, "test", "02")],
         };
@@ -1049,6 +1060,7 @@ jobs:
         );
         assert!(found.is_empty(), "{found:?}");
         let api = ApiData {
+            public: false,
             runs: vec![run_record(1)],
             jobs: vec![ten(1, 1, "lint", "01"), ten(2, 1, "test", "01")],
         };
@@ -1067,6 +1079,7 @@ jobs:
     #[test]
     fn findings_outside_the_top_still_include_the_re_run() {
         let api = ApiData {
+            public: false,
             runs: vec![run_record(2)],
             jobs: vec![ten(1, 1, "test", "01"), ten(2, 2, "test", "02")],
         };
@@ -1107,6 +1120,7 @@ jobs:
         skipped.conclusion = Some("skipped".to_string());
         skipped.completed_at = Some("2026-04-02T00:00:00Z".to_string());
         let api = ApiData {
+            public: false,
             runs: vec![run_record(2)],
             jobs: vec![ten(1, 1, "test", "01"), skipped],
         };

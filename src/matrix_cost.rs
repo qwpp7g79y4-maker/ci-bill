@@ -766,7 +766,11 @@ jobs:
     }
 
     fn measure_runs(text: &str, runs: Vec<WorkflowRun>, jobs: Vec<Job>) -> Vec<Finding> {
-        let api = ApiData { runs, jobs };
+        let api = ApiData {
+            public: false,
+            runs,
+            jobs,
+        };
         let scanned = scanned(text);
         let ranking = rank(&[usage_row()], None);
         let mut yaml = yaml_findings(&scanned).unwrap();
@@ -1133,7 +1137,11 @@ jobs:
         let mut other_row = usage_row();
         other_row.repository = "other/app".to_string();
         other_row.sku = "actions_macos".to_string();
-        let api = ApiData { runs, jobs: first };
+        let api = ApiData {
+            public: false,
+            runs,
+            jobs: first,
+        };
         let scanned = scanned(YAML);
         let ranking = rank(&[row, other_row], None);
         let found = findings(&api, &ranking.workflows, &scanned);
@@ -1311,6 +1319,7 @@ jobs:
     fn the_finding_is_listed_under_its_workflow() {
         let names: Vec<String> = (0..6).map(prefix_name).collect();
         let api = ApiData {
+            public: false,
             runs: vec![run_record(1, "acme/widgets/.github/workflows/ci.yml@main")],
             jobs: six(&names, &["ubuntu-latest"]),
         };
@@ -1383,6 +1392,7 @@ jobs:
         let line = callee_wf.jobs[0].matrix.as_ref().unwrap().line;
         let names: Vec<String> = (0..6).map(prefix_name).collect();
         let api = ApiData {
+            public: false,
             runs: vec![run_record(1, "acme/widgets/.github/workflows/ci.yml@main")],
             jobs: six(&names, &["ubuntu-latest"]),
         };
@@ -1406,6 +1416,7 @@ jobs:
         let mut running = seventy(1, "build (ubuntu-latest, 14)", &["ubuntu-latest"]);
         running.completed_at = None;
         let api = ApiData {
+            public: false,
             runs: vec![run_record(1, PATH)],
             jobs: vec![running],
         };

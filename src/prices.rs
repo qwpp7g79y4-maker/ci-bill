@@ -316,6 +316,17 @@ pub fn resolve_runner(
     chosen.ok_or_else(|| labels[0].clone())
 }
 
+/// Whether `sku` is charged on a public repository.
+///
+/// Standard runners are free there. Larger runners stay charged.
+/// An unknown SKU is not a larger runner.
+pub fn billed_on_public(sku: &str) -> bool {
+    embedded_table()
+        .ok()
+        .and_then(|table| table.get(sku).map(|price| price.billed_on_public))
+        .unwrap_or(false)
+}
+
 /// SKU for the labels on a finished or running job.
 ///
 /// A label list that contains `self-hosted` is `self_hosted`. Otherwise each

@@ -151,6 +151,7 @@ mod tests {
 
     fn alone(job: Job) -> (ApiData, Job) {
         let api = ApiData {
+            public: false,
             runs: vec![WorkflowRun {
                 id: job.run_id,
                 path: ".github/workflows/ci.yml".to_string(),
@@ -616,6 +617,7 @@ mod tests {
             Some("success"),
         );
         let api = ApiData {
+            public: false,
             runs: vec![WorkflowRun {
                 id: 1,
                 path: ".github/workflows/ci.yml".to_string(),

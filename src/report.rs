@@ -39,6 +39,9 @@ pub fn render(
 /// Each shown workflow lists measured list price, the CSV invoice, and the
 /// difference, then one line per reconciled job. Jobs hidden by `--top` stay
 /// out of this table; their amounts are in the JSON object.
+/// When `repo.json` says the repository is public, each job line also shows
+/// its invoice. A standard SKU invoices at 0.00 and keeps its list price.
+/// A larger runner keeps its charge. A CSV net replaces that invoice.
 pub fn render_text(
     workflows: &[WorkflowTotal],
     bill: &Bill,
@@ -142,7 +145,7 @@ fn render_report(
         }
     }
     if let Some(api) = api {
-        append_api(&mut out, api);
+        append_api(&mut out, api, &recon);
     }
     out
 }
@@ -643,13 +646,13 @@ fn format_share(net: Micros, total: Micros) -> String {
     format!("{}%", percent_fixed(net, total, 2))
 }
 
-fn append_api(out: &mut String, api: &ApiData) {
+fn append_api(out: &mut String, api: &ApiData, recon: &Reconciliation) {
     let _ = writeln!(out);
     write_section(out, "Runs", &run_lines(api));
     let _ = writeln!(out);
-    write_section(out, "Jobs", &counted_lines(api));
+    write_section(out, "Jobs", &counted_lines(api, recon));
     let _ = writeln!(out);
-    write_section(out, "In progress", &progress_lines(api));
+    write_section(out, "In progress", &progress_lines(api, recon));
 }
 
 fn write_section(out: &mut String, heading: &str, lines: &[String]) {
@@ -681,25 +684,25 @@ fn run_lines(api: &ApiData) -> Vec<String> {
         .collect()
 }
 
-fn counted_lines(api: &ApiData) -> Vec<String> {
+fn counted_lines(api: &ApiData, recon: &Reconciliation) -> Vec<String> {
     grouped_lines(api, finished_jobs(api), |api, job| {
         let completed = job.completed_at.as_deref().unwrap_or("-");
         let conclusion = job.conclusion.as_deref().unwrap_or("-");
         format!(
             "{}  completed {completed}  {conclusion}{}{}",
             job_prefix(api, job),
-            cost_suffix(api, job),
+            cost_suffix(api, recon, job),
             copy_suffix(api, job),
         )
     })
 }
 
-fn progress_lines(api: &ApiData) -> Vec<String> {
+fn progress_lines(api: &ApiData, recon: &Reconciliation) -> Vec<String> {
     grouped_lines(api, in_progress_jobs(api), |api, job| {
         format!(
             "{}  {IN_PROGRESS}{}{}",
             job_prefix(api, job),
-            cost_suffix(api, job),
+            cost_suffix(api, recon, job),
             copy_suffix(api, job),
         )
     })
@@ -723,14 +726,24 @@ fn grouped_lines(
     lines
 }
 
-fn cost_suffix(api: &ApiData, job: &Job) -> String {
+fn cost_suffix(api: &ApiData, recon: &Reconciliation, job: &Job) -> String {
     let bill = bill_job(api, job);
     let sku = bill.sku.as_deref().unwrap_or("-");
-    format!(
+    let list = format!(
         "  {} min  {sku}  list {}",
         bill.minutes,
         bill.list_price.format_cents()
-    )
+    );
+    if !api.public {
+        return list;
+    }
+    let invoice = recon
+        .job(job.id)
+        .map(|amount| amount.micros)
+        .unwrap_or_else(|| {
+            reconcile::list_price_invoice(true, bill.sku.as_deref(), bill.list_price)
+        });
+    format!("{list}  invoice {}", invoice.format_cents())
 }
 
 fn job_prefix(api: &ApiData, job: &Job) -> String {
@@ -930,6 +943,10 @@ fn job_json(api: &ApiData, recon: &Reconciliation, job: &Job, counts: bool) -> s
         "billable": counts && !inherited,
     });
     let bill = bill_job(api, job);
+    let priced = recon.job(job.id).cloned().unwrap_or_else(|| Amount {
+        micros: reconcile::list_price_invoice(api.public, bill.sku.as_deref(), bill.list_price),
+        method: CostMethod::ListPrice,
+    });
     value["minutes"] = serde_json::Value::from(bill.minutes);
     value["sku"] = match bill.sku {
         Some(sku) => serde_json::Value::String(sku),
@@ -937,10 +954,6 @@ fn job_json(api: &ApiData, recon: &Reconciliation, job: &Job, counts: bool) -> s
     };
     value["list_price"] = serde_json::Value::String(bill.list_price.to_decimal_string());
     value["list_price_method"] = serde_json::Value::from(CostMethod::ListPrice.as_str());
-    let priced = recon.job(job.id).cloned().unwrap_or(Amount {
-        micros: bill.list_price,
-        method: CostMethod::ListPrice,
-    });
     value["invoice"] = serde_json::Value::String(priced.micros.to_decimal_string());
     value["method"] = serde_json::Value::from(priced.method.as_str());
     value["usd_per_minute"] = match bill.usd_per_minute {
@@ -1339,6 +1352,7 @@ mod tests {
 
     fn sample_api() -> ApiData {
         ApiData {
+            public: false,
             runs: vec![
                 WorkflowRun {
                     id: 1002,
@@ -1547,6 +1561,7 @@ mod tests {
     #[test]
     fn empty_runs_dir_prints_empty_sections() {
         let api = crate::api::ApiData {
+            public: false,
             runs: Vec::new(),
             jobs: Vec::new(),
         };
@@ -2047,6 +2062,7 @@ mod tests {
     #[test]
     fn linked_path_and_inherited_copy_show_zero_cost() {
         let api = ApiData {
+            public: false,
             runs: vec![WorkflowRun {
                 id: 1,
                 path: "octocat/octo-repo/.github/workflows/ci.yml@refs/heads/feature/foo"

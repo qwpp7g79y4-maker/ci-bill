@@ -6,6 +6,9 @@
 //! A workflow with no saved jobs uses its YAML jobs instead. The weight is
 //! the matrix cell count times the runner's minute rate (`yaml_weight`).
 //! A job with no CSV row keeps its list price (`list_price`).
+//! On a public repository that invoice is zero for a standard SKU, while the
+//! list price stays on the job. A larger runner stays on its list price.
+//! A CSV net replaces either amount.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -13,7 +16,7 @@ use std::path::Path;
 use crate::api::{repository_from_run_path, workflow_paths_match, ApiData, Job as ApiJob};
 use crate::job_cost::bill_job;
 use crate::money::Micros;
-use crate::prices::{embedded_table, sku_for_labels};
+use crate::prices::{billed_on_public, embedded_table, sku_for_labels};
 use crate::rank::WorkflowTotal;
 use crate::workflow::{ReusableSource, Workflow};
 
@@ -85,6 +88,7 @@ pub fn reconcile(
     scanned: &[Workflow],
 ) -> Reconciliation {
     let linked = link_jobs(workflows, api);
+    let public_repo = api.is_some_and(|data| data.public);
     let mut jobs = HashMap::new();
     let mut workflow_costs = Vec::with_capacity(workflows.len());
     for (index, workflow) in workflows.iter().enumerate() {
@@ -94,12 +98,13 @@ pub fn reconcile(
             &linked,
             scanned,
             api.is_some(),
+            public_repo,
             &mut jobs,
         ));
     }
     for job in &linked {
         jobs.entry(job.id).or_insert_with(|| Amount {
-            micros: job.list_price,
+            micros: list_price_invoice(public_repo, job.sku.as_deref(), job.list_price),
             method: CostMethod::ListPrice,
         });
     }
@@ -208,12 +213,29 @@ fn workflow_index(workflows: &[WorkflowTotal], path: &str, repo: Option<&str>) -
     }
 }
 
+/// Invoice for a job that has no CSV row.
+///
+/// A public repository invoices a standard SKU at zero. The list price is
+/// unchanged. A larger runner (`billed_on_public`) keeps the list price.
+pub(crate) fn list_price_invoice(
+    public_repo: bool,
+    sku: Option<&str>,
+    list_price: Micros,
+) -> Micros {
+    if public_repo && !sku.is_some_and(billed_on_public) {
+        Micros::ZERO
+    } else {
+        list_price
+    }
+}
+
 fn reconcile_workflow(
     index: usize,
     workflow: &WorkflowTotal,
     linked: &[LinkedJob],
     scanned: &[Workflow],
     had_api: bool,
+    public_repo: bool,
     amounts: &mut HashMap<u64, Amount>,
 ) -> WorkflowCost {
     let slots = yaml_slots(scanned, &workflow.workflow_path);
@@ -266,7 +288,7 @@ fn reconcile_workflow(
             continue;
         }
         let amount = Amount {
-            micros: job.list_price,
+            micros: list_price_invoice(public_repo, job.sku.as_deref(), job.list_price),
             method: CostMethod::ListPrice,
         };
         amounts.insert(job.id, amount.clone());
@@ -851,6 +873,56 @@ mod tests {
                 minutes: usd("1"),
             }],
         }
+    }
+
+    #[test]
+    fn a_public_repository_invoices_standard_skus_at_zero() {
+        let macos = usd("0.062");
+        assert_eq!(
+            list_price_invoice(true, Some("actions_macos"), macos),
+            Micros::ZERO
+        );
+        assert_eq!(
+            list_price_invoice(true, Some("ACTIONS_LINUX"), usd("0.006")),
+            Micros::ZERO
+        );
+        assert_eq!(
+            list_price_invoice(true, Some("actions_windows"), usd("0.010")),
+            Micros::ZERO
+        );
+        assert_eq!(
+            list_price_invoice(true, Some("actions_linux_arm"), usd("0.005")),
+            Micros::ZERO
+        );
+        assert_eq!(
+            list_price_invoice(true, Some("actions_windows_arm"), usd("0.010")),
+            Micros::ZERO
+        );
+        assert_eq!(
+            list_price_invoice(true, Some("actions_linux_slim"), usd("0.002")),
+            Micros::ZERO
+        );
+        assert_eq!(list_price_invoice(true, None, usd("1")), Micros::ZERO);
+        assert_eq!(
+            list_price_invoice(true, Some("actions_linux_4_core"), usd("0.012")),
+            usd("0.012")
+        );
+        assert_eq!(
+            list_price_invoice(true, Some("Actions_Macos_L"), usd("0.077")),
+            usd("0.077")
+        );
+        assert_eq!(
+            list_price_invoice(true, Some("actions_macos_xl"), usd("0.102")),
+            usd("0.102")
+        );
+        assert_eq!(
+            list_price_invoice(false, Some("actions_macos"), macos),
+            macos
+        );
+        assert_eq!(
+            list_price_invoice(false, Some("actions_linux_4_core"), usd("0.012")),
+            usd("0.012")
+        );
     }
 
     #[test]

@@ -7,6 +7,10 @@
 //! are read. Bodies from `attempts/{n}/jobs` are a different list and are
 //! not mixed in.
 //!
+//! `repo.json` in that directory is the `GET /repos/{owner}/{repo}` body.
+//! `private: false` marks the repository public. A missing file, or a missing
+//! `private` field, leaves the repository billed at list price.
+//!
 //! A run `path` is stored so it matches a CSV `workflow_path`: the `@ref`
 //! suffix (including `@refs/heads/...`) and an `owner/repo/` prefix are removed.
 
@@ -84,6 +88,11 @@ impl Job {
 pub struct ApiData {
     pub runs: Vec<WorkflowRun>,
     pub jobs: Vec<Job>,
+    /// `true` when `repo.json` says `private` is false.
+    ///
+    /// Standard runner SKUs then invoice at zero and keep their list price.
+    /// Larger runners stay charged. A missing file is `false`.
+    pub public: bool,
 }
 
 impl ApiData {
@@ -296,7 +305,57 @@ pub fn read_dir(dir: &Path) -> Result<ApiData, ApiError> {
 
     runs.sort_by(cmp_run);
     jobs.sort_by(cmp_job);
-    Ok(ApiData { runs, jobs })
+    let public = read_public(dir)?;
+    Ok(ApiData { runs, jobs, public })
+}
+
+/// `repo.json` `private: false` means the repository is public.
+///
+/// The key match ignores ASCII case. A boolean and the strings `true` and
+/// `false` are accepted. A missing file, a missing field, null, or a blank
+/// string is not public. Any other value is invalid JSON.
+fn read_public(dir: &Path) -> Result<bool, ApiError> {
+    let path = dir.join("repo.json");
+    if !path.exists() {
+        return Ok(false);
+    }
+    if !path.is_file() {
+        return Err(ApiError::file(&path));
+    }
+    let text = read_text(&path)?;
+    let value: Value = serde_json::from_str(&text).map_err(|_| ApiError::json(&path))?;
+    let object = value.as_object().ok_or_else(|| ApiError::json(&path))?;
+    match private_flag(object) {
+        PrivateFlag::Absent => Ok(false),
+        PrivateFlag::Value(private) => Ok(!private),
+        PrivateFlag::Invalid => Err(ApiError::json(&path)),
+    }
+}
+
+enum PrivateFlag {
+    Absent,
+    Value(bool),
+    Invalid,
+}
+
+fn private_flag(object: &Map<String, Value>) -> PrivateFlag {
+    let value = object.get("private").or_else(|| {
+        object
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("private"))
+            .map(|(_, value)| value)
+    });
+    match value {
+        None | Some(Value::Null) => PrivateFlag::Absent,
+        Some(Value::Bool(private)) => PrivateFlag::Value(*private),
+        Some(Value::String(text)) => match text.trim() {
+            "" => PrivateFlag::Absent,
+            word if word.eq_ignore_ascii_case("true") => PrivateFlag::Value(true),
+            word if word.eq_ignore_ascii_case("false") => PrivateFlag::Value(false),
+            _ => PrivateFlag::Invalid,
+        },
+        Some(_) => PrivateFlag::Invalid,
+    }
 }
 
 fn matching_files(dir: &Path) -> Result<Vec<PathBuf>, ApiError> {
@@ -2134,5 +2193,74 @@ mod tests {
         }
         assert!(parse_github_time("2026-03-01t10:00:00Z").is_some());
         assert!(parse_github_time("  2026-03-01T10:00:00Z\r").is_some());
+    }
+
+    #[test]
+    fn repo_json_private_false_marks_the_directory_public() {
+        let public_bodies = [
+            "{\"private\":false}\n",
+            "{\r\n\"description\": \"\",\r\n\"default_branch\": null,\r\n\"Private\": false\r\n}\r\n",
+            "{\r\n\"name\": \"\",\r\n\"PRIVATE\": \"FALSE\"\r\n}",
+            "{\"id\":1,\"private\":\" false \",\"visibility\":\"\"}\n",
+        ];
+        for (index, body) in public_bodies.iter().enumerate() {
+            let dir = scratch(&format!("repo-public-{index}"));
+            let mut bytes = Vec::new();
+            if index == 2 {
+                bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+            }
+            bytes.extend_from_slice(body.as_bytes());
+            fs::write(dir.join("repo.json"), bytes).unwrap();
+            let data = read_dir(&dir).unwrap();
+            assert!(data.public, "{body}");
+            assert!(data.runs.is_empty());
+            assert!(data.jobs.is_empty());
+        }
+
+        let private_bodies = [
+            "{\"private\":true}\n",
+            "{\"Private\":\"TRUE\"}\n",
+            "{}\n",
+            "{\"private\":null,\"name\":\"\"}\n",
+            "{\"private\":\"\"}\n",
+            "{\"private\":\"   \",\"default_branch\":\"\"}\n",
+            "{\r\n\"description\": \"\",\r\n\"id\": 4\r\n}\r\n",
+        ];
+        for (index, body) in private_bodies.iter().enumerate() {
+            let dir = scratch(&format!("repo-private-{index}"));
+            fs::write(dir.join("repo.json"), body).unwrap();
+            let data = read_dir(&dir).unwrap();
+            assert!(!data.public, "{body}");
+        }
+
+        let missing = scratch("repo-missing");
+        assert!(!read_dir(&missing).unwrap().public);
+
+        let broken = scratch("repo-broken");
+        fs::write(broken.join("repo.json"), b"{private: TOKEN-ZZZ-BODY\n").unwrap();
+        let err = read_dir(&broken).unwrap_err();
+        assert_eq!(err.path, broken.join("repo.json"));
+        assert_eq!(err.to_string(), "invalid JSON");
+        assert!(!err.to_string().contains("TOKEN-ZZZ-BODY"));
+
+        let number = scratch("repo-number");
+        fs::write(
+            number.join("repo.json"),
+            b"{\"private\":0,\"note\":\"TOKEN-NUM\"}\n",
+        )
+        .unwrap();
+        let err = read_dir(&number).unwrap_err();
+        assert_eq!(err.to_string(), "invalid JSON");
+        assert!(!format!("{err:?}").contains("TOKEN-NUM"));
+
+        let word = scratch("repo-word");
+        fs::write(word.join("repo.json"), b"{\"private\":\"yes\"}\n").unwrap();
+        assert_eq!(read_dir(&word).unwrap_err().to_string(), "invalid JSON");
+
+        let dir_path = scratch("repo-directory");
+        fs::create_dir(dir_path.join("repo.json")).unwrap();
+        let err = read_dir(&dir_path).unwrap_err();
+        assert_eq!(err.path, dir_path.join("repo.json"));
+        assert_eq!(err.to_string(), "cannot read file");
     }
 }
