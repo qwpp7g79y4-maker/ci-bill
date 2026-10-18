@@ -1,3 +1,4 @@
+use ci_bill::display::display_path;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -640,7 +641,7 @@ fn run_fixture(fixture: &Fixture, extra: &[&str]) -> std::process::Output {
 }
 
 fn finding_line(path: &Path, line: usize, id: &str, message: &str) -> String {
-    format!("{id} {}:{}: {message}", path.display(), line)
+    format!("{id} {}:{}: {message}", display_path(path), line)
 }
 
 #[test]
@@ -769,7 +770,7 @@ fn top_limits_cover_crlf_column_order_empty_fields_and_capitals() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|item| item["file"] == fixture.nightly_path.display().to_string()));
+            .any(|item| item["file"] == display_path(&fixture.nightly_path)));
         assert!(full_value["workflows"]
             .as_array()
             .unwrap()
@@ -798,7 +799,7 @@ fn top_limits_cover_crlf_column_order_empty_fields_and_capitals() {
         assert_eq!(omitted[0]["findings"][0]["line"], 4);
         assert_eq!(
             omitted[0]["findings"][0]["file"],
-            fixture.docs_path.display().to_string()
+            display_path(&fixture.docs_path)
         );
         assert_eq!(omitted[1]["path"], "(no workflow)");
         assert!(omitted[1]["findings"].as_array().unwrap().is_empty());
@@ -807,11 +808,11 @@ fn top_limits_cover_crlf_column_order_empty_fields_and_capitals() {
         }
         let loose = value["unattached_findings"].as_array().unwrap();
         assert_eq!(loose.len(), 1, "{name} {value}");
-        assert_eq!(loose[0]["file"], fixture.nightly_path.display().to_string());
+        assert_eq!(loose[0]["file"], display_path(&fixture.nightly_path));
         assert_eq!(loose[0]["line"], 4);
         assert!(loose
             .iter()
-            .all(|item| item["file"] != fixture.docs_path.display().to_string()));
+            .all(|item| item["file"] != display_path(&fixture.docs_path)));
 
         let json_zero = run_fixture(&fixture, &["--json", "--top", "0"]);
         assert_exit(&json_zero, 0);

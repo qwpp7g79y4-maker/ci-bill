@@ -3244,7 +3244,7 @@ jobs:
             let section = section_after(&text, &label);
             let needle = format!(
                 "F1 {}:{}: lint on macOS",
-                f1[0].path.display(),
+                crate::display::display_path(&f1[0].path),
                 callee_runs_on
             );
             assert!(section.contains(&needle), "{name}: {text}");
@@ -3654,7 +3654,7 @@ jobs:
             );
             let needle = format!(
                 "F6 {}:{}: {}",
-                missing[0].path.display(),
+                crate::display::display_path(&missing[0].path),
                 uses_line,
                 missing[0].message
             );
@@ -4019,7 +4019,7 @@ jobs:
             );
             let needle = format!(
                 "F4 {}:{}: {}",
-                f4[0].path.display(),
+                crate::display::display_path(&f4[0].path),
                 matrix_line,
                 f4_message(6)
             );
@@ -4665,7 +4665,7 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
                 );
                 let needle = format!(
                     "F10 {}:{}: job call-lint uses {}",
-                    shown[0].path.display(),
+                    crate::display::display_path(&shown[0].path),
                     expected_line,
                     case.spec
                 );
@@ -4773,7 +4773,10 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
                 "{}",
                 case.name
             );
-            let needle = format!("F1 {}:5: lint on macOS", f1[0].path.display());
+            let needle = format!(
+                "F1 {}:5: lint on macOS",
+                crate::display::display_path(&f1[0].path)
+            );
             let (_text, json) = assert_costs_stay_on_caller(&found, case.caller_file, &needle);
             let listed = json["workflows"]
                 .as_array()
@@ -4953,7 +4956,7 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
             let needle = format!(
                 "{} {}:{}: {message}",
                 kind.code(),
-                matched[0].path.display(),
+                crate::display::display_path(&matched[0].path),
                 line
             );
             let _ = assert_costs_stay_on_caller(&found, "caller.yml", &needle);
@@ -5463,7 +5466,7 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
             );
             let needle = format!(
                 "F11 {}:{}: {}",
-                matched[0].path.display(),
+                crate::display::display_path(&matched[0].path),
                 matched[0].line,
                 matched[0].message
             );
@@ -6297,12 +6300,8 @@ runs:
             &found,
             &[usage(".github/workflows/caller.yml", "0.06", "0.006")],
         );
-        // The report prints the OS path, so on Windows the separator is `\`.
-        let needle = format!(
-            "{}:5: lint on macOS",
-            path_from_slash("inner/action.yml").display()
-        );
-        assert!(text.contains(&needle), "{text}");
+        // Reports show paths with `/` on every OS.
+        assert!(text.contains("inner/action.yml:5: lint on macOS"), "{text}");
         assert!(!text.contains("Workflows without usage"), "{text}");
 
         let root = b4d_root("nested-missing");
