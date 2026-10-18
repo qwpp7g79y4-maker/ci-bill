@@ -1,6 +1,7 @@
 mod api;
 mod fetch;
 mod findings;
+mod fix_diff;
 mod job_cost;
 mod matrix_cost;
 mod money;
@@ -31,6 +32,7 @@ fn main() -> ExitCode {
                 top,
                 json,
                 budget,
+                fix_diff,
             } => report(
                 &usage,
                 workflows.as_deref(),
@@ -38,6 +40,7 @@ fn main() -> ExitCode {
                 top,
                 json,
                 budget,
+                fix_diff,
             ),
             Command::Prices {
                 json,
@@ -94,6 +97,7 @@ fn report(
     top: Option<usize>,
     json: bool,
     budget: Option<Micros>,
+    fix_diff: bool,
 ) -> ExitCode {
     let rows = match usage::read_usage(usage_path) {
         Ok(rows) => rows,
@@ -165,7 +169,12 @@ fn report(
         let public_repo = api.as_ref().is_some_and(|data| data.public);
         savings::apply(items, ranked, &scanned, public_repo);
     }
-    let text = if json {
+    let text = if fix_diff {
+        found
+            .as_deref()
+            .and_then(|items| fix_diff::render(items, workflows))
+            .unwrap_or_default()
+    } else if json {
         match api.as_ref() {
             Some(data) => report::render_json_with_runs(
                 ranked,
@@ -287,6 +296,9 @@ enum Command {
             allow_hyphen_values = true
         )]
         budget: Option<Micros>,
+        /// Print a unified diff fixing the highest-savings finding instead of the report.
+        #[arg(long)]
+        fix_diff: bool,
     },
     /// Show Actions runner prices and the minute rate for a label or SKU.
     Prices {
