@@ -4823,10 +4823,13 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
         let (_, found) = load_cached_pair(&dir, Some(&runs));
         let f1 = attributed(&found, "caller.yml", FindingKind::LintOnRunner);
         assert_eq!(f1.len(), 1, "{found:?}");
+        // On a case-insensitive filesystem (default on macOS and Windows) the
+        // caller's own spelling already opens the cached file, so the path keeps
+        // that spelling; compare without case.
+        let shown = f1[0].path.to_string_lossy().to_lowercase();
+        let expected = path_from_slash("acme/tools/.github/workflows/lint.yml@v1");
         assert!(
-            f1[0]
-                .path
-                .ends_with(path_from_slash("acme/tools/.github/workflows/lint.yml@v1")),
+            shown.ends_with(&*expected.to_string_lossy()),
             "{}",
             f1[0].path.display()
         );
@@ -6279,7 +6282,12 @@ runs:
             &found,
             &[usage(".github/workflows/caller.yml", "0.06", "0.006")],
         );
-        assert!(text.contains("inner/action.yml:5: lint on macOS"), "{text}");
+        // The report prints the OS path, so on Windows the separator is `\\`.
+        let needle = format!(
+            "{}:5: lint on macOS",
+            path_from_slash("inner/action.yml").display()
+        );
+        assert!(text.contains(&needle), "{text}");
         assert!(!text.contains("Workflows without usage"), "{text}");
 
         let root = b4d_root("nested-missing");
