@@ -187,6 +187,38 @@ fn invalid_workflow_yaml_exits_2_without_content() {
 }
 
 #[test]
+fn amount_overflow_exits_2_for_text_json_and_md() {
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("overflow.csv");
+    std::fs::write(
+        &path,
+        "date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path\n\
+2026-09-01,actions,actions_linux,1,minutes,0,0,0,9000000000000,ada,example-org,example-org/app,a.yml\n\
+2026-09-02,actions,actions_linux,1,minutes,0,0,0,9000000000000,ada,example-org,example-org/app,b.yml\n",
+    )
+    .unwrap();
+
+    for extra_args in [[].as_slice(), ["--json"].as_slice(), ["--md"].as_slice()] {
+        let mut args = vec!["report", "--usage", path.to_str().unwrap()];
+        args.extend_from_slice(extra_args);
+        let output = run(&args);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "args {args:?}\nstdout:\n{}\nstderr:\n{}",
+            stdout(&output),
+            stderr(&output)
+        );
+        let err = stderr(&output);
+        assert!(err.contains("line 0"), "{args:?}: {err}");
+        assert!(
+            err.contains("net_amount total is out of range"),
+            "{args:?}: {err}"
+        );
+        assert!(stdout(&output).is_empty(), "{args:?}: {}", stdout(&output));
+    }
+}
+
+#[test]
 fn missing_usage_exits_3() {
     let output = run(&["report"]);
     assert_eq!(

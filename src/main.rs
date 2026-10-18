@@ -111,7 +111,13 @@ fn report(
             return ExitCode::from(2);
         }
     };
-    let ranking = rank::rank(&rows, None);
+    let ranking = match rank::rank(&rows, None) {
+        Ok(ranking) => ranking,
+        Err(err) => {
+            eprintln!("ci-bill: {}: {err}", usage_path.display());
+            return ExitCode::from(2);
+        }
+    };
     let scanned = match workflows {
         Some(dir) => match workflow::scan_dir(dir) {
             Ok(scanned) => scanned,

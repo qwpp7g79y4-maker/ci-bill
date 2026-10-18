@@ -3160,7 +3160,7 @@ jobs:
     }
 
     fn report_for(found: &[Finding], rows: &[UsageRow]) -> (String, serde_json::Value) {
-        let ranking = rank(rows, None);
+        let ranking = rank(rows, None).unwrap();
         let text = render(&ranking.workflows, &ranking.bill, Some(found), None);
         let json: serde_json::Value = serde_json::from_str(
             render_json(
@@ -3451,7 +3451,7 @@ jobs:
         );
         write_workflow(&dir, "lint.yml", LINT_CALLEE, false, false);
         let (_, found) = load_dir(&dir);
-        let ranking = rank(&rows, None);
+        let ranking = rank(&rows, None).unwrap();
         assert_eq!(ranking.workflows.len(), 2);
         let caller = ranking
             .workflows
@@ -4247,7 +4247,7 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
         .unwrap();
         let rows = read_usage(&csv).unwrap();
         let (_, found) = load_dir(&dir);
-        let ranking = rank(&rows, None);
+        let ranking = rank(&rows, None).unwrap();
         assert_eq!(ranking.workflows.len(), 2);
         assert_eq!(ranking.bill.period_from.as_deref(), Some("2026-09-01"));
         assert_eq!(ranking.bill.period_to.as_deref(), Some("2026-09-30"));
@@ -4555,7 +4555,7 @@ workflow_path,net_amount,gross_amount,discount_amount,quantity,unit_type,sku,pro
             usage(&caller_key(caller_file), "0.06", "0.006"),
             usage(".github/workflows/other.yml", "1.00", "0.100"),
         ];
-        let ranking = rank(&rows, None);
+        let ranking = rank(&rows, None).unwrap();
         assert_eq!(ranking.workflows.len(), 2);
         let caller = ranking
             .workflows
@@ -6220,7 +6220,7 @@ runs:
             assert_eq!(step.name, "./.github/actions/lint");
             assert!(step.local_action.is_some(), "{using}");
             let rows = [usage(".github/workflows/caller.yml", "0.06", "0.006")];
-            let ranking = rank(&rows, None);
+            let ranking = rank(&rows, None).unwrap();
             let json: serde_json::Value = serde_json::from_str(
                 render_json(
                     &ranking.workflows,

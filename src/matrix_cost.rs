@@ -780,7 +780,7 @@ jobs:
             jobs,
         };
         let scanned = scanned(text);
-        let ranking = rank(&[usage_row()], None);
+        let ranking = rank(&[usage_row()], None).unwrap();
         let mut yaml = yaml_findings(&scanned).unwrap();
         let measured = findings(&api, &ranking.workflows, &scanned);
         supersede(&mut yaml, &measured);
@@ -1153,7 +1153,7 @@ jobs:
             jobs: first,
         };
         let scanned = scanned(YAML);
-        let ranking = rank(&[row, other_row], None);
+        let ranking = rank(&[row, other_row], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned);
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(found[0].message, LINUX_6);
@@ -1334,7 +1334,7 @@ jobs:
             jobs: six(&names, &["ubuntu-latest"]),
         };
         let scanned = scanned(YAML);
-        let ranking = rank(&[usage_row()], None);
+        let ranking = rank(&[usage_row()], None).unwrap();
         let mut yaml = yaml_findings(&scanned).unwrap();
         let measured = findings(&api, &ranking.workflows, &scanned);
         supersede(&mut yaml, &measured);
@@ -1407,7 +1407,7 @@ jobs:
             jobs: six(&names, &["ubuntu-latest"]),
         };
         let scanned = vec![caller_wf, callee_wf];
-        let ranking = rank(&[usage_row()], None);
+        let ranking = rank(&[usage_row()], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].message, LINUX_6);

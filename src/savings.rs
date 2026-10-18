@@ -350,7 +350,7 @@ mod tests {
             fs::write(dir.join(file), body).unwrap();
         }
         let rows = read_usage(&usage_path).unwrap();
-        let ranking = rank(&rows, None);
+        let ranking = rank(&rows, None).unwrap();
         let scanned = scan_dir(&dir).unwrap();
         let mut found = findings(&scanned).unwrap();
         apply(&mut found, &ranking.workflows, &scanned, public_repo);
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn sample_f1_is_the_macos_minutes_times_the_linux_gap() {
         let rows = read_usage(Path::new("samples/usage-sample.csv")).unwrap();
-        let ranking = rank(&rows, None);
+        let ranking = rank(&rows, None).unwrap();
         let scanned = scan_dir(Path::new("samples/.github/workflows")).unwrap();
         let mut found = findings(&scanned).unwrap();
         apply(&mut found, &ranking.workflows, &scanned, false);
@@ -879,7 +879,7 @@ runs:
         );
         fs::write(root.join("usage.csv"), csv).unwrap();
         let rows = read_usage(&root.join("usage.csv")).unwrap();
-        let ranking = rank(&rows, None);
+        let ranking = rank(&rows, None).unwrap();
         let scanned = scan_dir(&root.join(".github/workflows")).unwrap();
         let mut found = findings(&scanned).unwrap();
         apply(&mut found, &ranking.workflows, &scanned, false);

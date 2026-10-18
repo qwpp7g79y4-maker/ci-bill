@@ -44,6 +44,9 @@ pub enum UsageErrorKind {
     NotANumber(&'static str),
     TooManyDecimals(&'static str),
     InvalidCsv,
+    /// A running total overflowed `i64` micros. `line` is the row that caused
+    /// it, or 0 for a total summed across the whole report.
+    AmountOverflow(&'static str),
 }
 
 impl std::fmt::Display for UsageError {
@@ -64,6 +67,9 @@ impl std::fmt::Display for UsageError {
                 )
             }
             UsageErrorKind::InvalidCsv => write!(f, "line {}: invalid CSV", self.line),
+            UsageErrorKind::AmountOverflow(column) => {
+                write!(f, "line {}: {column} total is out of range", self.line)
+            }
         }
     }
 }

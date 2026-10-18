@@ -1037,7 +1037,7 @@ jobs:
 
     #[test]
     fn the_usage_rate_wins_over_the_table_including_on_a_public_repository() {
-        let ranking = rank(&[row(10, "1.000000")], None);
+        let ranking = rank(&[row(10, "1.000000")], None).unwrap();
         let scanned = scanned(ON_YAML);
         let found = findings(&canonical(), &ranking.workflows, &scanned);
         assert_eq!(found.len(), 1, "{found:?}");

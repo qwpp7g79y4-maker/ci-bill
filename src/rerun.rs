@@ -544,7 +544,7 @@ jobs:
             jobs,
         };
         let scanned = scanned(YAML);
-        let ranking = rank(&[row(minutes, net)], None);
+        let ranking = rank(&[row(minutes, net)], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned);
         (found, ranking.workflows)
     }
@@ -690,7 +690,7 @@ jobs:
             jobs,
         };
         let scanned = scanned(&yaml);
-        let ranking = rank(&[row(30, "0.180")], None);
+        let ranking = rank(&[row(30, "0.180")], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned);
         let lines = messages(&found);
         assert!(lines.contains(&"re-runs cost 0.06 USD (1 extra executions)"));
@@ -783,7 +783,7 @@ jobs:
             jobs: vec![ten(1, 1, "test", "01"), other],
         };
         let scanned = scanned(YAML);
-        let ranking = rank(&[row(20, "0.120")], None);
+        let ranking = rank(&[row(20, "0.120")], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned);
         assert!(messages(&found).is_empty(), "{found:?}");
     }
@@ -812,7 +812,7 @@ jobs:
             ],
         };
         let scanned = scanned(YAML);
-        let ranking = rank(&[row(40, "0.240")], None);
+        let ranking = rank(&[row(40, "0.240")], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned);
         let lines = messages(&found);
         assert!(lines.contains(&"re-runs cost 0.12 USD (2 extra executions)"));
@@ -846,7 +846,7 @@ jobs:
         };
         let mut second = row(20, "0.120");
         second.repository = "acme/other".to_string();
-        let ranking = rank(&[row(20, "0.120"), second], None);
+        let ranking = rank(&[row(20, "0.120"), second], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned(YAML));
         let repos: Vec<_> = found
             .iter()
@@ -884,7 +884,7 @@ jobs:
         assert!(lines.contains(&"re-runs cost 0.06 USD (1 extra executions)"));
         let text = render_text(
             &[],
-            &rank(&[], None).bill,
+            &rank(&[], None).unwrap().bill,
             Some(&found),
             Some(&api),
             None,
@@ -927,7 +927,7 @@ jobs:
                 runs: vec![run_record(1)],
                 jobs: once,
             };
-            let ranking = rank(&[row(20, "0.120")], None);
+            let ranking = rank(&[row(20, "0.120")], None).unwrap();
             (
                 findings(&api, &ranking.workflows, &scanned),
                 ranking.workflows,
@@ -945,7 +945,7 @@ jobs:
             runs: vec![run_record(2)],
             jobs: repeated,
         };
-        let ranking = rank(&[row(30, "0.180")], None);
+        let ranking = rank(&[row(30, "0.180")], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned);
         let lines = messages(&found);
         assert!(lines.contains(&"re-runs cost 0.06 USD (1 extra executions)"));
@@ -979,7 +979,7 @@ jobs:
             ],
         };
         let scanned = scanned(yaml);
-        let ranking = rank(&[row(20, "0.120")], None);
+        let ranking = rank(&[row(20, "0.120")], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned);
         let hit = found
             .iter()
@@ -1024,7 +1024,7 @@ jobs:
         };
         let mut usage = row(20, "0.120");
         usage.workflow_path = ".github/workflows/caller.yml".to_string();
-        let ranking = rank(&[usage], None);
+        let ranking = rank(&[usage], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned);
         let hit = found
             .iter()
@@ -1054,7 +1054,7 @@ jobs:
             jobs: vec![ten(1, 1, "test", "01"), ten(2, 2, "test", "02")],
         };
         let scanned = scanned(yaml);
-        let ranking = rank(&[row(20, "0.120")], None);
+        let ranking = rank(&[row(20, "0.120")], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned);
         let hit = found
             .iter()
@@ -1078,7 +1078,7 @@ jobs:
         };
         let text = render_text(
             &workflows,
-            &rank(&[row(20, "0.120")], None).bill,
+            &rank(&[row(20, "0.120")], None).unwrap().bill,
             Some(&found),
             Some(&api),
             None,
@@ -1099,7 +1099,7 @@ jobs:
         let mut rich = row(20, "9.000");
         rich.workflow_path = ".github/workflows/release.yml".to_string();
         rich.sku = "actions_macos".to_string();
-        let ranking = rank(&[rich, cheap], None);
+        let ranking = rank(&[rich, cheap], None).unwrap();
         let scanned = scanned(YAML);
         let found = findings(&api, &ranking.workflows, &scanned);
         let text = render_text(
@@ -1136,7 +1136,7 @@ jobs:
             runs: vec![run_record(2)],
             jobs: vec![ten(1, 1, "test", "01"), skipped],
         };
-        let ranking = rank(&[row(10, "0.060")], None);
+        let ranking = rank(&[row(10, "0.060")], None).unwrap();
         let found = findings(&api, &ranking.workflows, &scanned(YAML));
         let lines = messages(&found);
         assert!(lines.iter().any(|line| line.contains("job 2, attempt 2")));

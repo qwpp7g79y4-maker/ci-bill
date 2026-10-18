@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::money::Micros;
-use crate::usage::{is_actions_product, UsageRow};
+use crate::usage::{is_actions_product, UsageError, UsageErrorKind, UsageRow};
 
 /// Cost of one SKU inside a repository workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +55,11 @@ pub struct Ranking {
 /// Minutes add `quantity` only when `unit_type` is `minutes`, ignoring case.
 /// Other unit types still add to net and gross. Product names other than
 /// `actions` (any ASCII case) do not enter the workflow list.
-pub fn rank(rows: &[UsageRow], top: Option<usize>) -> Ranking {
+///
+/// Every sum is checked: a row that would push a per-workflow, per-SKU, or
+/// grand total out of `i64` micros is a clean input error naming that row's
+/// line, the same as any other bad amount in the CSV.
+pub fn rank(rows: &[UsageRow], top: Option<usize>) -> Result<Ranking, UsageError> {
     let mut totals: HashMap<(String, String), WorkflowAcc> = HashMap::new();
     let mut bill = Bill {
         total_net: Micros::ZERO,
@@ -73,11 +77,12 @@ pub fn rank(rows: &[UsageRow], top: Option<usize>) -> Ranking {
             repositories.insert(row.repository.clone());
         }
         if !is_actions_product(&row.product) {
-            bill.other_products_net += row.net;
+            bill.other_products_net =
+                checked_total(bill.other_products_net, row.net, row.line, "net_amount")?;
             continue;
         }
         let key = (row.repository.clone(), row.workflow_path.clone());
-        add(totals.entry(key).or_default(), row);
+        add(totals.entry(key).or_default(), row)?;
     }
 
     let mut workflows: Vec<WorkflowTotal> = totals.into_iter().map(finish_workflow).collect();
@@ -89,14 +94,27 @@ pub fn rank(rows: &[UsageRow], top: Option<usize>) -> Ranking {
             .then_with(|| left.workflow_path.cmp(&right.workflow_path))
     });
     for workflow in &workflows {
-        bill.total_net += workflow.net;
-        bill.total_minutes += workflow.minutes;
+        bill.total_net = checked_total(bill.total_net, workflow.net, 0, "net_amount")?;
+        bill.total_minutes = checked_total(bill.total_minutes, workflow.minutes, 0, "quantity")?;
     }
     if let Some(limit) = top {
         workflows.truncate(limit);
     }
     bill.repositories = repositories.into_iter().collect();
-    Ranking { workflows, bill }
+    Ok(Ranking { workflows, bill })
+}
+
+/// `total + amount`, or an `AmountOverflow` input error naming `line` and `column`.
+fn checked_total(
+    total: Micros,
+    amount: Micros,
+    line: u64,
+    column: &'static str,
+) -> Result<Micros, UsageError> {
+    total.checked_add(amount).ok_or(UsageError {
+        line,
+        kind: UsageErrorKind::AmountOverflow(column),
+    })
 }
 
 #[derive(Default)]
@@ -116,21 +134,22 @@ struct SkuAcc {
     minutes: Micros,
 }
 
-fn add(acc: &mut WorkflowAcc, row: &UsageRow) {
+fn add(acc: &mut WorkflowAcc, row: &UsageRow) -> Result<(), UsageError> {
     let minutes = if row.unit_type.eq_ignore_ascii_case("minutes") {
         row.quantity
     } else {
         Micros::ZERO
     };
-    acc.net += row.net;
-    acc.gross += row.gross;
-    acc.discount += row.discount;
-    acc.minutes += minutes;
+    acc.net = checked_total(acc.net, row.net, row.line, "net_amount")?;
+    acc.gross = checked_total(acc.gross, row.gross, row.line, "gross_amount")?;
+    acc.discount = checked_total(acc.discount, row.discount, row.line, "discount_amount")?;
+    acc.minutes = checked_total(acc.minutes, minutes, row.line, "quantity")?;
     let sku = acc.skus.entry(row.sku.clone()).or_default();
-    sku.net += row.net;
-    sku.gross += row.gross;
-    sku.discount += row.discount;
-    sku.minutes += minutes;
+    sku.net = checked_total(sku.net, row.net, row.line, "net_amount")?;
+    sku.gross = checked_total(sku.gross, row.gross, row.line, "gross_amount")?;
+    sku.discount = checked_total(sku.discount, row.discount, row.line, "discount_amount")?;
+    sku.minutes = checked_total(sku.minutes, minutes, row.line, "quantity")?;
+    Ok(())
 }
 
 fn finish_workflow(
@@ -381,7 +400,7 @@ mod tests {
 
     #[test]
     fn ranks_three_workflows_and_two_skus() {
-        let ranking = rank(&three_workflows(), None);
+        let ranking = rank(&three_workflows(), None).unwrap();
         assert_eq!(ranking.workflows, expected_three());
         assert_eq!(ranking.bill.total_net, usd("9.25"));
         assert_eq!(ranking.bill.total_minutes, usd("176"));
@@ -406,7 +425,7 @@ mod tests {
                 "1",
             ),
         ];
-        let ranked = rank(&rows, None);
+        let ranked = rank(&rows, None).unwrap();
         assert_eq!(
             ranked
                 .workflows
@@ -458,7 +477,7 @@ mod tests {
         copilot.product = "Copilot".to_string();
         copilot.date = String::new();
 
-        let ranking = rank(&[first, second, copilot], None);
+        let ranking = rank(&[first, second, copilot], None).unwrap();
         assert_eq!(ranking.workflows.len(), 2);
         assert_eq!(ranking.workflows[0].repository, "example-org/alpha");
         assert_eq!(ranking.workflows[1].repository, "example-org/beta");
@@ -489,12 +508,141 @@ mod tests {
     fn top_n_keeps_highest_net_and_full_totals() {
         let rows = three_workflows();
         let expected = expected_three();
-        assert_eq!(rank(&rows, Some(2)).workflows, expected[..2]);
-        assert_eq!(rank(&rows, Some(1)).workflows, expected[..1]);
-        assert_eq!(rank(&rows, Some(0)).workflows, []);
-        assert_eq!(rank(&rows, Some(10)).workflows, expected);
-        assert_eq!(rank(&rows, None).workflows, expected);
-        assert_eq!(rank(&rows, Some(1)).bill.total_net, usd("9.25"));
-        assert_eq!(rank(&rows, Some(0)).bill.total_minutes, usd("176"));
+        assert_eq!(rank(&rows, Some(2)).unwrap().workflows, expected[..2]);
+        assert_eq!(rank(&rows, Some(1)).unwrap().workflows, expected[..1]);
+        assert_eq!(rank(&rows, Some(0)).unwrap().workflows, []);
+        assert_eq!(rank(&rows, Some(10)).unwrap().workflows, expected);
+        assert_eq!(rank(&rows, None).unwrap().workflows, expected);
+        assert_eq!(rank(&rows, Some(1)).unwrap().bill.total_net, usd("9.25"));
+        assert_eq!(rank(&rows, Some(0)).unwrap().bill.total_minutes, usd("176"));
+    }
+
+    fn huge(
+        line: u64,
+        workflow_path: &str,
+        quantity: &str,
+        unit_type: &str,
+        net: &str,
+        gross: &str,
+        discount: &str,
+    ) -> UsageRow {
+        UsageRow {
+            line,
+            date: "2026-09-01".to_string(),
+            product: "actions".to_string(),
+            sku: "actions_linux".to_string(),
+            quantity: usd(quantity),
+            unit_type: unit_type.to_string(),
+            applied_cost_per_quantity: Micros::ZERO,
+            gross: usd(gross),
+            discount: usd(discount),
+            net: usd(net),
+            username: String::new(),
+            organization: String::new(),
+            repository: String::new(),
+            workflow_path: workflow_path.to_string(),
+        }
+    }
+
+    /// Each amount on its own fits in `i64` micros; summed twice it does not.
+    const HUGE: &str = "9000000000000";
+
+    #[test]
+    fn net_amount_overflow_in_one_workflow_is_a_clean_error() {
+        let rows = vec![
+            huge(2, "a.yml", "1", "minutes", HUGE, "0", "0"),
+            huge(3, "a.yml", "1", "minutes", HUGE, "0", "0"),
+        ];
+        let err = rank(&rows, None).unwrap_err();
+        assert_eq!(err.line, 3);
+        assert_eq!(err.kind, UsageErrorKind::AmountOverflow("net_amount"));
+    }
+
+    #[test]
+    fn gross_amount_overflow_in_one_workflow_is_a_clean_error() {
+        let rows = vec![
+            huge(2, "a.yml", "1", "minutes", "0", HUGE, "0"),
+            huge(3, "a.yml", "1", "minutes", "0", HUGE, "0"),
+        ];
+        let err = rank(&rows, None).unwrap_err();
+        assert_eq!(err.line, 3);
+        assert_eq!(err.kind, UsageErrorKind::AmountOverflow("gross_amount"));
+    }
+
+    #[test]
+    fn discount_amount_overflow_in_one_workflow_is_a_clean_error() {
+        let rows = vec![
+            huge(2, "a.yml", "1", "minutes", "0", "0", HUGE),
+            huge(3, "a.yml", "1", "minutes", "0", "0", HUGE),
+        ];
+        let err = rank(&rows, None).unwrap_err();
+        assert_eq!(err.line, 3);
+        assert_eq!(err.kind, UsageErrorKind::AmountOverflow("discount_amount"));
+    }
+
+    #[test]
+    fn quantity_overflow_in_one_workflow_is_a_clean_error() {
+        let rows = vec![
+            huge(2, "a.yml", HUGE, "minutes", "0", "0", "0"),
+            huge(3, "a.yml", HUGE, "minutes", "0", "0", "0"),
+        ];
+        let err = rank(&rows, None).unwrap_err();
+        assert_eq!(err.line, 3);
+        assert_eq!(err.kind, UsageErrorKind::AmountOverflow("quantity"));
+    }
+
+    #[test]
+    fn grand_total_net_overflow_across_workflows_is_a_clean_error() {
+        let rows = vec![
+            huge(2, "a.yml", "1", "minutes", HUGE, "0", "0"),
+            huge(3, "b.yml", "1", "minutes", HUGE, "0", "0"),
+        ];
+        let err = rank(&rows, None).unwrap_err();
+        assert_eq!(err.line, 0);
+        assert_eq!(err.kind, UsageErrorKind::AmountOverflow("net_amount"));
+    }
+
+    #[test]
+    fn grand_total_quantity_overflow_across_workflows_is_a_clean_error() {
+        let rows = vec![
+            huge(2, "a.yml", HUGE, "minutes", "0", "0", "0"),
+            huge(3, "b.yml", HUGE, "minutes", "0", "0", "0"),
+        ];
+        let err = rank(&rows, None).unwrap_err();
+        assert_eq!(err.line, 0);
+        assert_eq!(err.kind, UsageErrorKind::AmountOverflow("quantity"));
+    }
+
+    #[test]
+    fn other_products_net_overflow_is_a_clean_error() {
+        let mut first = huge(2, "", "0", "requests", HUGE, "0", "0");
+        first.product = "copilot".to_string();
+        let mut second = huge(3, "", "0", "requests", HUGE, "0", "0");
+        second.product = "copilot".to_string();
+        let err = rank(&[first, second], None).unwrap_err();
+        assert_eq!(err.line, 3);
+        assert_eq!(err.kind, UsageErrorKind::AmountOverflow("net_amount"));
+    }
+
+    #[test]
+    fn negative_net_overflow_in_one_workflow_is_a_clean_error() {
+        let rows = vec![
+            huge(2, "a.yml", "1", "minutes", "-9000000000000", "0", "0"),
+            huge(3, "a.yml", "1", "minutes", "-9000000000000", "0", "0"),
+        ];
+        let err = rank(&rows, None).unwrap_err();
+        assert_eq!(err.line, 3);
+        assert_eq!(err.kind, UsageErrorKind::AmountOverflow("net_amount"));
+    }
+
+    #[test]
+    fn negative_grand_total_overflow_across_workflows_is_a_clean_error() {
+        let rows = vec![
+            huge(2, "a.yml", "1", "minutes", "-9000000000000", "0", "0"),
+            huge(3, "b.yml", "1", "minutes", "-9000000000000", "0", "0"),
+        ];
+        let err = rank(&rows, None).unwrap_err();
+        assert_eq!(err.line, 0);
+        assert_eq!(err.kind, UsageErrorKind::AmountOverflow("net_amount"));
     }
 }

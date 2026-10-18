@@ -99,6 +99,12 @@ impl Micros {
             None
         }
     }
+
+    /// `None` when the sum does not fit in `i64` micros, instead of panicking.
+    /// Use this to add amounts from untrusted input, such as CSV rows.
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        self.0.checked_add(rhs.0).map(Self)
+    }
 }
 
 impl std::str::FromStr for Micros {
