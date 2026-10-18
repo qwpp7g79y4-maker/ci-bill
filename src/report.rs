@@ -2,7 +2,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 use crate::api::{linked_workflow_path, ApiData, Job, WorkflowRun, IN_PROGRESS, UNKNOWN_WORKFLOW};
-use crate::display::escape_display;
+use crate::display::{display_path, escape_display};
 use crate::findings::Finding;
 use crate::job_cost::bill_job;
 use crate::money::{percent_fixed, Micros};
@@ -491,7 +491,7 @@ fn same_workflow_file(workflow_path: &str, file_name: &str) -> bool {
 fn finding_json(finding: &Finding) -> serde_json::Value {
     serde_json::json!({
         "id": finding.kind.code(),
-        "file": finding.path.display().to_string(),
+        "file": display_path(&finding.path),
         "line": finding.line,
         "message": finding.message,
         "savings": finding.savings.to_decimal_string(),
@@ -503,7 +503,7 @@ fn finding_text(finding: &Finding) -> String {
     format!(
         "{} {}:{}: {}",
         finding.kind.code(),
-        escape_display(&finding.path.display().to_string()),
+        escape_display(&display_path(&finding.path)),
         finding.line,
         escape_display(&finding.message)
     )

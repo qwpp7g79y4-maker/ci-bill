@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::api::{repository_from_run_path, workflow_paths_match, ApiData, Job as ApiJob};
-use crate::display::escape_display;
+use crate::display::{display_path, escape_display};
 use crate::job_cost::bill_job;
 use crate::money::Micros;
 use crate::prices::{billed_on_public, embedded_table, sku_for_labels};
@@ -647,7 +647,7 @@ fn slots_for_job(job: &crate::workflow::Job, path: &Path, multiplier: u64) -> Ve
     let Some(runs_on) = &job.runs_on else {
         return Vec::new();
     };
-    let file = path.display().to_string();
+    let file = display_path(path);
     let cells = cell_count(job).saturating_mul(multiplier).max(1);
     let mut names = axis_names(&runs_on.value);
     for label in &runs_on.labels {

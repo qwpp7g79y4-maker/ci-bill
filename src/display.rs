@@ -29,6 +29,18 @@ pub fn escape_display(text: &str) -> String {
     out
 }
 
+/// A file path as the reports show it: with `/` separators on every OS, so
+/// `--workflows samples/.github/workflows` on Windows prints
+/// `samples/.github/workflows/lint.yml`, not a mix of `/` and `\`.
+pub fn display_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '\\' {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
+
 /// Explicit directional-formatting characters, the ones that can make text
 /// render in a different order than it reads (e.g. U+202E RIGHT-TO-LEFT
 /// OVERRIDE).
@@ -38,6 +50,20 @@ fn is_bidi_override(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn display_path_uses_forward_slashes() {
+        let path = std::path::Path::new("samples/.github/workflows/lint.yml");
+        assert_eq!(
+            super::display_path(path),
+            "samples/.github/workflows/lint.yml"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            super::display_path(std::path::Path::new("samples/.github/workflows\\lint.yml")),
+            "samples/.github/workflows/lint.yml"
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::api::ApiData;
-use crate::display::escape_display;
+use crate::display::{display_path, escape_display};
 use crate::findings::Finding;
 use crate::fix_diff;
 use crate::rank::{Bill, WorkflowTotal};
@@ -82,7 +82,7 @@ fn write_findings(out: &mut String, findings: Option<&[Finding]>, workflows_dir:
             out,
             "| {} | {} | {} | {} |",
             finding.kind.code(),
-            escape_cell(&format!("{}:{}", finding.path.display(), finding.line)),
+            escape_cell(&format!("{}:{}", display_path(&finding.path), finding.line)),
             escape_cell(&finding.message),
             finding.savings.format_cents(),
         );
