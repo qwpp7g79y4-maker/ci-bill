@@ -112,7 +112,8 @@ fn read_reader<R: Read>(mut reader: R) -> Result<Vec<UsageRow>, UsageError> {
     parse_bytes(&bytes)
 }
 
-fn parse_bytes(bytes: &[u8]) -> Result<Vec<UsageRow>, UsageError> {
+/// Parse a usage CSV already in memory, the same way [`read_usage`] does after reading the file.
+pub fn parse_bytes(bytes: &[u8]) -> Result<Vec<UsageRow>, UsageError> {
     let mut csv_reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .trim(csv::Trim::All)

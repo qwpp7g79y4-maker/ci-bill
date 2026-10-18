@@ -615,7 +615,9 @@ pub fn load_runner_map(path: &Path, table: &PriceTable) -> Result<RunnerMap, Pri
     })
 }
 
-fn parse_runner_map(bytes: &[u8], table: &PriceTable) -> Result<RunnerMap, String> {
+/// Parse a runner-map CSV already in memory, the same way [`load_runner_map`] does after
+/// reading the file.
+pub fn parse_runner_map(bytes: &[u8], table: &PriceTable) -> Result<RunnerMap, String> {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
@@ -685,7 +687,8 @@ fn csv_message(err: &csv::Error, bytes: &[u8]) -> String {
     format!("line {line}: invalid CSV")
 }
 
-fn parse_table_json(text: &str) -> Result<PriceTable, String> {
+/// Parse a price table JSON document in the same shape as the embedded `prices/actions.json`.
+pub fn parse_table_json(text: &str) -> Result<PriceTable, String> {
     let value: Value = serde_json::from_str(text).map_err(|_| "invalid JSON".to_string())?;
     let object = value.as_object().ok_or("expected an object")?;
     let retrieved = required_string(object, "retrieved")?;

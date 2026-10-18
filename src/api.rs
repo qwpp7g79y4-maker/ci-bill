@@ -438,7 +438,9 @@ pub(crate) fn job_file_run_id(name: &str) -> Option<u64> {
     rest[..end].parse().ok()
 }
 
-fn parse_runs(text: &str) -> Result<Vec<WorkflowRun>, ()> {
+/// Parse one `workflow_runs` page body, the same way [`read_dir`] parses each `runs-*.json` file.
+#[allow(clippy::result_unit_err)]
+pub fn parse_runs(text: &str) -> Result<Vec<WorkflowRun>, ()> {
     let value: Value = serde_json::from_str(text).map_err(|_| ())?;
     let items = value
         .get("workflow_runs")
@@ -494,7 +496,9 @@ fn pull_number(fields: &Map<String, Value>) -> Result<Option<u64>, ()> {
     }
 }
 
-fn parse_jobs(text: &str) -> Result<Vec<Job>, ()> {
+/// Parse one `jobs` page body, the same way [`read_dir`] parses each `jobs-*.json` file.
+#[allow(clippy::result_unit_err)]
+pub fn parse_jobs(text: &str) -> Result<Vec<Job>, ()> {
     let value: Value = serde_json::from_str(text).map_err(|_| ())?;
     let items = value.get("jobs").and_then(Value::as_array).ok_or(())?;
     items.iter().map(parse_job).collect()
