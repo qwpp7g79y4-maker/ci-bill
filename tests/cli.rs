@@ -219,6 +219,38 @@ fn amount_overflow_exits_2_for_text_json_and_md() {
 }
 
 #[test]
+fn omitted_workflows_net_overflow_does_not_panic() {
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("omitted-overflow.csv");
+    std::fs::write(
+        &path,
+        "date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path\n\
+2026-09-01,actions,actions_linux,1,count,9000000000000,9000000000000,0,9000000000000,ada,example-org,example-org/app,a.yml\n\
+2026-09-02,actions,actions_linux,1,count,8000000000000,0,8000000000000,-8000000000000,ada,example-org,example-org/app,b.yml\n\
+2026-09-03,actions,actions_linux,1,count,8000000000000,0,8000000000000,-8000000000000,ada,example-org,example-org/app,c.yml\n",
+    )
+    .unwrap();
+
+    for extra_args in [[].as_slice(), ["--json"].as_slice(), ["--md"].as_slice()] {
+        let mut args = vec!["report", "--usage", path.to_str().unwrap(), "--top", "1"];
+        args.extend_from_slice(extra_args);
+        let output = run(&args);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "args {args:?}\nstdout:\n{}\nstderr:\n{}",
+            stdout(&output),
+            stderr(&output)
+        );
+        assert!(stderr(&output).is_empty(), "{args:?}: {}", stderr(&output));
+        if extra_args == ["--json"] {
+            let value: serde_json::Value =
+                serde_json::from_str(&stdout(&output)).expect("report json");
+            assert!(value["outside_top"]["net"].is_string());
+        }
+    }
+}
+
+#[test]
 fn missing_usage_exits_3() {
     let output = run(&["report"]);
     assert_eq!(

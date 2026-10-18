@@ -432,3 +432,102 @@ fn the_amount_sits_on_the_concurrency_line_when_that_key_exists() {
     assert!(text.contains(&format!("ci.yml:3: {EXACT}")), "{text}");
     assert!(!text.contains("ci.yml:2:"), "{text}");
 }
+
+/// Two independently overlapping run pairs on the same workflow, each priced
+/// near `i64::MAX` micros from a huge CSV rate, used to not fit when added
+/// together into one bucket.
+#[test]
+fn two_huge_overlap_amounts_on_one_workflow_do_not_panic() {
+    let dir = scratch("huge-usd-sum");
+    let workflows = dir.join("workflows");
+    std::fs::create_dir_all(&workflows).unwrap();
+    std::fs::write(workflows.join("ci.yml"), ON_YAML).unwrap();
+
+    let runs = [
+        run_spec(
+            1,
+            Some("success"),
+            "2026-04-01T00:00:00Z",
+            Some("a"),
+            Some(vec![1]),
+        ),
+        run_spec(
+            2,
+            Some("success"),
+            "2026-04-01T00:01:00Z",
+            Some("a"),
+            Some(vec![1]),
+        ),
+        run_spec(
+            3,
+            Some("success"),
+            "2026-04-01T00:10:00Z",
+            Some("b"),
+            Some(vec![2]),
+        ),
+        run_spec(
+            4,
+            Some("success"),
+            "2026-04-01T00:11:00Z",
+            Some("b"),
+            Some(vec![2]),
+        ),
+    ];
+    let runs_body = runs
+        .iter()
+        .map(|spec| run_json(spec, false))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        dir.join("runs-1.json"),
+        format!("{{\"workflow_runs\": [{runs_body}]}}"),
+    )
+    .unwrap();
+
+    let job_one = JobSpec {
+        id: 10,
+        run_id: 1,
+        name: "test".to_string(),
+        labels: vec!["ubuntu-latest".to_string()],
+        started: "2026-04-01T00:00:00Z".to_string(),
+        completed: "2026-04-01T00:03:00Z".to_string(),
+        conclusion: "success".to_string(),
+        attempt: 1,
+    };
+    let job_two = JobSpec {
+        id: 12,
+        run_id: 3,
+        name: "test".to_string(),
+        labels: vec!["ubuntu-latest".to_string()],
+        started: "2026-04-01T00:10:00Z".to_string(),
+        completed: "2026-04-01T00:13:00Z".to_string(),
+        conclusion: "success".to_string(),
+        attempt: 1,
+    };
+    std::fs::write(
+        dir.join("jobs-1.json"),
+        format!("{{\"jobs\": [{}]}}", job_json(&job_one, false)),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("jobs-3.json"),
+        format!("{{\"jobs\": [{}]}}", job_json(&job_two, false)),
+    )
+    .unwrap();
+
+    let usage = "date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path\n\
+2026-04-01,actions,actions_linux,1,minutes,9223372036854.775807,9223372036854.775807,0,9223372036854.775807,dev,acme,acme/widgets,.github/workflows/ci.yml\n";
+    std::fs::write(dir.join("usage.csv"), usage).unwrap();
+
+    let output = report(&[
+        "report",
+        "--usage",
+        dir.join("usage.csv").to_str().unwrap(),
+        "--workflows",
+        workflows.to_str().unwrap(),
+        "--runs",
+        dir.to_str().unwrap(),
+    ]);
+    assert_exit(&output, 0);
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}

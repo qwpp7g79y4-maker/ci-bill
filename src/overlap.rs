@@ -63,7 +63,7 @@ pub fn findings(api: &ApiData, workflows: &[WorkflowTotal], scanned: &[Workflow]
             .find(|bucket| same_workflow(bucket, &repository, &workflow_path))
         {
             bucket.minutes = bucket.minutes.saturating_add(minutes);
-            bucket.usd += usd;
+            bucket.usd = Micros(bucket.usd.0.saturating_add(usd.0));
         } else {
             let (file, line) = locate(scanned, &workflow_path);
             buckets.push(Bucket {
@@ -277,7 +277,7 @@ fn price_tail(
             continue;
         }
         minutes = minutes.saturating_add(saved);
-        usd += multiply(saved, per_minute);
+        usd = Micros(usd.0.saturating_add(multiply(saved, per_minute).0));
     }
     (minutes, usd)
 }

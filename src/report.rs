@@ -528,7 +528,9 @@ fn shown_limit(len: usize, top: Option<usize>) -> usize {
 }
 
 fn omitted_net(workflows: &[WorkflowTotal]) -> Micros {
-    workflows.iter().map(|workflow| workflow.net).sum()
+    workflows.iter().fold(Micros::ZERO, |total, workflow| {
+        Micros(total.0.saturating_add(workflow.net.0))
+    })
 }
 
 fn more_workflows_line(count: usize, net: Micros) -> String {

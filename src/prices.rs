@@ -435,8 +435,21 @@ pub fn quote_sku(
             net: Micros::ZERO,
             quantity: Micros::ZERO,
         });
-        entry.net += row.net;
-        entry.quantity += row.quantity;
+        entry.net = entry
+            .net
+            .checked_add(row.net)
+            .ok_or_else(|| PriceFail::Input {
+                path: String::new(),
+                message: format!("line {}: net_amount total is out of range", row.line),
+            })?;
+        entry.quantity =
+            entry
+                .quantity
+                .checked_add(row.quantity)
+                .ok_or_else(|| PriceFail::Input {
+                    path: String::new(),
+                    message: format!("line {}: quantity total is out of range", row.line),
+                })?;
     }
     let mut active: Vec<&RepoTotal> = totals
         .values()

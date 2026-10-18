@@ -884,6 +884,38 @@ fn runner_map_overrides_and_rejects_bad_rows() {
 }
 
 #[test]
+fn csv_net_amount_sum_overflow_is_a_clean_error_not_a_panic() {
+    let path = tmp("overflow/huge.csv");
+    write(
+        &path,
+        usage_csv(&[
+            "2026-09-01,actions,actions_linux,1,minutes,9000000000000,9000000000000,0,9000000000000,user,example-org,example-org/sample-app,.github/workflows/ci.yml",
+            "2026-09-02,actions,actions_linux,1,minutes,9000000000000,9000000000000,0,9000000000000,user,example-org,example-org/sample-app,.github/workflows/ci.yml",
+        ])
+        .as_bytes(),
+    );
+    let output = run(&[
+        "prices",
+        "--sku",
+        "actions_linux",
+        "--usage",
+        path.to_str().unwrap(),
+        "--workflow",
+        ".github/workflows/ci.yml",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("net_amount total is out of range"), "{err}");
+}
+
+#[test]
 fn source_files_do_not_embed_runner_rates() {
     let file =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("prices/actions.json"))

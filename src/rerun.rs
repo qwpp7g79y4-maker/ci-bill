@@ -46,7 +46,9 @@ pub fn findings(api: &ApiData, workflows: &[WorkflowTotal], scanned: &[Workflow]
     }
     let mut found = Vec::new();
     for bucket in buckets {
-        let total = bucket.extras.iter().map(|extra| extra.cost).sum();
+        let total = bucket.extras.iter().fold(Micros::ZERO, |total, extra| {
+            Micros(total.0.saturating_add(extra.cost.0))
+        });
         let count = bucket.extras.len();
         found.push(make_finding(
             &bucket.file,
