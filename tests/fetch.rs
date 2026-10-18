@@ -329,6 +329,15 @@ fn empty_runs() -> Reply {
     ok_json(serde_json::to_vec(&runs_page(Some(0), Vec::new())).expect("runs"))
 }
 
+/// Whether `dir` tells `a.txt` and `A.TXT` apart.
+fn filesystem_is_case_sensitive(dir: &Path) -> bool {
+    let probe = dir.join("case-probe.tmp");
+    fs::write(&probe, "").expect("probe");
+    let sensitive = !dir.join("CASE-PROBE.TMP").exists();
+    fs::remove_file(&probe).expect("probe");
+    sensitive
+}
+
 fn scratch(name: &str) -> PathBuf {
     let base = std::env::var_os("CARGO_TARGET_TMPDIR")
         .map(PathBuf::from)
@@ -1859,10 +1868,17 @@ fn callee_workflows_are_stored_on_the_cache_path() {
     assert!(ci_text.contains("\r\n"));
     assert!(ci_text.contains("[redacted]"));
     assert!(ci_text.contains("other/lib/.github/workflows/lint.yml@v1"));
+    // `other/lib/.../lint.yml@v1` and `Other/Lib/.../Lint.yml@V1` differ only in
+    // case. On a case-insensitive filesystem (default on macOS and Windows) they
+    // are one cache file and the later download replaces the earlier one; the
+    // README lists this under known limitations.
+    let case_sensitive = filesystem_is_case_sensitive(&out);
     let lint =
         fs::read_to_string(out.join("other/lib/.github/workflows/lint.yml@v1")).expect("lint");
-    assert!(lint.contains("name: LintCallee"), "{lint}");
-    assert!(lint.contains("./.github/workflows/more.yml"), "{lint}");
+    if case_sensitive {
+        assert!(lint.contains("name: LintCallee"), "{lint}");
+        assert!(lint.contains("./.github/workflows/more.yml"), "{lint}");
+    }
     assert!(!lint.contains("bmFtZQ"));
     assert_eq!(
         fs::read_to_string(out.join("other/lib/.github/workflows/more.yml@v1")).expect("more"),
@@ -1872,10 +1888,11 @@ fn callee_workflows_are_stored_on_the_cache_path() {
         .expect("build");
     assert!(build.contains("name: BuildCallee"), "{build}");
     assert!(build.contains("[redacted]"), "{build}");
-    assert_eq!(
-        fs::read_to_string(out.join("Other/Lib/.github/workflows/Lint.yml@V1")).expect("case"),
-        "name: CaseCallee\n"
-    );
+    let case =
+        fs::read_to_string(out.join("Other/Lib/.github/workflows/Lint.yml@V1")).expect("case");
+    if case_sensitive {
+        assert_eq!(case, "name: CaseCallee\n");
+    }
     assert_eq!(
         fs::read_to_string(out.join("fourth/lib/.github/workflows/bad.yml@v1")).expect("bad"),
         ":\n  - [\n"

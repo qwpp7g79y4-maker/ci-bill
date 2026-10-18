@@ -161,6 +161,10 @@ The sample data above is invented; see `samples/README.md`.
 - Only usage rows with product `actions` are ranked. Rows for other
   products are added to one "Other products" total and are not broken down
   per repository or workflow.
+- On a case-insensitive filesystem (the default on macOS and Windows),
+  `fetch` stores two called workflows whose paths differ only in letter
+  case (for example `lint.yml@v1` and `Lint.yml@V1`) in the same cache
+  file, so the later download replaces the earlier one.
 
 ## License
 
