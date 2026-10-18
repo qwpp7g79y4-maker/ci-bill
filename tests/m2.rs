@@ -1,3 +1,4 @@
+use ci_bill::display::display_path;
 use std::process::Command;
 
 const HEADER: &str = "date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path";
@@ -39,18 +40,23 @@ fn assert_exit(output: &std::process::Output, code: i32) {
     );
 }
 
+/// The usage path as reports show it (`/` separators on every OS).
+fn shown(path: &str) -> String {
+    display_path(std::path::Path::new(path))
+}
+
 fn report_text(body: &str, name: &str) -> (String, String) {
     let path = write_usage(name, body);
     let output = run(&["report", "--usage", &path]);
     assert_exit(&output, 0);
-    (path, stdout(&output))
+    (shown(&path), stdout(&output))
 }
 
 fn report_json(body: &str, name: &str) -> (String, serde_json::Value) {
     let path = write_usage(name, body);
     let output = run(&["report", "--usage", &path, "--json"]);
     assert_exit(&output, 0);
-    (path, parse_json(&output))
+    (shown(&path), parse_json(&output))
 }
 
 /// 118 * 0.062 = 7.316. The CSV net is the total even when the unit price is tweaked.
