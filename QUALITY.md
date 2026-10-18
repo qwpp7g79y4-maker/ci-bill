@@ -7,11 +7,11 @@ by PEPAI (pep_ai@icloud.com).
 
 `cargo test` (debug and release, stable 1.99 and MSRV 1.85, all green):
 
-- 310 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
+- 312 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
 - 167 integration tests across 22 files under `tests/`, driving the real
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
-- 477 tests total, 0 failing.
+- 479 tests total, 0 failing.
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are both
 clean, for the main crate and for `fuzz/`.
@@ -29,9 +29,27 @@ callable from a release workflow later):
 - `fuzz-build`: `cargo +nightly fuzz build` for every fuzz target, to catch
   fuzz-target bitrot without running a full campaign in CI.
 
-This repository has no remote, so the workflow has not actually run yet;
-every job's commands were run locally first (see above and below) with
-`-j 2`/`--test-threads=2` to bound memory and CPU use.
+Every job's commands were run locally first with `-j 2`/`--test-threads=2`
+to bound memory and CPU use. The first runs on GitHub (19 October 2026)
+failed on Windows and macOS; the fixes are listed under "Cross-OS fixes"
+below. CI run 39177348023 on commit `2c1614a` passed all seven jobs.
+
+## Cross-OS fixes from the first GitHub CI runs
+
+- `--fix-diff` wrote the `--- a/`/`+++ b/` headers with the OS path, so on
+  Windows they held `\` and `git apply` rejected the diff. Headers now use
+  `/`. Test: `fix_diff::tests::diff_headers_use_forward_slashes`, plus the
+  `tests/fix_diff.rs` tests that apply the diff with `git apply`.
+- Reports showed a workflow path built from `--workflows` and a file name
+  with mixed separators on Windows (`samples/.github/workflows\lint.yml`).
+  The text, Markdown and JSON reports now show paths with `/` on every OS.
+  Test: `display::tests::display_path_uses_forward_slashes`.
+- Several tests assumed a case-sensitive filesystem or `/` in printed
+  paths; they were adjusted, not the behaviour they check.
+- Not fixed: on a case-insensitive filesystem (the default on macOS and
+  Windows), `fetch` stores two called workflows whose paths differ only in
+  letter case in one cache file, so the later download replaces the
+  earlier one. The README lists this under known limitations.
 
 ## Fuzzing
 
@@ -193,6 +211,5 @@ report) printed a `line 0` that named no real row. Fixed in `src/usage.rs`
   processes writing to the same `--out` directory) is still open; this
   pass did not attempt it. EC15 above fixes the single-process interrupted
   write, not concurrent-writer races.
-- The CI workflow has not run on real Windows/macOS runners yet (no
-  remote); the portability review for this pass was local reading plus the
-  local Linux test run, not a cross-OS CI run.
+- The `fetch` cache case collision on case-insensitive filesystems (see
+  "Cross-OS fixes" above).

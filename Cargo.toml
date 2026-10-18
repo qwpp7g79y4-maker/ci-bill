@@ -5,7 +5,12 @@ edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["PEPAI <pep_ai@icloud.com>"]
-exclude = ["fuzz/"]
+description = "Rank GitHub Actions cost per workflow from the billing usage CSV and point to likely causes"
+repository = "https://github.com/qwpp7g79y4-maker/ci-bill"
+readme = "README.md"
+keywords = ["github-actions", "ci", "cost", "billing", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["/.github/", "/.gitattributes", "/fuzz/", "/prive/"]
 
 [lib]
 name = "ci_bill"

@@ -2,6 +2,8 @@
 
 Find out which GitHub Actions workflow costs the money, and why.
 
+[![crates.io](https://img.shields.io/crates/v/ci-bill.svg)](https://crates.io/crates/ci-bill) [![downloads](https://img.shields.io/crates/d/ci-bill.svg)](https://crates.io/crates/ci-bill) [![CI](https://github.com/qwpp7g79y4-maker/ci-bill/actions/workflows/ci.yml/badge.svg)](https://github.com/qwpp7g79y4-maker/ci-bill/actions/workflows/ci.yml) [![PEPAI checked](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fqwpp7g79y4-maker%2Fci-bill%2Fmain%2F.github%2Fbadge.json)](QUALITY.md) [![MSRV 1.85](https://img.shields.io/badge/MSRV-1.85-blue.svg)](Cargo.toml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 `ci-bill` ranks cost per repository, workflow, and runner SKU, and points to
 likely causes with `file:line`. It reads two kinds of input:
 
@@ -20,12 +22,19 @@ to the network, using a `GH_TOKEN` or `GITHUB_TOKEN` from the environment.
 
 ## Installation
 
-ci-bill is not published on crates.io. With Rust 1.85 or newer, install it
-from this repository:
+With Rust 1.85 or newer, install from [crates.io](https://crates.io/crates/ci-bill):
 
 ```sh
-cargo install --git https://github.com/qwpp7g79y4-maker/ci-bill --locked
+cargo install --locked ci-bill
+ci-bill --help
 ```
+
+There are no ready-made binaries. The tests run in CI on Linux, Windows,
+macOS on Apple Silicon and macOS on Intel, and on Rust 1.85. Other systems
+may work with `cargo install`, but are not tested.
+
+For the latest `main`:
+`cargo install --locked --git https://github.com/qwpp7g79y4-maker/ci-bill`.
 
 ## Commands
 
