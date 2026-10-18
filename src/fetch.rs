@@ -86,13 +86,13 @@ impl UtcDate {
 }
 
 /// `OWNER/REPO` for `--repo`.
-pub(crate) fn parse_repo_arg(text: &str) -> Result<String, String> {
+pub fn parse_repo_arg(text: &str) -> Result<String, String> {
     let (owner, repo) = split_repo(text)?;
     Ok(format!("{owner}/{repo}"))
 }
 
 /// `YYYY-MM-DD` for `--since` and `--until`.
-pub(crate) fn parse_utc_date(text: &str) -> Result<UtcDate, String> {
+pub fn parse_utc_date(text: &str) -> Result<UtcDate, String> {
     parse_date(text).ok_or_else(|| "expected a UTC date YYYY-MM-DD".to_string())
 }
 

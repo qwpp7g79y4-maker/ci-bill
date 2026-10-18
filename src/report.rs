@@ -262,7 +262,7 @@ fn render_json_report(
 }
 
 /// Status line when the Actions net total is above the budget. Amounts use cent rounding.
-pub(crate) fn budget_exceeded_line(total_net: Micros, budget: Micros) -> String {
+pub fn budget_exceeded_line(total_net: Micros, budget: Micros) -> String {
     format!(
         "Budget exceeded: {} > {}",
         total_net.format_cents(),
