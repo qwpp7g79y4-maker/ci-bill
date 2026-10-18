@@ -61,6 +61,26 @@ fn lint_diff(finding: &Finding, workflows_dir: Option<&Path>) -> Option<String> 
         return None;
     }
     let end_idx = block_extent(&lines, key_idx);
+    if end_idx == key_idx + 1 {
+        // The value lives on this one physical line: a plain block scalar,
+        // or a scalar inside a flow mapping. Replace just the value so a
+        // trailing comma, closing brace, or comment on the same line (flow
+        // siblings, or a block comment) survives untouched.
+        let bare = strip_cr(lines[key_idx].0);
+        let (value_start, value_end) = find_value_span(bare, "runs-on")?;
+        let mut new_line = String::with_capacity(bare.len() + "ubuntu-latest".len());
+        new_line.push_str(&bare[..value_start]);
+        new_line.push_str("ubuntu-latest");
+        new_line.push_str(&bare[value_end..]);
+        return Some(build_diff(
+            &path,
+            &lines,
+            text.contains("\r\n"),
+            key_idx,
+            end_idx,
+            &[new_line],
+        ));
+    }
     let indent = " ".repeat(leading_spaces(lines[key_idx].0));
     let new_line = format!("{indent}runs-on: ubuntu-latest");
     Some(build_diff(
@@ -81,6 +101,25 @@ fn timeout_diff(finding: &Finding) -> Option<String> {
     if key_idx >= lines.len() {
         return None;
     }
+    if let Some(brace_end) = flow_job_brace(&path, &text, lines[key_idx].0, finding.line) {
+        // The job's value is a flow mapping on this line: add `timeout-minutes`
+        // as a new flow entry right after its opening brace. Appending an
+        // indented line below it, as the block case does, is not valid YAML
+        // once the job's whole value is already a complete flow node.
+        let bare = strip_cr(lines[key_idx].0);
+        let mut new_line = String::with_capacity(bare.len() + 24);
+        new_line.push_str(&bare[..brace_end]);
+        let _ = write!(new_line, " timeout-minutes: {DEFAULT_TIMEOUT_MINUTES},");
+        new_line.push_str(&bare[brace_end..]);
+        return Some(build_diff(
+            &path,
+            &lines,
+            text.contains("\r\n"),
+            key_idx,
+            key_idx + 1,
+            &[new_line],
+        ));
+    }
     let job_indent = leading_spaces(lines[key_idx].0);
     let child_indent = lines[key_idx + 1..]
         .iter()
@@ -99,6 +138,117 @@ fn timeout_diff(finding: &Finding) -> Option<String> {
         key_idx + 1,
         &[new_line],
     ))
+}
+
+fn strip_cr(line: &str) -> &str {
+    line.strip_suffix('\r').unwrap_or(line)
+}
+
+/// Index right after `key`'s occurrence in `line`, skipping one matching
+/// closing quote when `key` was itself quoted (`"runs-on"`, `'runs-on'`).
+fn skip_closing_quote(line: &str, key_pos: usize, after_key: usize) -> usize {
+    let bytes = line.as_bytes();
+    let opening_quote = key_pos
+        .checked_sub(1)
+        .and_then(|idx| bytes.get(idx))
+        .copied()
+        .filter(|ch| *ch == b'"' || *ch == b'\'');
+    match (opening_quote, bytes.get(after_key)) {
+        (Some(open), Some(close)) if open == *close => after_key + 1,
+        _ => after_key,
+    }
+}
+
+/// Byte range of `key`'s value on `line`: a bare or quoted key, any spaces
+/// or tabs after the colon, then a quoted or bare scalar value. A bare value
+/// ends at a flow delimiter (`,`, `}`, `]`), a comment, or the end of line;
+/// trailing whitespace before that point is not part of the value.
+fn find_value_span(line: &str, key: &str) -> Option<(usize, usize)> {
+    let key_pos = line.find(key)?;
+    let after_key = skip_closing_quote(line, key_pos, key_pos + key.len());
+    let colon = line[after_key..].find(':')? + after_key;
+    let bytes = line.as_bytes();
+    let mut start = colon + 1;
+    while bytes
+        .get(start)
+        .is_some_and(|ch| *ch == b' ' || *ch == b'\t')
+    {
+        start += 1;
+    }
+    let end = match bytes.get(start) {
+        Some(b'"') => find_quoted_end(bytes, start, b'"', true)?,
+        Some(b'\'') => find_quoted_end(bytes, start, b'\'', false)?,
+        _ => find_bare_end(bytes, start),
+    };
+    Some((start, end))
+}
+
+/// Exclusive end of a quoted scalar starting at `start` (the opening quote).
+/// Double-quoted scalars use `\"` to escape the quote; single-quoted
+/// scalars double it (`''`).
+fn find_quoted_end(
+    bytes: &[u8],
+    start: usize,
+    quote: u8,
+    backslash_escapes: bool,
+) -> Option<usize> {
+    let mut idx = start + 1;
+    while idx < bytes.len() {
+        if backslash_escapes && bytes[idx] == b'\\' {
+            idx += 2;
+            continue;
+        }
+        if bytes[idx] == quote {
+            if !backslash_escapes && bytes.get(idx + 1) == Some(&quote) {
+                idx += 2;
+                continue;
+            }
+            return Some(idx + 1);
+        }
+        idx += 1;
+    }
+    None
+}
+
+/// Exclusive end of a bare scalar starting at `start`: up to (not including)
+/// a flow delimiter, a whitespace-led comment, or the end of line, with
+/// trailing whitespace trimmed.
+fn find_bare_end(bytes: &[u8], start: usize) -> usize {
+    let mut idx = start;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b',' | b'}' | b']' => break,
+            b'#' if idx > start && matches!(bytes[idx - 1], b' ' | b'\t') => break,
+            _ => idx += 1,
+        }
+    }
+    let mut end = idx;
+    while end > start && matches!(bytes[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    end
+}
+
+/// When `job_line`'s job value is a flow mapping (`name: { ... }`), the
+/// index right after that mapping's opening brace. `None` for a block-style
+/// job, so the caller falls back to inserting an indented line below it.
+fn flow_job_brace(path: &Path, text: &str, line: &str, job_line: usize) -> Option<usize> {
+    let workflow = crate::workflow::scan_yaml(path, text).ok()?;
+    let job = workflow.jobs.iter().find(|job| job.line == job_line)?;
+    let bare = strip_cr(line);
+    let key_pos = bare.find(job.name.as_str())?;
+    let after_key = skip_closing_quote(bare, key_pos, key_pos + job.name.len());
+    let colon = bare[after_key..].find(':')? + after_key;
+    let bytes = bare.as_bytes();
+    let mut idx = colon + 1;
+    while bytes.get(idx).is_some_and(|ch| *ch == b' ' || *ch == b'\t') {
+        idx += 1;
+    }
+    if bytes.get(idx) == Some(&b'{') {
+        Some(idx + 1)
+    } else {
+        None
+    }
 }
 
 fn concurrency_diff(finding: &Finding) -> Option<String> {
@@ -278,6 +428,77 @@ mod tests {
                 .lines()
                 .any(|line| line.starts_with('-') && !line.starts_with("---")),
             "no removed lines: {diff}"
+        );
+    }
+
+    #[test]
+    fn flow_lint_on_runner_edits_only_the_value() {
+        let dir = scratch("flow-lint");
+        let path = write(
+            &dir,
+            "lint.yml",
+            "jobs: { lint: { runs-on: macos-latest, steps: [ { run: \"echo lint\" } ] } }\n",
+        );
+        let found = [finding(
+            &path,
+            1,
+            FindingKind::LintOnRunner,
+            "lint on macOS",
+        )];
+        let diff = render(&found, None).expect("diff");
+        assert!(
+            diff.contains(
+                "+jobs: { lint: { runs-on: ubuntu-latest, steps: [ { run: \"echo lint\" } ] } }\n"
+            ),
+            "{diff}"
+        );
+        assert!(
+            !diff.contains("-jobs: { lint: { runs-on: macos-latest,\n"),
+            "{diff}"
+        );
+    }
+
+    #[test]
+    fn flow_lint_on_runner_keeps_a_trailing_comma_and_comment() {
+        let dir = scratch("flow-lint-comma");
+        let path = write(
+            &dir,
+            "lint.yml",
+            "jobs: { lint: {\n    runs-on: macos-latest, # pick a runner\n    steps: [ { run: \"echo lint\" } ]\n  } }\n",
+        );
+        let found = [finding(
+            &path,
+            2,
+            FindingKind::LintOnRunner,
+            "lint on macOS",
+        )];
+        let diff = render(&found, None).expect("diff");
+        assert!(
+            diff.contains("+    runs-on: ubuntu-latest, # pick a runner\n"),
+            "{diff}"
+        );
+    }
+
+    #[test]
+    fn flow_missing_timeout_inserts_a_flow_entry_after_the_brace() {
+        let dir = scratch("flow-timeout");
+        let path = write(
+            &dir,
+            "lint.yml",
+            "jobs: { lint: { runs-on: ubuntu-latest, steps: [ { run: \"echo lint\" } ] } }\n",
+        );
+        let found = [finding(
+            &path,
+            1,
+            FindingKind::MissingTimeout,
+            "default timeout is 360 minutes",
+        )];
+        let diff = render(&found, None).expect("diff");
+        assert!(
+            diff.contains(
+                "+jobs: { lint: { timeout-minutes: 30, runs-on: ubuntu-latest, steps: [ { run: \"echo lint\" } ] } }\n"
+            ),
+            "{diff}"
         );
     }
 

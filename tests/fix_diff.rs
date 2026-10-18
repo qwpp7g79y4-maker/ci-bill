@@ -167,6 +167,206 @@ fn fix_diff_adds_timeout_minutes() {
     assert!(patched.contains("timeout-minutes: 30"), "{patched}");
 }
 
+/// Write a single custom workflow file plus a usage row that covers it, for
+/// flow-style YAML shapes the `samples/` fixtures do not exercise.
+fn write_flow_workflow(dir: &Path, yaml: &str) -> PathBuf {
+    let workflows = dir.join(".github/workflows");
+    fs::create_dir_all(&workflows).expect("workflows dir");
+    let path = workflows.join("lint.yml");
+    fs::write(&path, yaml).expect("write workflow");
+    fs::write(
+        dir.join("usage-sample.csv"),
+        "date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path\n\
+2026-09-01,actions,actions_macos,100,minutes,0.062,6.2,0,6.2,ada,example-org,example-org/app,.github/workflows/lint.yml\n",
+    )
+    .expect("write usage");
+    path
+}
+
+/// Re-run `ci-bill report` on the patched tree: it must still exit 0 (the
+/// YAML is still valid) and the named finding text must be gone.
+fn assert_fixed(dir: &Path, gone_finding: &str) {
+    let output = Command::new(env!("CARGO_BIN_EXE_ci-bill"))
+        .current_dir(dir)
+        .args([
+            "report",
+            "--usage",
+            "usage-sample.csv",
+            "--workflows",
+            ".github/workflows",
+        ])
+        .output()
+        .expect("run ci-bill");
+    assert!(
+        output.status.success(),
+        "patched YAML did not parse, stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        !stdout.contains(gone_finding),
+        "{gone_finding:?} still present:\n{stdout}"
+    );
+}
+
+#[test]
+fn fix_diff_pure_flow_lint_on_runner_edits_only_the_value() {
+    let dir = scratch("flow-pure");
+    write_flow_workflow(
+        &dir,
+        "jobs: { lint: { runs-on: macos-latest, timeout-minutes: 30, steps: [ { run: \"echo lint\" } ] } }\n",
+    );
+    git_init_and_commit(&dir);
+
+    let diff = run_fix_diff(&dir);
+    assert!(
+        diff.contains("-jobs: { lint: { runs-on: macos-latest, timeout-minutes: 30, steps: [ { run: \"echo lint\" } ] } }\n"),
+        "{diff}"
+    );
+    assert!(
+        diff.contains("+jobs: { lint: { runs-on: ubuntu-latest, timeout-minutes: 30, steps: [ { run: \"echo lint\" } ] } }\n"),
+        "{diff}"
+    );
+
+    let patched = apply_diff(&dir, &diff);
+    assert!(patched.contains("runs-on: ubuntu-latest"), "{patched}");
+    assert!(!patched.contains("macos-latest"), "{patched}");
+    assert!(
+        patched.contains("steps: [ { run: \"echo lint\" } ] } }"),
+        "{patched}"
+    );
+    assert_fixed(&dir, "lint on macOS");
+}
+
+#[test]
+fn fix_diff_pure_flow_missing_timeout_inserts_a_flow_entry() {
+    let dir = scratch("flow-pure-timeout");
+    write_flow_workflow(
+        &dir,
+        "jobs: { lint: { runs-on: ubuntu-latest, steps: [ { run: \"echo lint\" } ] } }\n",
+    );
+    git_init_and_commit(&dir);
+
+    let diff = run_fix_diff(&dir);
+    assert!(
+        diff.contains("+jobs: { lint: { timeout-minutes: 30, runs-on: ubuntu-latest, steps: [ { run: \"echo lint\" } ] } }\n"),
+        "{diff}"
+    );
+
+    let patched = apply_diff(&dir, &diff);
+    assert!(patched.contains("timeout-minutes: 30"), "{patched}");
+    assert!(
+        patched.contains("steps: [ { run: \"echo lint\" } ] } }"),
+        "{patched}"
+    );
+    assert_fixed(&dir, "default timeout");
+}
+
+#[test]
+fn fix_diff_flow_job_inside_block_jobs_fixes_both_findings() {
+    let dir = scratch("flow-job-in-block-jobs");
+    write_flow_workflow(
+        &dir,
+        "jobs:\n  lint: { runs-on: macos-latest, steps: [ { run: \"echo lint\" } ] }\n",
+    );
+    git_init_and_commit(&dir);
+
+    let first = run_fix_diff(&dir);
+    apply_diff(&dir, &first);
+    let second = run_fix_diff(&dir);
+    let patched = apply_diff(&dir, &second);
+
+    assert!(patched.contains("runs-on: ubuntu-latest"), "{patched}");
+    assert!(!patched.contains("macos-latest"), "{patched}");
+    assert!(patched.contains("timeout-minutes: 30"), "{patched}");
+    assert!(
+        patched.contains("steps: [ { run: \"echo lint\" } ]"),
+        "{patched}"
+    );
+    assert_fixed(&dir, "lint on macOS");
+    assert_fixed(&dir, "default timeout");
+}
+
+#[test]
+fn fix_diff_block_job_inside_flow_jobs_fixes_both_findings() {
+    let dir = scratch("block-job-in-flow-jobs");
+    write_flow_workflow(
+        &dir,
+        "jobs: { lint: {\n    runs-on: macos-latest,\n    steps: [ { run: \"echo lint\" } ]\n  } }\n",
+    );
+    git_init_and_commit(&dir);
+
+    let first = run_fix_diff(&dir);
+    apply_diff(&dir, &first);
+    let second = run_fix_diff(&dir);
+    let patched = apply_diff(&dir, &second);
+
+    assert!(patched.contains("runs-on: ubuntu-latest"), "{patched}");
+    assert!(!patched.contains("macos-latest"), "{patched}");
+    assert!(patched.contains("timeout-minutes: 30"), "{patched}");
+    assert!(
+        patched.contains("steps: [ { run: \"echo lint\" } ]"),
+        "{patched}"
+    );
+    assert_fixed(&dir, "lint on macOS");
+    assert_fixed(&dir, "default timeout");
+}
+
+#[test]
+fn fix_diff_flow_quoted_key_and_value_edits_only_the_value() {
+    let dir = scratch("flow-quoted");
+    write_flow_workflow(
+        &dir,
+        "jobs: { lint: { \"runs-on\": \"macos-latest\", timeout-minutes: 30, steps: [ { run: \"echo lint\" } ] } }\n",
+    );
+    git_init_and_commit(&dir);
+
+    let diff = run_fix_diff(&dir);
+    let patched = apply_diff(&dir, &diff);
+    assert!(patched.contains("\"runs-on\": ubuntu-latest"), "{patched}");
+    assert!(!patched.contains("macos-latest"), "{patched}");
+    assert_fixed(&dir, "lint on macOS");
+}
+
+#[test]
+fn fix_diff_flow_comment_and_crlf_edit_only_the_value() {
+    let dir = scratch("flow-comment-crlf");
+    write_flow_workflow(
+        &dir,
+        "jobs:\r\n  lint:\r\n    runs-on: macos-latest # pick a runner\r\n    steps:\r\n      - run: echo lint\r\n",
+    );
+    git_init_and_commit(&dir);
+
+    let first = run_fix_diff(&dir);
+    apply_diff(&dir, &first);
+    let second = run_fix_diff(&dir);
+    let patched = apply_diff(&dir, &second);
+
+    assert!(
+        patched.contains("runs-on: ubuntu-latest # pick a runner\r\n"),
+        "{patched}"
+    );
+    assert!(!patched.contains("macos-latest"), "{patched}");
+    assert_fixed(&dir, "lint on macOS");
+    assert_fixed(&dir, "default timeout");
+}
+
+#[test]
+fn fix_diff_tab_after_colon_edits_only_the_value() {
+    let dir = scratch("flow-tab");
+    write_flow_workflow(
+        &dir,
+        "jobs: { lint: { runs-on: \tmacos-latest, timeout-minutes: 30, steps: [ { run: \"echo lint\" } ] } }\n",
+    );
+    git_init_and_commit(&dir);
+
+    let diff = run_fix_diff(&dir);
+    let patched = apply_diff(&dir, &diff);
+    assert!(patched.contains("runs-on: \tubuntu-latest"), "{patched:?}");
+    assert!(!patched.contains("macos-latest"), "{patched}");
+    assert_fixed(&dir, "lint on macOS");
+}
+
 #[test]
 fn fix_diff_adds_concurrency_cancel_in_progress() {
     let dir = scratch("f3");
