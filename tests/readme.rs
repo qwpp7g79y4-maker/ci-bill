@@ -92,11 +92,12 @@ fn readme_lists_exit_codes_0_through_3() {
 }
 
 #[test]
-fn readme_has_no_limitations_language() {
-    for banned in ["not supported", "Limits", "limitation"] {
-        assert!(
-            !README.to_lowercase().contains(&banned.to_lowercase()),
-            "README.md should not contain {banned:?}"
-        );
+fn readme_lists_known_limitations() {
+    let section = README
+        .split("## Known limitations")
+        .nth(1)
+        .expect("README.md has a \"## Known limitations\" section");
+    for id in ["**F4**", "**F5**", "Other products"] {
+        assert!(section.contains(id), "Known limitations is missing {id}");
     }
 }

@@ -18,6 +18,15 @@ including reusable workflows and composite actions, with `--workflows`.
 `report` and `prices` are offline: no token, no network. Only `fetch` talks
 to the network, using a `GH_TOKEN` or `GITHUB_TOKEN` from the environment.
 
+## Installation
+
+ci-bill is not published on crates.io. With Rust 1.85 or newer, install it
+from this repository:
+
+```sh
+cargo install --git https://github.com/qwpp7g79y4-maker/ci-bill --locked
+```
+
 ## Commands
 
 ```sh
@@ -142,6 +151,16 @@ example-org/sample-app (no workflow)                    0.00    0.01      0.01  
 ```
 
 The sample data above is invented; see `samples/README.md`.
+
+## Known limitations
+
+- **F4** counts jobs, not cost. A large matrix of cheap Linux jobs is
+  flagged the same way as an expensive one.
+- **F5** cannot reliably tell an intentional retry from a wasteful re-run;
+  the saved API data does not say why a job ran again.
+- Only usage rows with product `actions` are ranked. Rows for other
+  products are added to one "Other products" total and are not broken down
+  per repository or workflow.
 
 ## License
 
