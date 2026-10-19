@@ -15,6 +15,9 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    ignore:
+      # The ref of this action is the Rust toolchain itself (1.85 is the MSRV job).
+      - dependency-name: "dtolnay/rust-toolchain"
     open-pull-requests-limit: 5
     groups:
       github-actions:
