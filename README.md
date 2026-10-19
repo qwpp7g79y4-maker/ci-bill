@@ -29,9 +29,30 @@ cargo install --locked ci-bill
 ci-bill --help
 ```
 
-There are no ready-made binaries. The tests run in CI on Linux, Windows,
-macOS on Apple Silicon and macOS on Intel, and on Rust 1.85. Other systems
-may work with `cargo install`, but are not tested.
+Ready-made archives for Linux, Windows and macOS are attached to each
+[GitHub release](https://github.com/qwpp7g79y4-maker/ci-bill/releases), each
+with a sha256 checksum file. Download the archive, check the checksum, extract
+it, and put the binary on your `PATH`:
+
+```sh
+curl -q -fsSL -o ci-bill.tar.gz "$ARCHIVE_URL"
+curl -q -fsSL -o ci-bill.tar.gz.sha256 "$ARCHIVE_URL.sha256"
+sha256sum ci-bill.tar.gz && cat ci-bill.tar.gz.sha256
+tar -xzf ci-bill.tar.gz
+install -m 755 ci-bill-*/ci-bill "$HOME/.local/bin/"
+```
+
+Supported systems for the archives:
+
+- Linux x86_64 (`x86_64-unknown-linux-gnu`): glibc 2.34 or newer. For an
+  older distribution or Alpine, use the statically linked
+  `x86_64-unknown-linux-musl` archive, which needs no glibc.
+- macOS: 10.12 or newer on Intel, 11.0 or newer on Apple Silicon.
+- Windows: Windows 10 or newer, x86_64.
+
+The tests run in CI on Linux, Windows, macOS on Apple Silicon and macOS on
+Intel, and on Rust 1.85. Other systems may work with `cargo install`, but are
+not tested.
 
 For the latest `main`:
 `cargo install --locked --git https://github.com/qwpp7g79y4-maker/ci-bill`.
