@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Build and attach archives to an existing tag's release, from that tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, for example v0.1.0"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  # fmt, clippy and tests on every OS and on Rust 1.85.
+  # Nothing is built or released unless all of them pass.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: ci
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on Ubuntu 22.04 for an older glibc baseline.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          # Statically linked: no glibc needed, also runs on Alpine.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            macos_min: "10.12"
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            macos_min: "11.0"
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      # The helper script may be newer than the tagged commit.
+      - uses: actions/checkout@v7
+        with:
+          path: _main
+          sparse-checkout: scripts
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Check the highest glibc symbol
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: bash _main/scripts/check-glibc.sh "target/${{ matrix.target }}/release/ci-bill" 2.34
+      - name: Package
+        shell: bash
+        run: |
+          name="ci-bill-${TAG}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp README.md QUALITY.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "../target/${{ matrix.target }}/release/ci-bill.exe" "$name/"
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            sha256sum "$name.zip" > "$name.zip.sha256"
+          else
+            cp "../target/${{ matrix.target }}/release/ci-bill" "$name/"
+            tar -czf "$name.tar.gz" "$name"
+            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
+          rm -rf "$name"
+      - name: Smoke test the archive
+        shell: bash
+        run: |
+          name="ci-bill-${TAG}-${{ matrix.target }}"
+          expected="ci-bill ${TAG#v}"
+          mkdir smoke
+          cd smoke
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z x "../dist/$name.zip" > /dev/null
+            bin="./ci-bill.exe"
+          else
+            tar -xzf "../dist/$name.tar.gz"
+            bin="./ci-bill"
+          fi
+          cd "$name"
+          got=$("$bin" --version | tr -d '\r')
+          echo "$got"
+          test "$got" = "$expected"
+          "$bin" --help > /dev/null
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Publish release
+    needs: [ci, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          test "$(ls ./*.tar.gz ./*.zip | wc -l)" -eq 5
+          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" ./*
+          else
+            gh release create "$TAG" --title "ci-bill $TAG" --generate-notes --verify-tag ./*
+          fi
