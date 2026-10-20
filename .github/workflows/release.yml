@@ -78,7 +78,7 @@ jobs:
         run: |
           name="ci-bill-${TAG}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp README.md QUALITY.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.html "dist/$name/"
+          cp README.md QUALITY.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.html "dist/$name/"
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "../target/${{ matrix.target }}/release/ci-bill.exe" "$name/"
