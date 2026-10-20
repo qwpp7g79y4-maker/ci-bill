@@ -199,3 +199,5 @@ The sample data above is invented; see `samples/README.md`.
 ## License
 
 MIT OR Apache-2.0. Maintained by PEPAI (pep_ai@icloud.com).
+
+Release archives include THIRD-PARTY-LICENSES.html with the licenses of the third-party crates in the binary.

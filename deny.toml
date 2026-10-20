@@ -1,0 +1,20 @@
+# cargo-deny configuration. CI runs `cargo deny check licenses`.
+# Only permissive licenses are allowed; copyleft or unknown licenses fail CI.
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
