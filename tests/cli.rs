@@ -1,10 +1,28 @@
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn run(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ci-bill"))
         .args(args)
         .output()
         .expect("run ci-bill")
+}
+
+fn run_with_stdin(args: &[&str], input: &[u8]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ci-bill"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ci-bill");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(input)
+        .expect("write ci-bill stdin");
+    child.wait_with_output().expect("wait for ci-bill")
 }
 
 fn stdout(output: &std::process::Output) -> String {
@@ -248,6 +266,24 @@ fn omitted_workflows_net_overflow_does_not_panic() {
             assert!(value["outside_top"]["net"].is_string());
         }
     }
+}
+
+#[test]
+fn usage_dash_reads_stdin() {
+    let csv = std::fs::read("samples/usage-sample.csv").unwrap();
+    let from_file = run(&["report", "--usage", "samples/usage-sample.csv"]);
+    assert_eq!(from_file.status.code(), Some(0), "{}", stderr(&from_file));
+
+    let from_stdin = run_with_stdin(&["report", "--usage", "-"], &csv);
+    assert_eq!(
+        from_stdin.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&from_stdin),
+        stderr(&from_stdin)
+    );
+    assert_eq!(stdout(&from_stdin), stdout(&from_file));
+    assert!(stderr(&from_stdin).is_empty(), "{}", stderr(&from_stdin));
 }
 
 #[test]

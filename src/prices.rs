@@ -605,7 +605,7 @@ fn strip_core_word(body: &str) -> Option<&str> {
 
 /// CSV with header names `label` and `sku`, in any order.
 pub fn load_runner_map(path: &Path, table: &PriceTable) -> Result<RunnerMap, PriceFail> {
-    let bytes = std::fs::read(path).map_err(|_| PriceFail::Input {
+    let bytes = crate::usage::read_bytes(path).map_err(|_| PriceFail::Input {
         path: path.display().to_string(),
         message: "line 0: cannot read file".to_string(),
     })?;

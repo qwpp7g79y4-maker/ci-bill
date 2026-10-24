@@ -17,6 +17,13 @@ Either input works on its own; together they add measured, per-job cost on
 top of the invoice. It also reads `.github/workflows/*.yml`/`*.yaml`,
 including reusable workflows and composite actions, with `--workflows`.
 
+Download the `--usage` CSV as a **detailed usage report** export from your
+organization's or repository's GitHub billing settings; see GitHub's docs,
+"Billing reports reference", for where that export lives on your plan.
+GitHub's own Billing page already totals that cost; ci-bill reads the same
+data and breaks it down per repository, workflow, and job, with a
+`file:line` cause and a savings estimate the Billing page does not give you.
+
 `report` and `prices` are offline: no token, no network. Only `fetch` talks
 to the network, using a `GH_TOKEN` or `GITHUB_TOKEN` from the environment.
 
@@ -57,6 +64,37 @@ not tested.
 For the latest `main`:
 `cargo install --locked --git https://github.com/qwpp7g79y4-maker/ci-bill`.
 
+## Quick start
+
+Try it without cloning the repository: save a one-row usage CSV and run
+`ci-bill report` on it.
+
+```sh
+cat > usage.csv <<'CSV'
+date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path
+2026-09-01,actions,actions_linux,120,minutes,0.008,0.960,0,0.960,ada,example-org,example-org/sample-app,.github/workflows/ci.yml
+CSV
+ci-bill report --usage usage.csv
+```
+
+```text
+USD (from net_amount)
+Period: 2026-09-01 .. 2026-09-01
+Repositories: example-org/sample-app
+
+Total net: 0.96
+Total minutes: 120
+Other products: 0.00
+
+Workflow                                          Net  Gross  Discount  Minutes    Share
+example-org/sample-app .github/workflows/ci.yml  0.96   0.96      0.00      120  100.00%
+  actions_linux                                  0.96   0.96      0.00      120         
+  measured 0.00  invoice 0.96  difference 0.96
+```
+
+The CSV above is invented. See the Example section below for a larger
+walkthrough on the `samples/` data in this repository.
+
 ## Commands
 
 ```sh
@@ -68,7 +106,8 @@ ci-bill fetch --repo OWNER/REPO --out DIR --since DATE [--until DATE]
 ```
 
 `report` ranks cost from the usage CSV and, with `--workflows`, scans the
-workflow YAML for findings. Add `--runs DIR` to bring in each job's billed
+workflow YAML for findings. `--usage -` reads the CSV from standard input
+instead of a file. Add `--runs DIR` to bring in each job's billed
 minutes, re-run waste, matrix rounding loss, and overlap savings from a
 saved API cache. `--top N` keeps the N highest-net workflows in the table;
 the rest are summarized as one line and their findings move to a
@@ -85,7 +124,8 @@ same diff) instead of the report.
 and retrieval date, or the USD/minute rate for one `--label` (a runner
 label such as `ubuntu-latest` or `[self-hosted, macos]`) or `--sku`. Add
 `--usage`, `--repository`, and `--workflow` to prefer that workflow's own
-CSV rate over the table.
+CSV rate over the table. `--usage` and `--runner-map` both take `-` to
+read their CSV from standard input.
 
 `fetch` downloads a repository's Actions runs and jobs, and any reusable
 workflows they call, into `--out DIR` in the layout `--runs` reads.

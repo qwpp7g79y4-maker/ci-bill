@@ -278,7 +278,7 @@ struct Cli {
 enum Command {
     /// Rank workflow costs from a detailed usage report.
     Report {
-        /// Detailed usage report CSV.
+        /// Detailed usage report CSV. `-` reads standard input.
         #[arg(long, value_name = "CSV")]
         usage: PathBuf,
         /// Directory of workflow YAML files.
@@ -315,6 +315,7 @@ enum Command {
         #[arg(long)]
         json: bool,
         /// CSV of `label,sku` rows. Matching labels use this SKU instead of the built-in map.
+        /// `-` reads standard input.
         #[arg(long, value_name = "CSV")]
         runner_map: Option<PathBuf>,
         /// Runner label or list, for example `ubuntu-latest` or `[self-hosted, macos]`.
@@ -324,6 +325,7 @@ enum Command {
         #[arg(long, value_name = "SKU")]
         sku: Option<String>,
         /// Detailed usage report. Own rows for the workflow and SKU replace the table rate.
+        /// `-` reads standard input.
         #[arg(long, value_name = "CSV")]
         usage: Option<PathBuf>,
         /// Repository (`owner/repo`) that owns the usage rows.

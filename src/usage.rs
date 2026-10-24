@@ -1,4 +1,3 @@
-#[cfg(test)]
 use std::io::Read;
 use std::path::Path;
 
@@ -101,11 +100,22 @@ const COLUMNS: [&str; 13] = [
 ];
 
 pub fn read_usage(path: &Path) -> Result<Vec<UsageRow>, UsageError> {
-    let bytes = std::fs::read(path).map_err(|_| UsageError {
+    let bytes = read_bytes(path).map_err(|_| UsageError {
         line: 0,
         kind: UsageErrorKind::Unreadable,
     })?;
     parse_bytes(&bytes)
+}
+
+/// Read `path`, or standard input when `path` is `-`.
+pub(crate) fn read_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    if path == Path::new("-") {
+        let mut bytes = Vec::new();
+        std::io::stdin().read_to_end(&mut bytes)?;
+        Ok(bytes)
+    } else {
+        std::fs::read(path)
+    }
 }
 
 #[cfg(test)]

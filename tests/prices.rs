@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
@@ -9,6 +10,24 @@ fn run(args: &[&str]) -> std::process::Output {
         .args(args)
         .output()
         .expect("run ci-bill")
+}
+
+fn run_with_stdin(args: &[&str], input: &[u8]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ci-bill"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ci-bill");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(input)
+        .expect("write ci-bill stdin");
+    child.wait_with_output().expect("wait for ci-bill")
 }
 
 fn stdout(output: &std::process::Output) -> String {
@@ -881,6 +900,31 @@ fn runner_map_overrides_and_rejects_bad_rows() {
         "{}",
         stderr(&needs_usage)
     );
+}
+
+#[test]
+fn runner_map_dash_reads_stdin() {
+    let path = tmp("runner-map/stdin-source.csv");
+    let csv = b"label,sku\nmy-box,actions_linux\n";
+    write(&path, csv);
+
+    let from_file = quote_json(&[
+        "prices",
+        "--label",
+        "my-box",
+        "--json",
+        "--runner-map",
+        path.to_str().unwrap(),
+    ]);
+
+    let output = run_with_stdin(
+        &["prices", "--label", "my-box", "--json", "--runner-map", "-"],
+        csv,
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    let from_stdin: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(from_stdin, from_file);
 }
 
 #[test]
