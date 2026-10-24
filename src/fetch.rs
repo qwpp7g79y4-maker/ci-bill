@@ -1109,7 +1109,12 @@ fn next_url(link_values: &[String], request_url: &str) -> Option<String> {
 
 fn next_from_link(value: &str) -> Option<String> {
     for part in split_links(value) {
-        let (url, params) = parse_link_part(part)?;
+        // One malformed link-param (an unexpected header from a proxy or a
+        // future API change) must not hide a well-formed `rel="next"` that
+        // comes later in the same header; skip just that part.
+        let Some((url, params)) = parse_link_part(part) else {
+            continue;
+        };
         let is_next = params
             .iter()
             .any(|(key, rel)| key.eq_ignore_ascii_case("rel") && rel_is_next(rel));
@@ -1984,6 +1989,18 @@ mod tests {
             Some("http://127.0.0.1:9/repos/o/r/actions/runs?page=2&per_page=100")
         );
         assert!(next_from_link(r#"<https://example.test/only>; rel="last""#).is_none());
+    }
+
+    #[test]
+    fn link_header_skips_one_malformed_part_instead_of_hiding_a_later_next() {
+        // A link-param with no `=` (here, a bare `rel` instead of `rel=...`)
+        // must not make the whole header unparseable: a well-formed
+        // `rel="next"` later in the same header is still found.
+        let value = r#"<https://example.test/last>; rel="last", <https://example.test/mid>; rel, <https://example.test/next>; rel="next""#;
+        assert_eq!(
+            next_from_link(value).as_deref(),
+            Some("https://example.test/next")
+        );
     }
 
     #[test]
