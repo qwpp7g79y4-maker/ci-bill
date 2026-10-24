@@ -153,6 +153,16 @@ pub fn render(
             "--usage requires --label or --sku".to_string(),
         ));
     }
+    if usage.is_some_and(|path| path == Path::new("-"))
+        && runner_map.is_some_and(|path| path == Path::new("-"))
+    {
+        return Err(PriceFail::Input {
+            path: String::new(),
+            message:
+                "--usage and --runner-map can't both read standard input; give one of them a file"
+                    .to_string(),
+        });
+    }
 
     let table = embedded_table()?;
     let map = match runner_map {

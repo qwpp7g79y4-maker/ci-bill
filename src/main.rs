@@ -315,7 +315,7 @@ enum Command {
         #[arg(long)]
         json: bool,
         /// CSV of `label,sku` rows. Matching labels use this SKU instead of the built-in map.
-        /// `-` reads standard input.
+        /// `-` reads standard input (not if `--usage` is also `-`).
         #[arg(long, value_name = "CSV")]
         runner_map: Option<PathBuf>,
         /// Runner label or list, for example `ubuntu-latest` or `[self-hosted, macos]`.
@@ -325,7 +325,7 @@ enum Command {
         #[arg(long, value_name = "SKU")]
         sku: Option<String>,
         /// Detailed usage report. Own rows for the workflow and SKU replace the table rate.
-        /// `-` reads standard input.
+        /// `-` reads standard input (not if `--runner-map` is also `-`).
         #[arg(long, value_name = "CSV")]
         usage: Option<PathBuf>,
         /// Repository (`owner/repo`) that owns the usage rows.

@@ -125,7 +125,8 @@ and retrieval date, or the USD/minute rate for one `--label` (a runner
 label such as `ubuntu-latest` or `[self-hosted, macos]`) or `--sku`. Add
 `--usage`, `--repository`, and `--workflow` to prefer that workflow's own
 CSV rate over the table. `--usage` and `--runner-map` both take `-` to
-read their CSV from standard input.
+read their CSV from standard input, but not at the same time; only one of
+them may be `-` in a single run.
 
 `fetch` downloads a repository's Actions runs and jobs, and any reusable
 workflows they call, into `--out DIR` in the layout `--runs` reads.

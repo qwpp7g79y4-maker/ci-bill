@@ -928,6 +928,28 @@ fn runner_map_dash_reads_stdin() {
 }
 
 #[test]
+fn usage_and_runner_map_both_dash_is_rejected_before_reading_stdin() {
+    let output = run_with_stdin(
+        &[
+            "prices",
+            "--label",
+            "my-box",
+            "--runner-map",
+            "-",
+            "--usage",
+            "-",
+        ],
+        b"label,sku\nmy-box,actions_linux\n",
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert_eq!(
+        stderr(&output),
+        "ci-bill: --usage and --runner-map can't both read standard input; give one of them a file\n"
+    );
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+}
+
+#[test]
 fn csv_net_amount_sum_overflow_is_a_clean_error_not_a_panic() {
     let path = tmp("overflow/huge.csv");
     write(
