@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.2] - 2026-10-24
+
+### Changed
+
+- Read stdin when a path is `-`, and add a self-contained quick start.
+- Generate THIRD-PARTY-LICENSES.html once on Linux, with no cargo-about binary for Intel macOS.
+- Tests tolerate a closed stdin when the binary rejects early.
+
+### Fixed
+
+- Refuse reading both `--usage` and `--runner-map` from stdin.
+- Exit 3 when `--usage` and `--runner-map` both read stdin.
+- Floor F1 savings at zero when macOS or Windows minutes already cost less than the same minutes at the undiscounted Linux list rate.
+- Skip a malformed Link-header parameter during pagination instead of dropping a later page of runs or jobs.
+- Track flow-bracket depth when a fix diff finds where a key's value ends, so an F1 or F3 diff keeps a multi-line flow map or sequence valid YAML.
+- Escape a literal backslash in a Markdown table cell before escaping `|`, so a cell that contains `\|` does not split the row.
+
 ## 0.1.1 - 2026-10-21
 
 ### Security
