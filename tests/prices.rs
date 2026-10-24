@@ -21,12 +21,15 @@ fn run_with_stdin(args: &[&str], input: &[u8]) -> std::process::Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn ci-bill");
-    child
-        .stdin
-        .take()
-        .expect("child stdin")
-        .write_all(input)
-        .expect("write ci-bill stdin");
+    // The child may reject and close stdin before this write finishes.
+    {
+        let mut stdin = child.stdin.take().expect("child stdin");
+        match stdin.write_all(input) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(err) => panic!("write ci-bill stdin: {err}"),
+        }
+    }
     child.wait_with_output().expect("wait for ci-bill")
 }
 
