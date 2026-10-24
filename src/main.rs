@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -8,6 +9,21 @@ use ci_bill::{
     money::{DecimalError, Micros},
     overlap, prices, rank, report, rerun, savings, usage, workflow,
 };
+
+/// Write `text` to stdout. `print!`/`println!` panic when the write fails
+/// (broken pipe, full disk); this treats a closed reader (e.g. `| head`) as
+/// a quiet success like most Unix tools, and any other write error as a
+/// clean exit instead of a panic.
+fn write_stdout(text: &str) -> Result<(), ExitCode> {
+    match std::io::stdout().write_all(text.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Err(ExitCode::SUCCESS),
+        Err(err) => {
+            eprintln!("ci-bill: could not write to stdout: {err}");
+            Err(ExitCode::from(1))
+        }
+    }
+}
 
 fn main() -> ExitCode {
     match Cli::try_parse() {
@@ -54,10 +70,10 @@ fn main() -> ExitCode {
                 since,
                 until,
             } => match fetch::fetch(&repo, &out, since, until) {
-                Ok(text) => {
-                    print!("{text}");
-                    ExitCode::SUCCESS
-                }
+                Ok(text) => match write_stdout(&text) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(code) => code,
+                },
                 Err(err) => {
                     eprintln!("ci-bill: {err}");
                     ExitCode::from(err.code())
@@ -210,15 +226,17 @@ fn report(
             &scanned,
         )
     };
-    print!("{text}");
+    if let Err(code) = write_stdout(&text) {
+        return code;
+    }
     // The budget is the Actions net total, including workflows omitted by --top.
     let total_net = ranking.bill.total_net;
     if let Some(amount) = budget.filter(|amount| total_net > *amount) {
         let line = report::budget_exceeded_line(total_net, amount);
         if json {
             eprintln!("{line}");
-        } else {
-            println!("{line}");
+        } else if let Err(code) = write_stdout(&format!("{line}\n")) {
+            return code;
         }
         return ExitCode::from(1);
     }
@@ -254,10 +272,10 @@ fn show_prices(
     workflow: Option<&str>,
 ) -> ExitCode {
     match prices::render(json, runner_map, label, sku, usage, repository, workflow) {
-        Ok(text) => {
-            print!("{text}");
-            ExitCode::SUCCESS
-        }
+        Ok(text) => match write_stdout(&text) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(code) => code,
+        },
         Err(err) => {
             let code = err.exit_code();
             eprintln!("ci-bill: {err}");

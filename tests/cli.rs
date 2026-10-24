@@ -306,3 +306,46 @@ fn missing_usage_exits_3() {
         stderr(&with_optional)
     );
 }
+
+/// A reader that closes early (e.g. `ci-bill report ... | head`) must not
+/// turn the resulting broken pipe into a panic (exit 101) on stdout.
+#[test]
+fn closed_stdout_reader_does_not_panic() {
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("broken-pipe.csv");
+    let mut csv = String::from(
+        "date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path\n",
+    );
+    for i in 0..5_000 {
+        csv.push_str(&format!(
+            "2026-09-01,actions,actions_linux,1,minutes,0.006,1,0,1,ada,example-org,example-org/app,workflow-{i}.yml\n"
+        ));
+    }
+    std::fs::write(&path, csv).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ci-bill"))
+        .args(["report", "--usage", path.to_str().unwrap(), "--top", "5000"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ci-bill");
+
+    // Read a single byte, then drop (close) the reader while ci-bill is
+    // still writing the rest of a report far bigger than one pipe buffer.
+    let mut stdout_pipe = child.stdout.take().expect("child stdout");
+    let mut first_byte = [0u8; 1];
+    std::io::Read::read_exact(&mut stdout_pipe, &mut first_byte).expect("read first byte");
+    drop(stdout_pipe);
+
+    let mut stderr_pipe = child.stderr.take().expect("child stderr");
+    let mut err_buf = Vec::new();
+    std::io::Read::read_to_end(&mut stderr_pipe, &mut err_buf).expect("read stderr");
+
+    let status = child.wait().expect("wait for ci-bill");
+    let err = String::from_utf8_lossy(&err_buf);
+    assert!(!err.contains("panicked"), "ci-bill panicked: {err}");
+    assert_ne!(
+        status.code(),
+        Some(101),
+        "ci-bill should not exit 101 (panic) on a broken pipe\nstderr:\n{err}"
+    );
+}
