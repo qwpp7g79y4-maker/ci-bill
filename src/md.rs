@@ -141,8 +141,15 @@ fn job_location(job: &JobCost) -> String {
 /// Escape a Markdown table cell: a `|` would otherwise end the cell early.
 /// `escape_display` already turns a raw newline or other control character
 /// into a visible escape, which also keeps the row from ending early.
+///
+/// A literal `\` already present in the raw text must be escaped to `\\`
+/// first: otherwise a source `\|` becomes `\\|` (an escaped backslash
+/// followed by a *live* `|`), splitting the cell in two. That doubling runs
+/// before `escape_display`, so it only touches backslashes already in the
+/// input, not the ones `escape_display` itself writes for a control
+/// character (`\n`, `\x1b`, ...), which are already safe as-is.
 fn escape_cell(text: &str) -> String {
-    escape_display(text).replace('|', "\\|")
+    escape_display(&text.replace('\\', "\\\\")).replace('|', "\\|")
 }
 
 #[cfg(test)]
@@ -331,6 +338,31 @@ mod tests {
             .find(|line| line.starts_with("| F11"))
             .expect("row");
         // 5 delimiters plus the one escaped `\|` inside the message cell.
+        assert_eq!(row.matches('|').count(), 6, "{row}");
+    }
+
+    #[test]
+    fn a_literal_backslash_before_a_pipe_does_not_unescape_the_pipe() {
+        // A `\|` already in the source text (for example a matrix axis name
+        // quoted like `'evil\|pwn'`) must not become a *live* column
+        // delimiter: the existing backslash has to be escaped first, so the
+        // GFM-escaped backslash pair does not also "protect" the pipe that
+        // follows it.
+        let findings = vec![finding(
+            "a.yml",
+            1,
+            FindingKind::InvalidUses,
+            r"axis evil\|pwn",
+            "0",
+        )];
+        let text = render(&[], &bill("0"), Some(&findings), None, &[], None);
+        assert!(text.contains(r"axis evil\\\|pwn"), "{text}");
+        let row = text
+            .lines()
+            .find(|line| line.starts_with("| F11"))
+            .expect("row");
+        // 5 delimiters plus the one escaped `\|` inside the message cell:
+        // the message must stay in one cell, not split into two.
         assert_eq!(row.matches('|').count(), 6, "{row}");
     }
 

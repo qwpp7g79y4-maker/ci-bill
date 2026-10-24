@@ -93,7 +93,9 @@ fn lint_savings(portions: &[RunnerPortion], finding: &Finding, linux: Micros) ->
         minutes = add(minutes, portion.minutes);
         net = add(net, portion.net);
     }
-    sub(net, money::rounded_product(minutes, linux))
+    // A heavily discounted CSV net can be lower than the same minutes priced
+    // at the undiscounted Linux list rate; there is nothing left to save then.
+    sub(net, money::rounded_product(minutes, linux)).max(Micros::ZERO)
 }
 
 fn stuck_savings(
@@ -1029,5 +1031,27 @@ jobs:
         assert_eq!(found[1].path, Path::new("a.yml"));
         assert_eq!(found[1].line, 4);
         assert_eq!(found[2].path, Path::new("b.yml"));
+    }
+
+    #[test]
+    fn f1_savings_floors_at_zero_when_the_discounted_net_beats_the_linux_rate() {
+        // 1000 macOS minutes billed at a steep negotiated discount (net
+        // 0.006 total) cost less than those same 1000 minutes would at the
+        // undiscounted Linux list rate (0.008/minute = 8.00), so there is
+        // nothing left to save by moving to Linux: savings must be 0, not
+        // negative.
+        let csv = format!(
+            "{HEAD}\n2026-09-01,actions,actions_macos,1000,minutes,0.062,62.000000,61.994000,0.006000,dev,example-org,example-org/app,.github/workflows/lint.yml,\n"
+        );
+        let found = load(
+            "f1-floor",
+            &csv,
+            &[(
+                "lint.yml",
+                "name: CI\non: push\njobs:\n  lint:\n    runs-on: macos-latest\n    steps:\n      - run: cargo clippy -- -D warnings\n",
+            )],
+        );
+        let lint = price(FindingKind::LintOnRunner, &found);
+        assert_eq!(lint.savings, Micros::ZERO, "{found:?}");
     }
 }

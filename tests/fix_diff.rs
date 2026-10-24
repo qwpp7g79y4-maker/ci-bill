@@ -403,3 +403,63 @@ fn fix_diff_adds_concurrency_cancel_in_progress() {
     let patched = apply_diff(&dir, &diff);
     assert!(patched.contains("cancel-in-progress: true"), "{patched}");
 }
+
+#[test]
+fn fix_diff_multiline_flow_on_block_adds_concurrency_after_the_closing_brace() {
+    // `on:` is a flow mapping that spans several lines, with its closing
+    // `}` written back at the key's own indent (0). The indentation-only
+    // heuristic for "where does this value end" mistook that `}` line for
+    // the next sibling key and inserted the new block above it, between
+    // the mapping's entries and its own closing brace.
+    let dir = scratch("flow-on-block");
+    let workflows = dir.join(".github/workflows");
+    fs::create_dir_all(&workflows).expect("workflows dir");
+    fs::write(
+        workflows.join("ci.yml"),
+        "name: CI\non: {\n  push: {},\n  pull_request: {}\n}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    steps:\n      - run: echo hi\n",
+    )
+    .expect("write workflow");
+    fs::write(
+        dir.join("usage-sample.csv"),
+        "date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path\n\
+2026-09-01,actions,actions_linux,100,minutes,0.008,0.8,0,0.8,ada,example-org,example-org/app,.github/workflows/ci.yml\n",
+    )
+    .expect("write usage");
+    git_init_and_commit(&dir);
+
+    let diff = run_fix_diff(&dir);
+    assert!(diff.contains("+concurrency:\n"), "{diff}");
+    // The closing `}` must stay a removed/kept line *before* the new block,
+    // not get pushed below it.
+    assert!(diff.contains(" }\n+concurrency:\n"), "{diff}");
+
+    let patched = apply_diff(&dir, &diff);
+    assert!(patched.contains("cancel-in-progress: true"), "{patched}");
+    assert_fixed(&dir, "cancel-in-progress");
+}
+
+#[test]
+fn fix_diff_multiline_flow_runs_on_sequence_replaces_the_whole_value() {
+    // `runs-on: [ ... ]` written across several lines, with its closing `]`
+    // back at the key's own indent, hit the same "}` line looks like the
+    // next sibling" mistake: the fix left the sequence's brackets stranded
+    // instead of replacing the whole value.
+    let dir = scratch("flow-runs-on-seq");
+    write_flow_workflow(
+        &dir,
+        "jobs:\n  lint:\n    timeout-minutes: 5\n    runs-on: [\n      macos-latest\n    ]\n    steps:\n      - run: cargo fmt --check\n",
+    );
+    git_init_and_commit(&dir);
+
+    let diff = run_fix_diff(&dir);
+    assert!(diff.contains("+    runs-on: ubuntu-latest\n"), "{diff}");
+    assert!(diff.contains("-    runs-on: [\n"), "{diff}");
+    assert!(diff.contains("-      macos-latest\n"), "{diff}");
+    assert!(diff.contains("-    ]\n"), "{diff}");
+
+    let patched = apply_diff(&dir, &diff);
+    assert!(patched.contains("runs-on: ubuntu-latest"), "{patched}");
+    assert!(!patched.contains('['), "{patched}");
+    assert!(!patched.contains(']'), "{patched}");
+    assert_fixed(&dir, "lint on macOS");
+}

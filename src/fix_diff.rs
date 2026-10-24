@@ -305,8 +305,23 @@ fn leading_spaces(line: &str) -> usize {
 /// more indented than the key, with blank lines bridging over to further
 /// indented content. Returns `key_idx + 1` when the key's value is written
 /// on its own line (a scalar, a flow list, or a flow map).
+///
+/// When the key's own line opens a flow list/map (`{`/`[`) that is not also
+/// closed on that line, indentation no longer marks the value's extent: a
+/// multi-line flow map's closing `}` is conventionally written back at the
+/// key's own indent. Such a value instead ends right after the line whose
+/// closing bracket brings the flow depth back to zero.
 fn block_extent(lines: &[(&str, bool)], key_idx: usize) -> usize {
     let key_indent = leading_spaces(lines[key_idx].0);
+    let mut depth = flow_depth_delta(lines[key_idx].0);
+    if depth > 0 {
+        let mut end = key_idx + 1;
+        while end < lines.len() && depth > 0 {
+            depth += flow_depth_delta(lines[end].0);
+            end += 1;
+        }
+        return end;
+    }
     let mut end = key_idx + 1;
     while end < lines.len() {
         let content = lines[end].0;
@@ -317,6 +332,35 @@ fn block_extent(lines: &[(&str, bool)], key_idx: usize) -> usize {
         }
     }
     end
+}
+
+/// Net count of `{`/`[` opened minus `}`/`]` closed on this line, ignoring
+/// bracket characters inside a single- or double-quoted scalar.
+fn flow_depth_delta(line: &str) -> i32 {
+    let mut delta = 0i32;
+    let mut quote: Option<u8> = None;
+    let bytes = line.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        match quote {
+            Some(q) => {
+                if q == b'"' && byte == b'\\' {
+                    idx += 1;
+                } else if byte == q {
+                    quote = None;
+                }
+            }
+            None => match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'{' | b'[' => delta += 1,
+                b'}' | b']' => delta -= 1,
+                _ => {}
+            },
+        }
+        idx += 1;
+    }
+    delta
 }
 
 /// `path` with `/` separators, as `git apply` expects in `--- a/`/`+++ b/`
@@ -561,6 +605,48 @@ mod tests {
         ];
         let diff = render(&found, None).expect("diff");
         assert!(diff.contains("+    runs-on: ubuntu-latest\n"), "{diff}");
+    }
+
+    #[test]
+    fn pull_request_concurrency_on_a_multiline_flow_on_block_lands_after_the_brace() {
+        let dir = scratch("concurrency-flow-on");
+        let path = write(
+            &dir,
+            "ci.yml",
+            "name: CI\non: {\n  push: {},\n  pull_request: {}\n}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    steps:\n      - run: echo hi\n",
+        );
+        let found = [finding(
+            &path,
+            2,
+            FindingKind::PullRequestConcurrency,
+            "pull_request without concurrency cancel-in-progress",
+        )];
+        let diff = render(&found, None).expect("diff");
+        // The flow mapping's closing `}` (line 5) must stay context before
+        // the new block, not get pushed below it.
+        assert!(diff.contains(" }\n+concurrency:\n"), "{diff}");
+        assert!(diff.contains("+  cancel-in-progress: true\n"), "{diff}");
+    }
+
+    #[test]
+    fn lint_on_runner_for_a_multiline_flow_runs_on_sequence_replaces_the_whole_value() {
+        let dir = scratch("lint-flow-seq");
+        let path = write(
+            &dir,
+            "lint.yml",
+            "jobs:\n  lint:\n    timeout-minutes: 5\n    runs-on: [\n      macos-latest\n    ]\n    steps:\n      - run: cargo fmt --check\n",
+        );
+        let found = [finding(
+            &path,
+            4,
+            FindingKind::LintOnRunner,
+            "lint on macOS",
+        )];
+        let diff = render(&found, None).expect("diff");
+        assert!(diff.contains("+    runs-on: ubuntu-latest\n"), "{diff}");
+        assert!(diff.contains("-    runs-on: [\n"), "{diff}");
+        assert!(diff.contains("-      macos-latest\n"), "{diff}");
+        assert!(diff.contains("-    ]\n"), "{diff}");
     }
 
     #[test]
