@@ -330,6 +330,14 @@ impl MarkedEventReceiver for Collector {
 
 fn collect_events(text: &str) -> Result<Vec<(Event, Marker)>, usize> {
     let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // `Parser::load_node` recurses once per collection, and the state
+        // machine calls `parse_node` again for a nested block entry. Past
+        // roughly 19_000 levels that aborts the process. `catch_unwind`
+        // cannot turn the abort into a `Result`, so reject the text before
+        // yaml-rust2's scanner or parser sees it.
+        if let Some(line) = nesting_too_deep(text, MAX_NODE_DEPTH) {
+            return Err(line);
+        }
         let mut collector = Collector { events: Vec::new() };
         let mut parser = Parser::new_from_str(text);
         match parser.load(&mut collector, true) {
@@ -341,6 +349,286 @@ fn collect_events(text: &str) -> Result<Vec<(Event, Marker)>, usize> {
         Ok(result) => result,
         Err(_) => Err(1),
     }
+}
+
+/// 1-based line where block or flow nesting exceeds `limit`, if it does.
+///
+/// One forward pass over the text. It never calls yaml-rust2. Flow `[` `{`
+/// each add a level. A block sequence `-` or a block key at a new column adds
+/// a level; another entry at the same column does not. Several `-` on one
+/// line are nested, not siblings. Returns `None` when the document is shallow
+/// enough to parse, so a real syntax error keeps the parser's line number.
+fn nesting_too_deep(text: &str, limit: usize) -> Option<usize> {
+    let mut block: Vec<usize> = Vec::new();
+    let mut flow: usize = 0;
+    let mut scalar_floor: Option<usize> = None;
+
+    for (idx, raw) in text.split('\n').enumerate() {
+        let line_no = idx + 1;
+        let line = raw.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+        let content = &line[indent..];
+        if content.is_empty() {
+            continue;
+        }
+
+        if let Some(floor) = scalar_floor {
+            if flow == 0 && indent > floor {
+                continue;
+            }
+            scalar_floor = None;
+        }
+
+        if flow > 0 {
+            if flow_line_exceeds(content, &mut flow, block.len(), limit) {
+                return Some(line_no);
+            }
+            continue;
+        }
+
+        if content.starts_with('#') {
+            continue;
+        }
+
+        while block.last().copied().is_some_and(|col| indent < col) {
+            block.pop();
+        }
+
+        if block_line_exceeds(
+            content,
+            indent,
+            &mut block,
+            &mut flow,
+            &mut scalar_floor,
+            limit,
+        ) {
+            return Some(line_no);
+        }
+    }
+    None
+}
+
+fn depth_exceeds(block: usize, flow: usize, limit: usize) -> bool {
+    block.saturating_add(flow) > limit
+}
+
+fn flow_line_exceeds(content: &str, flow: &mut usize, block: usize, limit: usize) -> bool {
+    let chars: Vec<char> = content.chars().collect();
+    let mut index = 0;
+    scan_flow(&chars, &mut index, flow, block, limit)
+}
+
+fn block_line_exceeds(
+    content: &str,
+    line_indent: usize,
+    block: &mut Vec<usize>,
+    flow: &mut usize,
+    scalar_floor: &mut Option<usize>,
+    limit: usize,
+) -> bool {
+    let chars: Vec<char> = content.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '#' {
+            break;
+        }
+        if ch == ' ' || ch == '\t' {
+            index += 1;
+            continue;
+        }
+        if is_seq_dash(&chars, index) {
+            let column = line_indent + index;
+            if block.last().copied() != Some(column) {
+                block.push(column);
+                if depth_exceeds(block.len(), *flow, limit) {
+                    return true;
+                }
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '[' || ch == '{' {
+            *flow += 1;
+            if depth_exceeds(block.len(), *flow, limit) {
+                return true;
+            }
+            index += 1;
+            if scan_flow(&chars, &mut index, flow, block.len(), limit) {
+                return true;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            let quote = ch;
+            index += 1;
+            consume_quoted(&chars, &mut index, quote);
+            break;
+        }
+        if is_block_header(&chars, index) {
+            *scalar_floor = Some(line_indent);
+            break;
+        }
+        if let Some(after_colon) = key_end(&chars, index) {
+            let column = line_indent + index;
+            if block.last().copied() != Some(column) {
+                block.push(column);
+                if depth_exceeds(block.len(), *flow, limit) {
+                    return true;
+                }
+            }
+            index = after_colon;
+            continue;
+        }
+        break;
+    }
+    false
+}
+
+fn is_seq_dash(chars: &[char], index: usize) -> bool {
+    if chars.get(index) != Some(&'-') {
+        return false;
+    }
+    matches!(chars.get(index + 1).copied(), None | Some(' ' | '\t'))
+}
+
+fn is_plain_key_char(ch: char) -> bool {
+    !matches!(
+        ch,
+        ' ' | '\t'
+            | ':'
+            | '#'
+            | '{'
+            | '}'
+            | '['
+            | ']'
+            | ','
+            | '"'
+            | '\''
+            | '|'
+            | '>'
+            | '&'
+            | '*'
+            | '!'
+            | '?'
+            | '%'
+            | '@'
+            | '`'
+    )
+}
+
+/// Index just after `:` when `chars[start..]` is a block key, else `None`.
+fn key_end(chars: &[char], start: usize) -> Option<usize> {
+    if !chars.get(start).is_some_and(|ch| is_plain_key_char(*ch)) {
+        return None;
+    }
+    let mut index = start + 1;
+    while chars.get(index).is_some_and(|ch| is_plain_key_char(*ch)) {
+        index += 1;
+    }
+    if chars.get(index) != Some(&':') {
+        return None;
+    }
+    let after = index + 1;
+    match chars.get(after).copied() {
+        None
+        | Some(
+            ' ' | '\t' | '#' | '\'' | '"' | '{' | '[' | '|' | '>' | '-' | '&' | '*' | '!' | '?',
+        ) => Some(after),
+        Some(_) => None,
+    }
+}
+
+fn is_block_header(chars: &[char], index: usize) -> bool {
+    if !matches!(chars.get(index), Some('|' | '>')) {
+        return false;
+    }
+    let mut cursor = index + 1;
+    // `|+-2`, `|-`, `|2` and `|2-` are all block-scalar headers.
+    if matches!(chars.get(cursor), Some('+' | '-')) {
+        cursor += 1;
+    }
+    while chars.get(cursor).is_some_and(|ch| ch.is_ascii_digit()) {
+        cursor += 1;
+    }
+    if matches!(chars.get(cursor), Some('+' | '-')) {
+        cursor += 1;
+    }
+    while matches!(chars.get(cursor), Some(' ' | '\t')) {
+        cursor += 1;
+    }
+    matches!(chars.get(cursor), None | Some('#'))
+}
+
+fn consume_quoted(chars: &[char], index: &mut usize, quote: char) {
+    if quote == '\'' {
+        while *index < chars.len() {
+            if chars[*index] == '\'' {
+                if chars.get(*index + 1) == Some(&'\'') {
+                    *index += 2;
+                    continue;
+                }
+                *index += 1;
+                return;
+            }
+            *index += 1;
+        }
+        return;
+    }
+    let mut escape = false;
+    while *index < chars.len() {
+        let ch = chars[*index];
+        *index += 1;
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        if ch == '"' {
+            return;
+        }
+    }
+}
+
+/// Walk a flow collection that is already open. `index` moves forward.
+fn scan_flow(
+    chars: &[char],
+    index: &mut usize,
+    flow: &mut usize,
+    block: usize,
+    limit: usize,
+) -> bool {
+    while *index < chars.len() && *flow > 0 {
+        let ch = chars[*index];
+        match ch {
+            '\'' | '"' => {
+                *index += 1;
+                consume_quoted(chars, index, ch);
+            }
+            '[' | '{' => {
+                *flow += 1;
+                *index += 1;
+                if depth_exceeds(block, *flow, limit) {
+                    return true;
+                }
+            }
+            ']' | '}' => {
+                *flow = flow.saturating_sub(1);
+                *index += 1;
+            }
+            '#' if *index == 0 || chars[*index - 1] == ' ' || chars[*index - 1] == '\t' => {
+                *index = chars.len();
+            }
+            _ => *index += 1,
+        }
+    }
+    false
 }
 
 #[derive(Clone)]
@@ -2833,6 +3121,28 @@ jobs:\n  job1:\n    runs-on: ubuntu-latest\n    env: *a8\n";
         assert_eq!(err.path, dir.join("broken.yml"));
         assert_eq!(err.to_string(), "line 4: invalid YAML");
         assert!(!err.to_string().contains(secret), "{err}");
+    }
+
+    #[test]
+    fn nesting_past_the_node_limit_is_invalid_yaml_on_that_line() {
+        let shallow =
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n";
+        assert!(nesting_too_deep(shallow, MAX_NODE_DEPTH).is_none());
+
+        let mut wide = String::from("items:\n");
+        for i in 0..200 {
+            wide.push_str(&format!("- item{i}\n"));
+        }
+        assert!(
+            nesting_too_deep(&wide, MAX_NODE_DEPTH).is_none(),
+            "sibling sequence entries are one collection, not nested depth"
+        );
+
+        let compact = format!("on:\n{}1\n", "- ".repeat(200));
+        assert_eq!(nesting_too_deep(&compact, MAX_NODE_DEPTH), Some(2));
+        let err = scan_yaml(Path::new("deep.yml"), &compact).unwrap_err();
+        assert_eq!(err.to_string(), "line 2: invalid YAML");
+        assert!(!err.to_string().contains("on:"), "{err}");
     }
 
     #[test]
