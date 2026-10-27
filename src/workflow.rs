@@ -615,11 +615,20 @@ fn block_indent_indicator(chars: &[char], header: usize) -> usize {
 /// True when the quote at `index` starts a scalar rather than sitting inside a
 /// plain one (`[it's]`), so an unclosed quote may carry over to the next line.
 fn quote_starts_scalar(chars: &[char], index: usize) -> bool {
-    chars[..index]
+    let before = &chars[..index];
+    let Some(last) = before.iter().rposition(|ch| !matches!(ch, ' ' | '\t')) else {
+        return true;
+    };
+    if matches!(before[last], '[' | '{' | ',' | ':' | '?' | '-') {
+        return true;
+    }
+    // A quote after a separated `&anchor` or `!tag` token still starts the scalar.
+    let separated = last + 1 < index;
+    let token = before[..=last]
         .iter()
-        .rev()
-        .find(|ch| !matches!(ch, ' ' | '\t'))
-        .is_none_or(|ch| matches!(ch, '[' | '{' | ',' | ':' | '?' | '-'))
+        .rposition(|ch| matches!(ch, ' ' | '\t' | '[' | '{' | ','))
+        .map_or(0, |at| at + 1);
+    separated && matches!(before.get(token), Some('&' | '!'))
 }
 
 /// Returns false when the line ends before the closing quote.
@@ -3222,6 +3231,31 @@ jobs:\n  job1:\n    runs-on: ubuntu-latest\n    env: *a8\n";
 
         let shallow = "env:\n  X: [\"a\n    ]b\", 'c\n    ]d', e]\n  Y: 1\n";
         assert!(nesting_too_deep(shallow, MAX_NODE_DEPTH).is_none());
+    }
+
+    #[test]
+    fn quote_after_anchor_or_tag_in_flow_does_not_hide_depth() {
+        for prefix in ["&a ", "!!str ", "&a !!str "] {
+            let mut deep = format!("env:\n  X: [{prefix}\"z\n    ]\"");
+            for _ in 0..20_000 {
+                deep.push_str(&format!(", [{prefix}\"z\n    ]\""));
+            }
+            deep.push_str("]\n");
+            assert!(
+                nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some(),
+                "prefix {prefix:?}"
+            );
+        }
+
+        let shallow = [
+            "a: [&a \"x\", b]\n",
+            "a: [!!str \"x\n  y\", 1]\n",
+            "a: [&a \"x\", *a]\n",
+            "a: [&a \"x\n  ]y\", *a]\nb: 1\n",
+        ];
+        for text in shallow {
+            assert!(nesting_too_deep(text, MAX_NODE_DEPTH).is_none(), "{text:?}");
+        }
     }
 
     #[test]
