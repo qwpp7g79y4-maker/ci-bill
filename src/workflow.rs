@@ -681,6 +681,20 @@ fn consume_quoted(chars: &[char], index: &mut usize, quote: char) -> bool {
     false
 }
 
+/// True when the `!` at `index` begins a token rather than sitting inside a plain scalar.
+fn tag_starts_here(chars: &[char], index: usize) -> bool {
+    index == 0 || matches!(chars[index - 1], ' ' | '\t' | '[' | '{' | ',')
+}
+
+/// Move past the verbatim `!<...>` tag at `index`. A tag cannot span lines, so
+/// one that is never closed runs to the end of the line.
+fn skip_verbatim_tag(chars: &[char], index: &mut usize) {
+    *index = chars[*index..]
+        .iter()
+        .position(|ch| *ch == '>')
+        .map_or(chars.len(), |close| *index + close + 1);
+}
+
 /// Walk a flow collection that is already open. `index` moves forward.
 fn scan_flow(
     chars: &[char],
@@ -693,6 +707,9 @@ fn scan_flow(
     while *index < chars.len() && *flow > 0 {
         let ch = chars[*index];
         match ch {
+            '!' if chars.get(*index + 1) == Some(&'<') && tag_starts_here(chars, *index) => {
+                skip_verbatim_tag(chars, index);
+            }
             '\'' | '"' => {
                 let starts_scalar = quote_starts_scalar(chars, *index);
                 *index += 1;
@@ -3290,6 +3307,45 @@ jobs:\n  job1:\n    runs-on: ubuntu-latest\n    env: *a8\n";
         let shallow = [
             "x: [!<a,b> \"z\n    ]\", q]\n",
             "a: [!<tag:x,y> \"v\", 1]\n",
+        ];
+        for text in shallow {
+            assert!(nesting_too_deep(text, MAX_NODE_DEPTH).is_none(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn bracket_or_quote_inside_verbatim_tag_does_not_hide_depth() {
+        for tag in ["!<a]>", "!<a'b>", "!<a}>", "!<a\"b>", "!<>", "!<a#b>"] {
+            let deep = format!("env:\n  X: {}1\n", format!("[{tag}").repeat(20_000));
+            assert!(
+                nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some(),
+                "tag {tag:?}"
+            );
+        }
+
+        // Very long tag bodies are skipped whole and still do not hide depth.
+        let long = format!("!<{}]'>", "a".repeat(100_000));
+        let deep = format!("env:\n  X: {}1\n", format!("[{long}").repeat(200));
+        assert!(nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some());
+
+        // An unterminated tag runs to the end of its line; the next line is fresh.
+        for tag in ["!<a]", "!<a'b", "!<", "!<a\"b"] {
+            let text = format!("env:\n  X: [{tag}\n  Y: 1\n");
+            assert!(nesting_too_deep(&text, MAX_NODE_DEPTH).is_none(), "{tag:?}");
+            let mut deep = String::from("env:\n  X: [");
+            for _ in 0..200 {
+                deep.push_str("[\n");
+            }
+            deep.push_str(&format!("{tag}\n"));
+            assert!(nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some(), "{tag:?}");
+        }
+
+        // Tags in shallow flow collections do not change the verdict.
+        let shallow = [
+            "a: [!<a]> x, b]\n",
+            "a: [!<a'b> x, 'c', d]\nb: 1\n",
+            "a: [!<> x, !<a,b> y]\n",
+            "a: {k: !<a}> v, j: 2}\n",
         ];
         for text in shallow {
             assert!(nesting_too_deep(text, MAX_NODE_DEPTH).is_none(), "{text:?}");
