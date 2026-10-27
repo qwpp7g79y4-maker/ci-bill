@@ -361,7 +361,10 @@ fn collect_events(text: &str) -> Result<Vec<(Event, Marker)>, usize> {
 fn nesting_too_deep(text: &str, limit: usize) -> Option<usize> {
     let mut block: Vec<usize> = Vec::new();
     let mut flow: usize = 0;
-    let mut scalar_floor: Option<usize> = None;
+    // Lowest indent at which a line still belongs to the open block scalar.
+    let mut scalar_min_indent: Option<usize> = None;
+    // Quote left open at the end of a line: the next line starts inside it.
+    let mut open_quote: Option<char> = None;
 
     for (idx, raw) in text.split('\n').enumerate() {
         let line_no = idx + 1;
@@ -375,15 +378,37 @@ fn nesting_too_deep(text: &str, limit: usize) -> Option<usize> {
             continue;
         }
 
-        if let Some(floor) = scalar_floor {
-            if flow == 0 && indent > floor {
+        if let Some(quote) = open_quote {
+            let chars: Vec<char> = content.chars().collect();
+            let mut index = 0;
+            if !consume_quoted(&chars, &mut index, quote) {
                 continue;
             }
-            scalar_floor = None;
+            open_quote = None;
+            if flow > 0
+                && scan_flow(
+                    &chars,
+                    &mut index,
+                    &mut flow,
+                    block.len(),
+                    limit,
+                    &mut open_quote,
+                )
+            {
+                return Some(line_no);
+            }
+            continue;
+        }
+
+        if let Some(min_indent) = scalar_min_indent {
+            if flow == 0 && indent >= min_indent {
+                continue;
+            }
+            scalar_min_indent = None;
         }
 
         if flow > 0 {
-            if flow_line_exceeds(content, &mut flow, block.len(), limit) {
+            if flow_line_exceeds(content, &mut flow, block.len(), limit, &mut open_quote) {
                 return Some(line_no);
             }
             continue;
@@ -402,7 +427,8 @@ fn nesting_too_deep(text: &str, limit: usize) -> Option<usize> {
             indent,
             &mut block,
             &mut flow,
-            &mut scalar_floor,
+            &mut scalar_min_indent,
+            &mut open_quote,
             limit,
         ) {
             return Some(line_no);
@@ -415,10 +441,16 @@ fn depth_exceeds(block: usize, flow: usize, limit: usize) -> bool {
     block.saturating_add(flow) > limit
 }
 
-fn flow_line_exceeds(content: &str, flow: &mut usize, block: usize, limit: usize) -> bool {
+fn flow_line_exceeds(
+    content: &str,
+    flow: &mut usize,
+    block: usize,
+    limit: usize,
+    open_quote: &mut Option<char>,
+) -> bool {
     let chars: Vec<char> = content.chars().collect();
     let mut index = 0;
-    scan_flow(&chars, &mut index, flow, block, limit)
+    scan_flow(&chars, &mut index, flow, block, limit, open_quote)
 }
 
 fn block_line_exceeds(
@@ -426,11 +458,14 @@ fn block_line_exceeds(
     line_indent: usize,
     block: &mut Vec<usize>,
     flow: &mut usize,
-    scalar_floor: &mut Option<usize>,
+    scalar_min_indent: &mut Option<usize>,
+    open_quote: &mut Option<char>,
     limit: usize,
 ) -> bool {
     let chars: Vec<char> = content.chars().collect();
     let mut index = 0;
+    // Column of the nearest key on this line; an indent indicator counts from it.
+    let mut parent_indent = line_indent;
     while index < chars.len() {
         let ch = chars[index];
         if ch == '#' {
@@ -457,7 +492,7 @@ fn block_line_exceeds(
                 return true;
             }
             index += 1;
-            if scan_flow(&chars, &mut index, flow, block.len(), limit) {
+            if scan_flow(&chars, &mut index, flow, block.len(), limit, open_quote) {
                 return true;
             }
             continue;
@@ -465,15 +500,20 @@ fn block_line_exceeds(
         if ch == '\'' || ch == '"' {
             let quote = ch;
             index += 1;
-            consume_quoted(&chars, &mut index, quote);
+            if !consume_quoted(&chars, &mut index, quote) {
+                *open_quote = Some(quote);
+            }
             break;
         }
         if is_block_header(&chars, index) {
-            *scalar_floor = Some(line_indent);
+            let floor = line_indent + 1;
+            let explicit = parent_indent + block_indent_indicator(&chars, index);
+            *scalar_min_indent = Some(floor.max(explicit));
             break;
         }
         if let Some(after_colon) = key_end(&chars, index) {
             let column = line_indent + index;
+            parent_indent = column;
             if block.last().copied() != Some(column) {
                 block.push(column);
                 if depth_exceeds(block.len(), *flow, limit) {
@@ -563,7 +603,27 @@ fn is_block_header(chars: &[char], index: usize) -> bool {
     matches!(chars.get(cursor), None | Some('#'))
 }
 
-fn consume_quoted(chars: &[char], index: &mut usize, quote: char) {
+/// Value of the explicit indentation digit in a `|2` / `>-2` header, else 0.
+fn block_indent_indicator(chars: &[char], header: usize) -> usize {
+    chars[header + 1..]
+        .iter()
+        .take_while(|ch| matches!(ch, '+' | '-') || ch.is_ascii_digit())
+        .find_map(|ch| ch.to_digit(10))
+        .map_or(0, |digit| digit as usize)
+}
+
+/// True when the quote at `index` starts a scalar rather than sitting inside a
+/// plain one (`[it's]`), so an unclosed quote may carry over to the next line.
+fn quote_starts_scalar(chars: &[char], index: usize) -> bool {
+    chars[..index]
+        .iter()
+        .rev()
+        .find(|ch| !matches!(ch, ' ' | '\t'))
+        .is_none_or(|ch| matches!(ch, '[' | '{' | ',' | ':' | '?' | '-'))
+}
+
+/// Returns false when the line ends before the closing quote.
+fn consume_quoted(chars: &[char], index: &mut usize, quote: char) -> bool {
     if quote == '\'' {
         while *index < chars.len() {
             if chars[*index] == '\'' {
@@ -572,11 +632,11 @@ fn consume_quoted(chars: &[char], index: &mut usize, quote: char) {
                     continue;
                 }
                 *index += 1;
-                return;
+                return true;
             }
             *index += 1;
         }
-        return;
+        return false;
     }
     let mut escape = false;
     while *index < chars.len() {
@@ -591,9 +651,10 @@ fn consume_quoted(chars: &[char], index: &mut usize, quote: char) {
             continue;
         }
         if ch == '"' {
-            return;
+            return true;
         }
     }
+    false
 }
 
 /// Walk a flow collection that is already open. `index` moves forward.
@@ -603,13 +664,17 @@ fn scan_flow(
     flow: &mut usize,
     block: usize,
     limit: usize,
+    open_quote: &mut Option<char>,
 ) -> bool {
     while *index < chars.len() && *flow > 0 {
         let ch = chars[*index];
         match ch {
             '\'' | '"' => {
+                let starts_scalar = quote_starts_scalar(chars, *index);
                 *index += 1;
-                consume_quoted(chars, index, ch);
+                if !consume_quoted(chars, index, ch) && starts_scalar {
+                    *open_quote = Some(ch);
+                }
             }
             '[' | '{' => {
                 *flow += 1;
@@ -3143,6 +3208,35 @@ jobs:\n  job1:\n    runs-on: ubuntu-latest\n    env: *a8\n";
         let err = scan_yaml(Path::new("deep.yml"), &compact).unwrap_err();
         assert_eq!(err.to_string(), "line 2: invalid YAML");
         assert!(!err.to_string().contains("on:"), "{err}");
+    }
+
+    #[test]
+    fn multiline_quoted_scalar_in_flow_does_not_hide_depth() {
+        // The `]` on each continuation line is scalar text, not a closer.
+        let mut deep = String::from("env:\n  X: [\"z\n    ]\"");
+        for _ in 0..20_000 {
+            deep.push_str(", [\"z\n    ]\"");
+        }
+        deep.push_str("]\n");
+        assert!(nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some());
+
+        let shallow = "env:\n  X: [\"a\n    ]b\", 'c\n    ]d', e]\n  Y: 1\n";
+        assert!(nesting_too_deep(shallow, MAX_NODE_DEPTH).is_none());
+    }
+
+    #[test]
+    fn explicit_indent_indicator_does_not_hide_depth() {
+        // `run:` is at column 8 and `|2` needs content at column 10, so the
+        // column-9 line is structure, not scalar text.
+        let deep = format!(
+            "steps:\n  - name: x\n    run: |2\n     {}leaf\n",
+            "- ".repeat(20_000)
+        );
+        assert!(nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some());
+
+        let shallow =
+            "steps:\n  - name: x\n    run: |2\n        - not a list\n      indented\n    next: 1\n";
+        assert!(nesting_too_deep(shallow, MAX_NODE_DEPTH).is_none());
     }
 
     #[test]
