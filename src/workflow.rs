@@ -612,6 +612,19 @@ fn block_indent_indicator(chars: &[char], header: usize) -> usize {
         .map_or(0, |digit| digit as usize)
 }
 
+/// Start of a verbatim `!<...>` tag ending at `last`, whose commas are not separators.
+fn verbatim_tag_start(before: &[char], last: usize) -> Option<usize> {
+    if before[last] != '>' {
+        return None;
+    }
+    let run = before[..last]
+        .iter()
+        .rposition(|ch| matches!(ch, ' ' | '\t' | '>'))
+        .map_or(0, |at| at + 1);
+    let open = run + before[run..last].iter().position(|ch| *ch == '<')?;
+    (open > run && before[open - 1] == '!').then(|| open - 1)
+}
+
 /// True when the quote at `index` starts a scalar rather than sitting inside a
 /// plain one (`[it's]`), so an unclosed quote may carry over to the next line.
 fn quote_starts_scalar(chars: &[char], index: usize) -> bool {
@@ -624,10 +637,12 @@ fn quote_starts_scalar(chars: &[char], index: usize) -> bool {
     }
     // A quote after a separated `&anchor` or `!tag` token still starts the scalar.
     let separated = last + 1 < index;
-    let token = before[..=last]
-        .iter()
-        .rposition(|ch| matches!(ch, ' ' | '\t' | '[' | '{' | ','))
-        .map_or(0, |at| at + 1);
+    let token = verbatim_tag_start(before, last).unwrap_or_else(|| {
+        before[..=last]
+            .iter()
+            .rposition(|ch| matches!(ch, ' ' | '\t' | '[' | '{' | ','))
+            .map_or(0, |at| at + 1)
+    });
     separated && matches!(before.get(token), Some('&' | '!'))
 }
 
@@ -3252,6 +3267,29 @@ jobs:\n  job1:\n    runs-on: ubuntu-latest\n    env: *a8\n";
             "a: [!!str \"x\n  y\", 1]\n",
             "a: [&a \"x\", *a]\n",
             "a: [&a \"x\n  ]y\", *a]\nb: 1\n",
+        ];
+        for text in shallow {
+            assert!(nesting_too_deep(text, MAX_NODE_DEPTH).is_none(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn quote_after_verbatim_tag_with_comma_does_not_hide_depth() {
+        for tag in ["!<a,b>", "!<tag:x,y>"] {
+            let mut deep = format!("env:\n  X: [{tag} \"z\n    ]\"");
+            for _ in 0..20_000 {
+                deep.push_str(&format!(", [{tag} \"z\n    ]\""));
+            }
+            deep.push_str("]\n");
+            assert!(
+                nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some(),
+                "tag {tag:?}"
+            );
+        }
+
+        let shallow = [
+            "x: [!<a,b> \"z\n    ]\", q]\n",
+            "a: [!<tag:x,y> \"v\", 1]\n",
         ];
         for text in shallow {
             assert!(nesting_too_deep(text, MAX_NODE_DEPTH).is_none(), "{text:?}");
