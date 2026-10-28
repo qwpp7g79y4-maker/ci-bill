@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Stop two stdout panics in the text report and CLI.
+- Reject deeply nested workflow YAML before the recursive parser sees it, so a workflow nested tens of thousands of levels deep gives an `invalid YAML` error instead of a stack overflow.
+- Close two blind spots in that nesting check, and count a quote after an anchor or tag in a flow collection as the start of a scalar.
+- Keep commas inside a verbatim `!<...>` tag from splitting the token, and skip such a tag as a whole, in the nesting check.
+- Split lines in the nesting check on `\r\n`, `\r` and `\n`, as the parser does, so a deeply nested workflow with only CR line endings no longer overflows the stack.
+
 ## [0.1.2] - 2026-10-24
 
 ### Changed

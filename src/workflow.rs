@@ -366,9 +366,8 @@ fn nesting_too_deep(text: &str, limit: usize) -> Option<usize> {
     // Quote left open at the end of a line: the next line starts inside it.
     let mut open_quote: Option<char> = None;
 
-    for (idx, raw) in text.split('\n').enumerate() {
+    for (idx, line) in yaml_lines(text).enumerate() {
         let line_no = idx + 1;
-        let line = raw.trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
@@ -435,6 +434,29 @@ fn nesting_too_deep(text: &str, limit: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Lines as the YAML scanner sees them: a break is `\r\n`, `\r` or `\n`.
+fn yaml_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = Some(text);
+    std::iter::from_fn(move || {
+        let current = rest?;
+        match current.find(['\r', '\n']) {
+            Some(end) => {
+                let skip = if current[end..].starts_with("\r\n") {
+                    2
+                } else {
+                    1
+                };
+                rest = Some(&current[end + skip..]);
+                Some(&current[..end])
+            }
+            None => {
+                rest = None;
+                Some(current)
+            }
+        }
+    })
 }
 
 fn depth_exceeds(block: usize, flow: usize, limit: usize) -> bool {
@@ -3249,6 +3271,39 @@ jobs:\n  job1:\n    runs-on: ubuntu-latest\n    env: *a8\n";
         let err = scan_yaml(Path::new("deep.yml"), &compact).unwrap_err();
         assert_eq!(err.to_string(), "line 2: invalid YAML");
         assert!(!err.to_string().contains("on:"), "{err}");
+    }
+
+    #[test]
+    fn cr_only_and_crlf_line_breaks_do_not_hide_depth() {
+        // yaml-rust2 ends a line at `\r`, `\r\n` and `\n`; the pre-scan must too.
+        for eol in ["\r", "\r\n", "\n"] {
+            let mut deep = format!("on:{eol}");
+            for level in 0..20_000 {
+                deep.push_str(&" ".repeat(level + 1));
+                deep.push_str(&format!("k{level}:{eol}"));
+            }
+            assert!(
+                nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some(),
+                "block nesting with {eol:?} breaks"
+            );
+            let err = scan_yaml(Path::new("deep.yml"), &deep).unwrap_err();
+            assert!(err.to_string().ends_with("invalid YAML"), "{err}");
+
+            let flow = format!(
+                "on:{eol}  x: {}1{}{eol}",
+                "[".repeat(20_000),
+                "]".repeat(20_000)
+            );
+            assert!(
+                nesting_too_deep(&flow, MAX_NODE_DEPTH).is_some(),
+                "flow nesting with {eol:?} breaks"
+            );
+        }
+        let shallow = "jobs:\r  build:\r    runs-on: x\r";
+        assert!(nesting_too_deep(shallow, MAX_NODE_DEPTH).is_none());
+        // Line numbers count each break once, `\r\n` as one.
+        let at_three = format!("a: 1\rb: 2\r\nc: {}1\n", "[".repeat(200));
+        assert_eq!(nesting_too_deep(&at_three, MAX_NODE_DEPTH), Some(3));
     }
 
     #[test]
