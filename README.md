@@ -172,7 +172,7 @@ usage".
 | Code | Meaning |
 | ---- | ------- |
 | 0 | ok |
-| 1 | `--budget` given and the Actions net total is over it |
+| 1 | `--budget` given and the Actions net total is over it, or stdout could not be written (e.g. disk full) |
 | 2 | an input file could not be read: missing column, broken number, invalid YAML/JSON, unreadable file |
 | 3 | a usage error: unknown option, missing required flag, an invalid `--budget` amount, or a runner label not in the price table |
 

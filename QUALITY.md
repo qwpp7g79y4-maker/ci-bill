@@ -7,11 +7,11 @@ by PEPAI (pep_ai@icloud.com).
 
 `cargo test` (debug and release, stable 1.99 and MSRV 1.85, all green):
 
-- 312 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
-- 173 integration tests across 22 files under `tests/`, driving the real
+- 325 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
+- 182 integration tests across 23 files under `tests/`, driving the real
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
-- 485 tests total, 0 failing.
+- 507 tests total, 0 failing.
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are both
 clean, for the main crate and for `fuzz/`.
@@ -196,6 +196,29 @@ report) printed a `line 0` that named no real row. Fixed in `src/usage.rs`
 `amount_overflow_with_a_known_line_names_it`,
 `amount_overflow_with_no_known_line_drops_it`, and the updated
 `tests/cli.rs::amount_overflow_exits_2_for_text_json_and_md`.
+
+## Report-width and stdout-write panics
+
+Two more panics found by an external breaktest, both fixed in this file's
+line-numbered sense of "fixed, not theorized":
+
+- A `repository`/`workflow_path` CSV field long enough to push a text-report
+  column past `u16::MAX` (65,535) characters panicked `core::fmt` ("Formatting
+  argument out of range") in `src/report.rs::widths`/`emit_row`, the default
+  `ci-bill report` output path (`--json`/`--md` were never affected; they do
+  not go through fixed-width formatting). Fixed by capping each column width
+  at `u16::MAX` before it reaches `writeln!`; the full field still prints, it
+  just stops lining up past that width. Test:
+  `report::tests::workflow_name_longer_than_u16_max_does_not_panic_the_text_report`
+  (confirmed to panic before the fix, pass after).
+- Every `print!`/`println!` to stdout in `src/main.rs` (`fetch`, `report`,
+  the budget-exceeded line, `prices`) panicked on a write failure — a closed
+  reader (`ci-bill report ... | head`, broken pipe) or a full disk (ENOSPC) —
+  because those macros `.unwrap()` the underlying write. Fixed with a
+  `write_stdout` helper that treats a closed reader as a quiet success (like
+  most Unix tools) and any other write error as a clean exit instead of a
+  panic. Test: `tests/cli.rs::closed_stdout_reader_does_not_panic` (confirmed
+  to fail with `Some(101)` and a panic message before the fix, exit 0 after).
 
 ## Open points
 

@@ -624,6 +624,12 @@ fn workflow_rows(workflow: &WorkflowTotal, total_net: Micros) -> Vec<Row> {
     rows
 }
 
+// `{:name_w$}` etc. go through core::fmt, which panics above u16::MAX
+// ("Formatting argument out of range"). Cap so a pathologically long CSV
+// field (repository/workflow_path) can't crash the text report; padding
+// just stops lining up past this width instead.
+const MAX_FMT_WIDTH: usize = u16::MAX as usize;
+
 fn widths(blocks: &[Vec<Row>]) -> Widths {
     let mut widths = Widths {
         name: "Workflow".len(),
@@ -634,12 +640,12 @@ fn widths(blocks: &[Vec<Row>]) -> Widths {
         share: "Share".len(),
     };
     for row in blocks.iter().flatten() {
-        widths.name = widths.name.max(row.name.len());
-        widths.net = widths.net.max(row.net.len());
-        widths.gross = widths.gross.max(row.gross.len());
-        widths.discount = widths.discount.max(row.discount.len());
-        widths.minutes = widths.minutes.max(row.minutes.len());
-        widths.share = widths.share.max(row.share.len());
+        widths.name = widths.name.max(row.name.len()).min(MAX_FMT_WIDTH);
+        widths.net = widths.net.max(row.net.len()).min(MAX_FMT_WIDTH);
+        widths.gross = widths.gross.max(row.gross.len()).min(MAX_FMT_WIDTH);
+        widths.discount = widths.discount.max(row.discount.len()).min(MAX_FMT_WIDTH);
+        widths.minutes = widths.minutes.max(row.minutes.len()).min(MAX_FMT_WIDTH);
+        widths.share = widths.share.max(row.share.len()).min(MAX_FMT_WIDTH);
     }
     widths
 }
@@ -1071,6 +1077,18 @@ mod tests {
         assert!(text.contains("org/app\\u{202e}bidi"), "{text}");
         assert!(text.contains("file\\r\\nwith\\x7fdel.yml"), "{text}");
         assert!(text.contains("message\\x1bwith\\u{202e}bidi"), "{text}");
+    }
+
+    #[test]
+    fn workflow_name_longer_than_u16_max_does_not_panic_the_text_report() {
+        let huge_path = "a".repeat(70_000);
+        let big_workflow = workflow(&huge_path, "1", "1", "actions_linux");
+        let totals = bill("1", "1");
+        let text = render(&[big_workflow], &totals, None, None);
+        assert!(
+            text.contains(&huge_path),
+            "report should still contain the full (unpadded) workflow name"
+        );
     }
 
     #[test]

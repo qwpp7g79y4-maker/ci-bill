@@ -330,6 +330,14 @@ impl MarkedEventReceiver for Collector {
 
 fn collect_events(text: &str) -> Result<Vec<(Event, Marker)>, usize> {
     let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // `Parser::load_node` recurses once per collection, and the state
+        // machine calls `parse_node` again for a nested block entry. Past
+        // roughly 19_000 levels that aborts the process. `catch_unwind`
+        // cannot turn the abort into a `Result`, so reject the text before
+        // yaml-rust2's scanner or parser sees it.
+        if let Some(line) = nesting_too_deep(text, MAX_NODE_DEPTH) {
+            return Err(line);
+        }
         let mut collector = Collector { events: Vec::new() };
         let mut parser = Parser::new_from_str(text);
         match parser.load(&mut collector, true) {
@@ -341,6 +349,414 @@ fn collect_events(text: &str) -> Result<Vec<(Event, Marker)>, usize> {
         Ok(result) => result,
         Err(_) => Err(1),
     }
+}
+
+/// 1-based line where block or flow nesting exceeds `limit`, if it does.
+///
+/// One forward pass over the text. It never calls yaml-rust2. Flow `[` `{`
+/// each add a level. A block sequence `-` or a block key at a new column adds
+/// a level; another entry at the same column does not. Several `-` on one
+/// line are nested, not siblings. Returns `None` when the document is shallow
+/// enough to parse, so a real syntax error keeps the parser's line number.
+fn nesting_too_deep(text: &str, limit: usize) -> Option<usize> {
+    let mut block: Vec<usize> = Vec::new();
+    let mut flow: usize = 0;
+    // Lowest indent at which a line still belongs to the open block scalar.
+    let mut scalar_min_indent: Option<usize> = None;
+    // Quote left open at the end of a line: the next line starts inside it.
+    let mut open_quote: Option<char> = None;
+
+    for (idx, line) in yaml_lines(text).enumerate() {
+        let line_no = idx + 1;
+        if line.is_empty() {
+            continue;
+        }
+        let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+        let content = &line[indent..];
+        if content.is_empty() {
+            continue;
+        }
+
+        if let Some(quote) = open_quote {
+            let chars: Vec<char> = content.chars().collect();
+            let mut index = 0;
+            if !consume_quoted(&chars, &mut index, quote) {
+                continue;
+            }
+            open_quote = None;
+            if flow > 0
+                && scan_flow(
+                    &chars,
+                    &mut index,
+                    &mut flow,
+                    block.len(),
+                    limit,
+                    &mut open_quote,
+                )
+            {
+                return Some(line_no);
+            }
+            continue;
+        }
+
+        if let Some(min_indent) = scalar_min_indent {
+            if flow == 0 && indent >= min_indent {
+                continue;
+            }
+            scalar_min_indent = None;
+        }
+
+        if flow > 0 {
+            if flow_line_exceeds(content, &mut flow, block.len(), limit, &mut open_quote) {
+                return Some(line_no);
+            }
+            continue;
+        }
+
+        if content.starts_with('#') {
+            continue;
+        }
+
+        while block.last().copied().is_some_and(|col| indent < col) {
+            block.pop();
+        }
+
+        if block_line_exceeds(
+            content,
+            indent,
+            &mut block,
+            &mut flow,
+            &mut scalar_min_indent,
+            &mut open_quote,
+            limit,
+        ) {
+            return Some(line_no);
+        }
+    }
+    None
+}
+
+/// Lines as the YAML scanner sees them: a break is `\r\n`, `\r` or `\n`.
+fn yaml_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = Some(text);
+    std::iter::from_fn(move || {
+        let current = rest?;
+        match current.find(['\r', '\n']) {
+            Some(end) => {
+                let skip = if current[end..].starts_with("\r\n") {
+                    2
+                } else {
+                    1
+                };
+                rest = Some(&current[end + skip..]);
+                Some(&current[..end])
+            }
+            None => {
+                rest = None;
+                Some(current)
+            }
+        }
+    })
+}
+
+fn depth_exceeds(block: usize, flow: usize, limit: usize) -> bool {
+    block.saturating_add(flow) > limit
+}
+
+fn flow_line_exceeds(
+    content: &str,
+    flow: &mut usize,
+    block: usize,
+    limit: usize,
+    open_quote: &mut Option<char>,
+) -> bool {
+    let chars: Vec<char> = content.chars().collect();
+    let mut index = 0;
+    scan_flow(&chars, &mut index, flow, block, limit, open_quote)
+}
+
+fn block_line_exceeds(
+    content: &str,
+    line_indent: usize,
+    block: &mut Vec<usize>,
+    flow: &mut usize,
+    scalar_min_indent: &mut Option<usize>,
+    open_quote: &mut Option<char>,
+    limit: usize,
+) -> bool {
+    let chars: Vec<char> = content.chars().collect();
+    let mut index = 0;
+    // Column of the nearest key on this line; an indent indicator counts from it.
+    let mut parent_indent = line_indent;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '#' {
+            break;
+        }
+        if ch == ' ' || ch == '\t' {
+            index += 1;
+            continue;
+        }
+        if is_seq_dash(&chars, index) {
+            let column = line_indent + index;
+            if block.last().copied() != Some(column) {
+                block.push(column);
+                if depth_exceeds(block.len(), *flow, limit) {
+                    return true;
+                }
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '[' || ch == '{' {
+            *flow += 1;
+            if depth_exceeds(block.len(), *flow, limit) {
+                return true;
+            }
+            index += 1;
+            if scan_flow(&chars, &mut index, flow, block.len(), limit, open_quote) {
+                return true;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            let quote = ch;
+            index += 1;
+            if !consume_quoted(&chars, &mut index, quote) {
+                *open_quote = Some(quote);
+            }
+            break;
+        }
+        if is_block_header(&chars, index) {
+            let floor = line_indent + 1;
+            let explicit = parent_indent + block_indent_indicator(&chars, index);
+            *scalar_min_indent = Some(floor.max(explicit));
+            break;
+        }
+        if let Some(after_colon) = key_end(&chars, index) {
+            let column = line_indent + index;
+            parent_indent = column;
+            if block.last().copied() != Some(column) {
+                block.push(column);
+                if depth_exceeds(block.len(), *flow, limit) {
+                    return true;
+                }
+            }
+            index = after_colon;
+            continue;
+        }
+        break;
+    }
+    false
+}
+
+fn is_seq_dash(chars: &[char], index: usize) -> bool {
+    if chars.get(index) != Some(&'-') {
+        return false;
+    }
+    matches!(chars.get(index + 1).copied(), None | Some(' ' | '\t'))
+}
+
+fn is_plain_key_char(ch: char) -> bool {
+    !matches!(
+        ch,
+        ' ' | '\t'
+            | ':'
+            | '#'
+            | '{'
+            | '}'
+            | '['
+            | ']'
+            | ','
+            | '"'
+            | '\''
+            | '|'
+            | '>'
+            | '&'
+            | '*'
+            | '!'
+            | '?'
+            | '%'
+            | '@'
+            | '`'
+    )
+}
+
+/// Index just after `:` when `chars[start..]` is a block key, else `None`.
+fn key_end(chars: &[char], start: usize) -> Option<usize> {
+    if !chars.get(start).is_some_and(|ch| is_plain_key_char(*ch)) {
+        return None;
+    }
+    let mut index = start + 1;
+    while chars.get(index).is_some_and(|ch| is_plain_key_char(*ch)) {
+        index += 1;
+    }
+    if chars.get(index) != Some(&':') {
+        return None;
+    }
+    let after = index + 1;
+    match chars.get(after).copied() {
+        None
+        | Some(
+            ' ' | '\t' | '#' | '\'' | '"' | '{' | '[' | '|' | '>' | '-' | '&' | '*' | '!' | '?',
+        ) => Some(after),
+        Some(_) => None,
+    }
+}
+
+fn is_block_header(chars: &[char], index: usize) -> bool {
+    if !matches!(chars.get(index), Some('|' | '>')) {
+        return false;
+    }
+    let mut cursor = index + 1;
+    // `|+-2`, `|-`, `|2` and `|2-` are all block-scalar headers.
+    if matches!(chars.get(cursor), Some('+' | '-')) {
+        cursor += 1;
+    }
+    while chars.get(cursor).is_some_and(|ch| ch.is_ascii_digit()) {
+        cursor += 1;
+    }
+    if matches!(chars.get(cursor), Some('+' | '-')) {
+        cursor += 1;
+    }
+    while matches!(chars.get(cursor), Some(' ' | '\t')) {
+        cursor += 1;
+    }
+    matches!(chars.get(cursor), None | Some('#'))
+}
+
+/// Value of the explicit indentation digit in a `|2` / `>-2` header, else 0.
+fn block_indent_indicator(chars: &[char], header: usize) -> usize {
+    chars[header + 1..]
+        .iter()
+        .take_while(|ch| matches!(ch, '+' | '-') || ch.is_ascii_digit())
+        .find_map(|ch| ch.to_digit(10))
+        .map_or(0, |digit| digit as usize)
+}
+
+/// Start of a verbatim `!<...>` tag ending at `last`, whose commas are not separators.
+fn verbatim_tag_start(before: &[char], last: usize) -> Option<usize> {
+    if before[last] != '>' {
+        return None;
+    }
+    let run = before[..last]
+        .iter()
+        .rposition(|ch| matches!(ch, ' ' | '\t' | '>'))
+        .map_or(0, |at| at + 1);
+    let open = run + before[run..last].iter().position(|ch| *ch == '<')?;
+    (open > run && before[open - 1] == '!').then(|| open - 1)
+}
+
+/// True when the quote at `index` starts a scalar rather than sitting inside a
+/// plain one (`[it's]`), so an unclosed quote may carry over to the next line.
+fn quote_starts_scalar(chars: &[char], index: usize) -> bool {
+    let before = &chars[..index];
+    let Some(last) = before.iter().rposition(|ch| !matches!(ch, ' ' | '\t')) else {
+        return true;
+    };
+    if matches!(before[last], '[' | '{' | ',' | ':' | '?' | '-') {
+        return true;
+    }
+    // A quote after a separated `&anchor` or `!tag` token still starts the scalar.
+    let separated = last + 1 < index;
+    let token = verbatim_tag_start(before, last).unwrap_or_else(|| {
+        before[..=last]
+            .iter()
+            .rposition(|ch| matches!(ch, ' ' | '\t' | '[' | '{' | ','))
+            .map_or(0, |at| at + 1)
+    });
+    separated && matches!(before.get(token), Some('&' | '!'))
+}
+
+/// Returns false when the line ends before the closing quote.
+fn consume_quoted(chars: &[char], index: &mut usize, quote: char) -> bool {
+    if quote == '\'' {
+        while *index < chars.len() {
+            if chars[*index] == '\'' {
+                if chars.get(*index + 1) == Some(&'\'') {
+                    *index += 2;
+                    continue;
+                }
+                *index += 1;
+                return true;
+            }
+            *index += 1;
+        }
+        return false;
+    }
+    let mut escape = false;
+    while *index < chars.len() {
+        let ch = chars[*index];
+        *index += 1;
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        if ch == '"' {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when the `!` at `index` begins a token rather than sitting inside a plain scalar.
+fn tag_starts_here(chars: &[char], index: usize) -> bool {
+    index == 0 || matches!(chars[index - 1], ' ' | '\t' | '[' | '{' | ',')
+}
+
+/// Move past the verbatim `!<...>` tag at `index`. A tag cannot span lines, so
+/// one that is never closed runs to the end of the line.
+fn skip_verbatim_tag(chars: &[char], index: &mut usize) {
+    *index = chars[*index..]
+        .iter()
+        .position(|ch| *ch == '>')
+        .map_or(chars.len(), |close| *index + close + 1);
+}
+
+/// Walk a flow collection that is already open. `index` moves forward.
+fn scan_flow(
+    chars: &[char],
+    index: &mut usize,
+    flow: &mut usize,
+    block: usize,
+    limit: usize,
+    open_quote: &mut Option<char>,
+) -> bool {
+    while *index < chars.len() && *flow > 0 {
+        let ch = chars[*index];
+        match ch {
+            '!' if chars.get(*index + 1) == Some(&'<') && tag_starts_here(chars, *index) => {
+                skip_verbatim_tag(chars, index);
+            }
+            '\'' | '"' => {
+                let starts_scalar = quote_starts_scalar(chars, *index);
+                *index += 1;
+                if !consume_quoted(chars, index, ch) && starts_scalar {
+                    *open_quote = Some(ch);
+                }
+            }
+            '[' | '{' => {
+                *flow += 1;
+                *index += 1;
+                if depth_exceeds(block, *flow, limit) {
+                    return true;
+                }
+            }
+            ']' | '}' => {
+                *flow = flow.saturating_sub(1);
+                *index += 1;
+            }
+            '#' if *index == 0 || chars[*index - 1] == ' ' || chars[*index - 1] == '\t' => {
+                *index = chars.len();
+            }
+            _ => *index += 1,
+        }
+    }
+    false
 }
 
 #[derive(Clone)]
@@ -2833,6 +3249,177 @@ jobs:\n  job1:\n    runs-on: ubuntu-latest\n    env: *a8\n";
         assert_eq!(err.path, dir.join("broken.yml"));
         assert_eq!(err.to_string(), "line 4: invalid YAML");
         assert!(!err.to_string().contains(secret), "{err}");
+    }
+
+    #[test]
+    fn nesting_past_the_node_limit_is_invalid_yaml_on_that_line() {
+        let shallow =
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n";
+        assert!(nesting_too_deep(shallow, MAX_NODE_DEPTH).is_none());
+
+        let mut wide = String::from("items:\n");
+        for i in 0..200 {
+            wide.push_str(&format!("- item{i}\n"));
+        }
+        assert!(
+            nesting_too_deep(&wide, MAX_NODE_DEPTH).is_none(),
+            "sibling sequence entries are one collection, not nested depth"
+        );
+
+        let compact = format!("on:\n{}1\n", "- ".repeat(200));
+        assert_eq!(nesting_too_deep(&compact, MAX_NODE_DEPTH), Some(2));
+        let err = scan_yaml(Path::new("deep.yml"), &compact).unwrap_err();
+        assert_eq!(err.to_string(), "line 2: invalid YAML");
+        assert!(!err.to_string().contains("on:"), "{err}");
+    }
+
+    #[test]
+    fn cr_only_and_crlf_line_breaks_do_not_hide_depth() {
+        // yaml-rust2 ends a line at `\r`, `\r\n` and `\n`; the pre-scan must too.
+        for eol in ["\r", "\r\n", "\n"] {
+            let mut deep = format!("on:{eol}");
+            for level in 0..20_000 {
+                deep.push_str(&" ".repeat(level + 1));
+                deep.push_str(&format!("k{level}:{eol}"));
+            }
+            assert!(
+                nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some(),
+                "block nesting with {eol:?} breaks"
+            );
+            let err = scan_yaml(Path::new("deep.yml"), &deep).unwrap_err();
+            assert!(err.to_string().ends_with("invalid YAML"), "{err}");
+
+            let flow = format!(
+                "on:{eol}  x: {}1{}{eol}",
+                "[".repeat(20_000),
+                "]".repeat(20_000)
+            );
+            assert!(
+                nesting_too_deep(&flow, MAX_NODE_DEPTH).is_some(),
+                "flow nesting with {eol:?} breaks"
+            );
+        }
+        let shallow = "jobs:\r  build:\r    runs-on: x\r";
+        assert!(nesting_too_deep(shallow, MAX_NODE_DEPTH).is_none());
+        // Line numbers count each break once, `\r\n` as one.
+        let at_three = format!("a: 1\rb: 2\r\nc: {}1\n", "[".repeat(200));
+        assert_eq!(nesting_too_deep(&at_three, MAX_NODE_DEPTH), Some(3));
+    }
+
+    #[test]
+    fn multiline_quoted_scalar_in_flow_does_not_hide_depth() {
+        // The `]` on each continuation line is scalar text, not a closer.
+        let mut deep = String::from("env:\n  X: [\"z\n    ]\"");
+        for _ in 0..20_000 {
+            deep.push_str(", [\"z\n    ]\"");
+        }
+        deep.push_str("]\n");
+        assert!(nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some());
+
+        let shallow = "env:\n  X: [\"a\n    ]b\", 'c\n    ]d', e]\n  Y: 1\n";
+        assert!(nesting_too_deep(shallow, MAX_NODE_DEPTH).is_none());
+    }
+
+    #[test]
+    fn quote_after_anchor_or_tag_in_flow_does_not_hide_depth() {
+        for prefix in ["&a ", "!!str ", "&a !!str "] {
+            let mut deep = format!("env:\n  X: [{prefix}\"z\n    ]\"");
+            for _ in 0..20_000 {
+                deep.push_str(&format!(", [{prefix}\"z\n    ]\""));
+            }
+            deep.push_str("]\n");
+            assert!(
+                nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some(),
+                "prefix {prefix:?}"
+            );
+        }
+
+        let shallow = [
+            "a: [&a \"x\", b]\n",
+            "a: [!!str \"x\n  y\", 1]\n",
+            "a: [&a \"x\", *a]\n",
+            "a: [&a \"x\n  ]y\", *a]\nb: 1\n",
+        ];
+        for text in shallow {
+            assert!(nesting_too_deep(text, MAX_NODE_DEPTH).is_none(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn quote_after_verbatim_tag_with_comma_does_not_hide_depth() {
+        for tag in ["!<a,b>", "!<tag:x,y>"] {
+            let mut deep = format!("env:\n  X: [{tag} \"z\n    ]\"");
+            for _ in 0..20_000 {
+                deep.push_str(&format!(", [{tag} \"z\n    ]\""));
+            }
+            deep.push_str("]\n");
+            assert!(
+                nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some(),
+                "tag {tag:?}"
+            );
+        }
+
+        let shallow = [
+            "x: [!<a,b> \"z\n    ]\", q]\n",
+            "a: [!<tag:x,y> \"v\", 1]\n",
+        ];
+        for text in shallow {
+            assert!(nesting_too_deep(text, MAX_NODE_DEPTH).is_none(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn bracket_or_quote_inside_verbatim_tag_does_not_hide_depth() {
+        for tag in ["!<a]>", "!<a'b>", "!<a}>", "!<a\"b>", "!<>", "!<a#b>"] {
+            let deep = format!("env:\n  X: {}1\n", format!("[{tag}").repeat(20_000));
+            assert!(
+                nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some(),
+                "tag {tag:?}"
+            );
+        }
+
+        // Very long tag bodies are skipped whole and still do not hide depth.
+        let long = format!("!<{}]'>", "a".repeat(100_000));
+        let deep = format!("env:\n  X: {}1\n", format!("[{long}").repeat(200));
+        assert!(nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some());
+
+        // An unterminated tag runs to the end of its line; the next line is fresh.
+        for tag in ["!<a]", "!<a'b", "!<", "!<a\"b"] {
+            let text = format!("env:\n  X: [{tag}\n  Y: 1\n");
+            assert!(nesting_too_deep(&text, MAX_NODE_DEPTH).is_none(), "{tag:?}");
+            let mut deep = String::from("env:\n  X: [");
+            for _ in 0..200 {
+                deep.push_str("[\n");
+            }
+            deep.push_str(&format!("{tag}\n"));
+            assert!(nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some(), "{tag:?}");
+        }
+
+        // Tags in shallow flow collections do not change the verdict.
+        let shallow = [
+            "a: [!<a]> x, b]\n",
+            "a: [!<a'b> x, 'c', d]\nb: 1\n",
+            "a: [!<> x, !<a,b> y]\n",
+            "a: {k: !<a}> v, j: 2}\n",
+        ];
+        for text in shallow {
+            assert!(nesting_too_deep(text, MAX_NODE_DEPTH).is_none(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn explicit_indent_indicator_does_not_hide_depth() {
+        // `run:` is at column 8 and `|2` needs content at column 10, so the
+        // column-9 line is structure, not scalar text.
+        let deep = format!(
+            "steps:\n  - name: x\n    run: |2\n     {}leaf\n",
+            "- ".repeat(20_000)
+        );
+        assert!(nesting_too_deep(&deep, MAX_NODE_DEPTH).is_some());
+
+        let shallow =
+            "steps:\n  - name: x\n    run: |2\n        - not a list\n      indented\n    next: 1\n";
+        assert!(nesting_too_deep(shallow, MAX_NODE_DEPTH).is_none());
     }
 
     #[test]

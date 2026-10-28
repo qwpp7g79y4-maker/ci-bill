@@ -13,6 +13,13 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 fn run_with_stdin(args: &[&str], input: &[u8]) -> std::process::Output {
+    let (output, _) = run_with_stdin_tracking(args, input);
+    output
+}
+
+/// Spawn `ci-bill` and write `input`. The bool is true when the child closes
+/// stdin before the whole buffer is accepted.
+fn run_with_stdin_tracking(args: &[&str], input: &[u8]) -> (std::process::Output, bool) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ci-bill"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(args)
@@ -22,15 +29,38 @@ fn run_with_stdin(args: &[&str], input: &[u8]) -> std::process::Output {
         .spawn()
         .expect("spawn ci-bill");
     // The child may reject and close stdin before this write finishes.
-    {
+    let broke_early = {
         let mut stdin = child.stdin.take().expect("child stdin");
         match stdin.write_all(input) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Ok(()) => false,
+            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => true,
             Err(err) => panic!("write ci-bill stdin: {err}"),
         }
-    }
-    child.wait_with_output().expect("wait for ci-bill")
+    };
+    let output = child.wait_with_output().expect("wait for ci-bill");
+    (output, broke_early)
+}
+
+const DUAL_STDIN: &[&str] = &[
+    "prices",
+    "--label",
+    "my-box",
+    "--sku",
+    "actions_linux",
+    "--usage",
+    "-",
+    "--runner-map",
+    "-",
+];
+
+const DUAL_STDIN_ERROR: &str =
+    "ci-bill: --usage and --runner-map can't both read standard input; give one of them a file\n";
+
+fn assert_dual_stdin_usage(input: &[u8]) {
+    let output = run_with_stdin(DUAL_STDIN, input);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert_eq!(stderr(&output), DUAL_STDIN_ERROR);
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
 }
 
 fn stdout(output: &std::process::Output) -> String {
@@ -944,12 +974,42 @@ fn usage_and_runner_map_both_dash_is_rejected_before_reading_stdin() {
         ],
         b"label,sku\nmy-box,actions_linux\n",
     );
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert_eq!(
-        stderr(&output),
-        "ci-bill: --usage and --runner-map can't both read standard input; give one of them a file\n"
-    );
+    // The flags disagree and no file is read, so the exit code is 3.
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert_eq!(stderr(&output), DUAL_STDIN_ERROR);
     assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+}
+
+#[test]
+fn usage_and_runner_map_both_dash_report_input_is_a_usage_error() {
+    // printf "x,y\n" | ci-bill prices --label my-box --sku actions_linux --usage - --runner-map -
+    assert_dual_stdin_usage(b"x,y\n");
+}
+
+#[test]
+fn usage_and_runner_map_both_dash_empty_stdin_is_a_usage_error() {
+    assert_dual_stdin_usage(b"");
+}
+
+#[test]
+fn usage_and_runner_map_both_dash_oversized_stdin_is_a_usage_error() {
+    // Larger than a pipe buffer. A child that read stdin to completion would accept
+    // the whole write; closing early leaves a broken pipe and still exits 3.
+    let input = vec![b'x'; 8 * 1024 * 1024];
+    let (output, broke_early) = run_with_stdin_tracking(DUAL_STDIN, &input);
+    assert!(
+        broke_early,
+        "oversized stdin was fully consumed; the flag clash must be rejected before reading it"
+    );
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert_eq!(stderr(&output), DUAL_STDIN_ERROR);
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+}
+
+#[test]
+fn usage_and_runner_map_both_dash_broken_stdin_is_a_usage_error() {
+    // Invalid UTF-8 and an unclosed quote. Parsed, this would be an input error.
+    assert_dual_stdin_usage(b"\xff\xfe\"unterminated\n");
 }
 
 #[test]

@@ -156,12 +156,11 @@ pub fn render(
     if usage.is_some_and(|path| path == Path::new("-"))
         && runner_map.is_some_and(|path| path == Path::new("-"))
     {
-        return Err(PriceFail::Input {
-            path: String::new(),
-            message:
-                "--usage and --runner-map can't both read standard input; give one of them a file"
-                    .to_string(),
-        });
+        // No file is opened. The two flags disagree, which is a usage error.
+        return Err(PriceFail::Usage(
+            "--usage and --runner-map can't both read standard input; give one of them a file"
+                .to_string(),
+        ));
     }
 
     let table = embedded_table()?;

@@ -1922,6 +1922,57 @@ fn callee_workflows_are_stored_on_the_cache_path() {
     assert_report_reads(&out);
 }
 
+/// A fetched workflow file with 20,000 levels of block-sequence nesting must
+/// not crash `fetch` while it is scanned for reusable-workflow calls (see
+/// `tests/workflow_yaml_depth.rs` for the same input on the file path).
+#[test]
+fn a_deeply_nested_fetched_workflow_does_not_crash_fetch() {
+    let server = TestServer::spawn(|hit, _| {
+        if is_repo(&hit.target) {
+            return ok_json(repo_json(""));
+        }
+        if is_runs(&hit.target) {
+            return ok_json(
+                serde_json::to_vec(&runs_page(
+                    Some(1),
+                    vec![run_value(1, 1, ".github/workflows/deep.yml", "push")],
+                ))
+                .expect("runs"),
+            );
+        }
+        if is_jobs(&hit.target) {
+            return one_job(job_run_id(&hit.target), 1);
+        }
+        let path = path_only(&hit.target);
+        if path.ends_with("/contents/.github/workflows/deep.yml") {
+            return raw_reply(format!("on:\n{}1\n", "- ".repeat(20_000)).into_bytes());
+        }
+        panic!("unexpected {}", hit.target);
+    });
+    let out = scratch("deep-fetched").join("out");
+    let output = run_owned(
+        &server.url(),
+        TokenMode::Gh,
+        &fetch_args(&out, "2026-01-01", Some("2026-01-01")),
+    );
+    let hits = server.hits();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            output.status.signal(),
+            None,
+            "fetch was killed by a signal instead of exiting cleanly: {:?}\nstderr: {}",
+            output.status,
+            stderr_of(&output),
+        );
+    }
+    assert_success(&output, &hits);
+    let saved = fs::read_to_string(out.join("acme/demo/.github/workflows/deep.yml@main"))
+        .expect("deep workflow saved to the cache path");
+    assert!(saved.starts_with("on:\n- "), "{saved}");
+}
+
 #[test]
 fn github_token_is_used_when_gh_token_is_blank_or_absent() {
     let server = TestServer::spawn(|hit, _| {
