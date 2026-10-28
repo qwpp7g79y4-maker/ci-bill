@@ -1,16 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### Fixed
-
-- Stop two stdout panics in the text report and CLI.
-- Reject deeply nested workflow YAML before the recursive parser sees it, so a workflow nested tens of thousands of levels deep gives an `invalid YAML` error instead of a stack overflow.
-- Close two blind spots in that nesting check, and count a quote after an anchor or tag in a flow collection as the start of a scalar.
-- Keep commas inside a verbatim `!<...>` tag from splitting the token, and skip such a tag as a whole, in the nesting check.
-- Split lines in the nesting check on `\r\n`, `\r` and `\n`, as the parser does, so a deeply nested workflow with only CR line endings no longer overflows the stack.
-
-## [0.1.2] - 2026-10-24
+## [0.1.2] - 2026-10-28
 
 ### Changed
 
@@ -20,8 +10,9 @@
 
 ### Fixed
 
-- Refuse reading both `--usage` and `--runner-map` from stdin.
-- Exit 3 when `--usage` and `--runner-map` both read stdin.
+- Reject deeply nested workflow YAML (for example 20,000 levels, or lines separated only by CR) before the recursive parser sees it, so it gives an `invalid YAML` error instead of a stack overflow. The pre-scan handles quotes after an anchor or tag in flow collections, verbatim `!<...>` tags, and `\r\n`, `\r` and `\n` line endings.
+- Stop two stdout panics in the text report and CLI.
+- Exit 3 and refuse to read both `--usage` and `--runner-map` from stdin.
 - Floor F1 savings at zero when macOS or Windows minutes already cost less than the same minutes at the undiscounted Linux list rate.
 - Skip a malformed Link-header parameter during pagination instead of dropping a later page of runs or jobs.
 - Track flow-bracket depth when a fix diff finds where a key's value ends, so an F1 or F3 diff keeps a multi-line flow map or sequence valid YAML.
