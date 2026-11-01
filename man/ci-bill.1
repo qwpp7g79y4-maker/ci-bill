@@ -1,0 +1,211 @@
+.\" Manual page for ci-bill. Wording of the options follows the binary --help text.
+.TH CI-BILL 1
+.nh
+.SH NAME
+ci-bill \- rank GitHub Actions cost per workflow from the billing usage CSV and point to likely causes
+.SH SYNOPSIS
+.nf
+ci-bill [-h | --help] [-V | --version] <command> [arguments]
+ci-bill report [options] --usage <CSV>
+ci-bill prices [options]
+ci-bill fetch [options] --repo <OWNER/REPO> --out <DIR> --since <DATE>
+ci-bill help [command]...
+.fi
+.SH DESCRIPTION
+Rank GitHub Actions cost per workflow from the billing usage CSV and point to likely causes.
+.PP
+.B report
+ranks cost from a detailed usage report.
+It requires --usage.
+--runs is optional.
+Together with the usage CSV it adds measured, per-job cost on top of the invoice.
+--workflows reads workflow YAML (including reusable workflows and composite actions) and points at likely causes.
+--usage and --runs are not alternatives:
+.B report
+without --usage exits 3.
+.PP
+.B prices
+prints the built-in Actions runner price table, or the USD-per-minute rate for one label or SKU.
+It makes no network connection.
+.PP
+.B fetch
+saves a repository's Actions runs, jobs, and referenced reusable workflows into a directory that --runs reads.
+It is the only command that uses the network.
+Set GH_TOKEN or GITHUB_TOKEN in the environment (the first one set is sent).
+An optional GITHUB_API_URL must be an http or https URL; the default is https://api.github.com.
+.PP
+.B help
+prints this command list, the same text as --help.
+ci-bill help report prints the options for report (the same text as ci-bill report --help).
+The same form works for prices and fetch.
+help takes command names, not flags:
+ci-bill help --help is an unrecognized subcommand and exits 3.
+.PP
+.B report
+and
+.B prices
+are offline.
+Only usage rows whose product is
+.I actions
+are ranked.
+Other products are summed as one total and are not broken down per repository or workflow.
+.SH OPTIONS
+.SS "Top-level"
+.TP
+.B -h, --help
+Print help.
+.TP
+.B -V, --version
+Print version.
+Accepted only on the top-level command.
+A subcommand rejects --version.
+.SS report
+Rank workflow costs from a detailed usage report.
+.PP
+Usage: ci-bill report [options] --usage <CSV>
+.TP
+.B --usage <CSV>
+Detailed usage report CSV.
+`-' reads standard input.
+.TP
+.B --workflows <DIR>
+Directory of workflow YAML files.
+.TP
+.B --runs <DIR>
+Saved Actions API JSON (`runs-*.json' and `jobs-<run_id>*.json') and cached remote workflows at `<owner>/<repo>/<path>@<ref>'.
+.TP
+.B --top <N>
+Show the N workflows with the highest net amount.
+.TP
+.B --json
+Print one JSON object instead of the text report.
+.TP
+.B --budget <AMOUNT>
+Net total budget in USD.
+Exit 1 when the total is above this.
+.TP
+.B --fix-diff
+Print a unified diff fixing the highest-savings finding instead of the report.
+.TP
+.B --md
+Print a one-page Markdown teardown instead of the report.
+.TP
+.B -h, --help
+Print help.
+.SS prices
+Show Actions runner prices and the minute rate for a label or SKU.
+.PP
+Usage: ci-bill prices [options]
+.TP
+.B --json
+Print one JSON object instead of the text table.
+.TP
+.B --runner-map <CSV>
+CSV of `label,sku' rows.
+Matching labels use this SKU instead of the built-in map.
+`-' reads standard input (not if --usage is also `-').
+.TP
+.B --label <LABEL>
+Runner label or list, for example `ubuntu-latest' or `[self-hosted, macos]'.
+.TP
+.B --sku <SKU>
+Actions SKU.
+With --label, it must be the SKU that label resolves to.
+.TP
+.B --usage <CSV>
+Detailed usage report.
+Own rows for the workflow and SKU replace the table rate.
+`-' reads standard input (not if --runner-map is also `-').
+.TP
+.B --repository <OWNER/REPO>
+Repository (`owner/repo') that owns the usage rows.
+.TP
+.B --workflow <PATH>
+Workflow path inside the usage report.
+.TP
+.B -h, --help
+Print help.
+.PP
+--workflow requires --usage.
+--repository requires --usage.
+--usage requires --label or --sku.
+--usage and --runner-map cannot both read standard input.
+.SS fetch
+Save Actions runs, jobs, and referenced reusable workflows.
+.PP
+Usage: ci-bill fetch [options] --repo <OWNER/REPO> --out <DIR> --since <DATE>
+.TP
+.B --repo <OWNER/REPO>
+Repository to read, as `OWNER/REPO'.
+.TP
+.B --out <DIR>
+Directory for `repo.json', `runs-*.json', `jobs-<run_id>*.json', and callee files.
+.TP
+.B --since <DATE>
+First day to fetch, as `YYYY-MM-DD' in UTC.
+.TP
+.B --until <DATE>
+Last day to fetch, as `YYYY-MM-DD' in UTC.
+Defaults to today.
+.TP
+.B -h, --help
+Print help.
+.PP
+--repo, --out, and --since are required.
+--until before --since is a usage error.
+A missing GH_TOKEN or GITHUB_TOKEN is a usage error.
+.SS help
+Print this message or the help of the given subcommand(s).
+.PP
+Usage: ci-bill help [command]...
+.PP
+Arguments: one or more command names.
+Prints help for those subcommands.
+With no names, prints the top-level help.
+This command has no long options.
+.SH EXIT STATUS
+.TP
+.B 0
+Success, including --help and --version.
+A closed stdout pipe (a reader that exits early) is also success.
+.TP
+.B 1
+--budget was set and the Actions net total is above it, or stdout could not be written for a reason other than a closed pipe (for example a full disk).
+.TP
+.B 2
+An input could not be used: missing column, a value that is not a number, invalid YAML or JSON, an unreadable file, an unknown SKU, or
+.B fetch
+could not use the GitHub API (network, HTTP status, rejected token, or rate limit).
+.TP
+.B 3
+Usage error: unknown option, missing required flag, an invalid --budget amount, a runner label that is not in the price table, disagreeing
+.B prices
+flags, or a
+.B fetch
+usage error such as a missing token, a bad date, or --until before --since.
+.SH EXAMPLES
+The CSV below is not installed with the binary.
+It lives in the source tree and is invented.
+.PP
+.nf
+ci-bill report --usage examples/usage.csv
+.fi
+.PP
+Exits 0.
+.PP
+.nf
+ci-bill prices
+ci-bill --version
+ci-bill --help
+ci-bill help report
+.fi
+.PP
+Each of those exits 0.
+.PP
+.nf
+ci-bill report --usage no-such-usage.csv
+.fi
+.PP
+Exits 2.
+.PP
+An unknown option exits 3, and the message is a usage error rather than a panic.

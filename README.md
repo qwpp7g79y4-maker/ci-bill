@@ -13,8 +13,9 @@ likely causes with `file:line`. It reads two kinds of input:
   `ci-bill fetch` (or any other means) into a directory of
   `runs-*.json`/`jobs-<run_id>*.json` files, given with `--runs`
 
-Either input works on its own; together they add measured, per-job cost on
-top of the invoice. It also reads `.github/workflows/*.yml`/`*.yaml`,
+`report` requires `--usage`. `--runs` is optional; together with the usage
+CSV it adds measured, per-job cost on top of the invoice. ci-bill also reads
+`.github/workflows/*.yml`/`*.yaml`,
 including reusable workflows and composite actions, with `--workflows`.
 
 Download the `--usage` CSV as a **detailed usage report** export from your
@@ -26,6 +27,8 @@ data and breaks it down per repository, workflow, and job, with a
 
 `report` and `prices` are offline: no token, no network. Only `fetch` talks
 to the network, using a `GH_TOKEN` or `GITHUB_TOKEN` from the environment.
+
+Manual page: `man/ci-bill.1`.
 
 ## Installation
 
@@ -98,11 +101,13 @@ walkthrough on the `samples/` data in this repository.
 ## Commands
 
 ```sh
+ci-bill [-h | --help] [-V | --version] <COMMAND>
 ci-bill report --usage CSV [--workflows DIR] [--runs DIR] [--top N] \
     [--json] [--budget AMOUNT] [--fix-diff] [--md]
 ci-bill prices [--json] [--runner-map CSV] [--label LABEL] [--sku SKU] \
     [--usage CSV --repository OWNER/REPO --workflow PATH]
 ci-bill fetch --repo OWNER/REPO --out DIR --since DATE [--until DATE]
+ci-bill help [COMMAND]...
 ```
 
 `report` ranks cost from the usage CSV and, with `--workflows`, scans the
@@ -130,6 +135,12 @@ them may be `-` in a single run.
 
 `fetch` downloads a repository's Actions runs and jobs, and any reusable
 workflows they call, into `--out DIR` in the layout `--runs` reads.
+
+`ci-bill help` prints the same text as `--help`. `ci-bill help` plus a
+command name (`report`, `prices`, or `fetch`) prints that command's
+options. `-h` is the short form of `--help` on the top-level command and
+on `report`, `prices`, and `fetch`. `-V` and `--version` print the version
+and are accepted only on the top-level command.
 
 ## Measured vs invoice
 
@@ -173,8 +184,8 @@ usage".
 | ---- | ------- |
 | 0 | ok |
 | 1 | `--budget` given and the Actions net total is over it, or stdout could not be written (e.g. disk full) |
-| 2 | an input file could not be read: missing column, broken number, invalid YAML/JSON, unreadable file |
-| 3 | a usage error: unknown option, missing required flag, an invalid `--budget` amount, or a runner label not in the price table |
+| 2 | an input could not be used: missing column, broken number, invalid YAML/JSON, unreadable file, unknown SKU, or `fetch` could not use the GitHub API |
+| 3 | a usage error: unknown option, missing required flag, an invalid `--budget` amount, a runner label not in the price table, or `fetch` usage such as a missing token or `--until` before `--since` |
 
 ## Example
 

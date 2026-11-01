@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Document the binary: manual page `man/ci-bill.1`, an invented usage fixture under `examples/`, and `tests/handbook_help.rs`, which checks `--help` against that page.
+
+### Changed
+
+- README: `report` requires `--usage`; name `help`, `--help`, and `--version`; point at `man/ci-bill.1`; align exit codes 2 and 3 with `fetch` and an unknown SKU.
+
 ## [0.1.2] - 2026-10-28
 
 ### Changed
