@@ -1,0 +1,21 @@
+USD (from net_amount)
+Period: 2026-10-01 .. 2026-10-04
+Repositories: acme-demo/webshop
+
+Total net: 51.80
+Total minutes: 1495
+Other products: 0.00
+
+Workflow                                           Net  Gross  Discount  Minutes   Share
+acme-demo/webshop .github/workflows/lint.yml     44.00  44.00      0.00      550  84.94%
+  actions_macos                                  44.00  44.00      0.00      550        
+  measured 0.00  invoice 44.00  difference 44.00
+acme-demo/webshop .github/workflows/test.yml      6.36   6.36      0.00      795  12.28%
+  actions_linux                                   6.36   6.36      0.00      795        
+  measured 0.00  invoice 6.36  difference 6.36
+acme-demo/webshop .github/workflows/release.yml   1.44   1.44      0.00       90   2.78%
+  actions_windows                                 1.44   1.44      0.00       90        
+  measured 0.00  invoice 1.44  difference 1.44
+acme-demo/webshop .github/workflows/nightly.yml   0.00   0.48      0.48       60   0.00%
+  actions_linux                                   0.00   0.48      0.48       60        
+  measured 0.00  invoice 0.00  difference 0.00

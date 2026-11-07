@@ -1,0 +1,7 @@
+date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path
+2026-10-01,actions,actions_linux,410,minutes,0.008,3.280,0,3.280,mira,acme-demo,acme-demo/webshop,.github/workflows/test.yml
+2026-10-02,actions,actions_linux,385,minutes,0.008,3.080,0,3.080,joost,acme-demo,acme-demo/webshop,.github/workflows/test.yml
+2026-10-02,actions,actions_macos,240,minutes,0.08,19.200,0,19.200,mira,acme-demo,acme-demo/webshop,.github/workflows/lint.yml
+2026-10-03,actions,actions_macos,310,minutes,0.08,24.800,0,24.800,joost,acme-demo,acme-demo/webshop,.github/workflows/lint.yml
+2026-10-03,actions,actions_windows,90,minutes,0.016,1.440,0,1.440,mira,acme-demo,acme-demo/webshop,.github/workflows/release.yml
+2026-10-04,actions,actions_linux,60,minutes,0.008,0.480,0.480,0,joost,acme-demo,acme-demo/webshop,.github/workflows/nightly.yml

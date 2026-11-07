@@ -6,8 +6,12 @@
 
 - Document the binary: manual page `man/ci-bill.1`, an invented usage fixture under `examples/`, and `tests/handbook_help.rs`, which checks `--help` against that page.
 
+- Add `README.nl.md` (Dutch), an Options section in both READMEs, two more invented inputs under `examples/` with their expected output, and golden tests for them (`tests/examples_golden.rs`).
+- Add a test that every option in any `--help` appears in both READMEs.
+
 ### Changed
 
+- Input errors in `report` now add a `what to do:` line; the unknown-runner-label, missing-token, rate-limit, unauthorized, reversed-date and `GITHUB_API_URL` errors name a next step. Exit codes are unchanged (`tests/error_hints.rs`).
 - State the measured test count (510 passing, 0 failing) in README.md and QUALITY.md.
 - README: `report` requires `--usage`; name `help`, `--help`, and `--version`; point at `man/ci-bill.1`; align exit codes 2 and 3 with `fetch` and an unknown SKU.
 

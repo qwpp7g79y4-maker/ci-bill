@@ -81,6 +81,30 @@ impl std::fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
+impl UsageError {
+    /// What the user can do about this error.
+    pub fn hint(&self) -> &'static str {
+        match self.kind {
+            UsageErrorKind::Unreadable => {
+                "check that the path exists and is readable, or pass `-` to read standard input"
+            }
+            UsageErrorKind::MissingColumn(_) => {
+                "use the detailed usage report CSV exported from GitHub billing, with its header row unchanged"
+            }
+            UsageErrorKind::NotANumber(_) => {
+                "write amounts as plain digits such as 0.008, without currency signs or thousands separators"
+            }
+            UsageErrorKind::TooManyDecimals(_) => "round the value to at most 6 decimal places",
+            UsageErrorKind::InvalidCsv => {
+                "look for an unclosed quote or a row with the wrong number of fields"
+            }
+            UsageErrorKind::AmountOverflow(_) => {
+                "check the file for an implausibly large amount; split the report if it is genuine"
+            }
+        }
+    }
+}
+
 const EMPTY_WORKFLOW: &str = "(no workflow)";
 
 const COLUMNS: [&str; 13] = [

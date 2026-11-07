@@ -253,6 +253,21 @@ impl std::fmt::Display for ScanError {
 impl std::error::Error for ScanError {}
 
 impl ScanError {
+    /// What the user can do about this error.
+    pub fn hint(&self) -> &'static str {
+        match self.kind {
+            ScanErrorKind::Directory => {
+                "check that --workflows points to an existing, readable directory"
+            }
+            ScanErrorKind::File => "check the file's permissions and that it is valid UTF-8",
+            ScanErrorKind::Yaml { .. } => {
+                "fix the syntax at or just above that line; a YAML linter can help"
+            }
+        }
+    }
+}
+
+impl ScanError {
     pub(crate) fn directory(path: &Path) -> Self {
         Self {
             path: path.to_path_buf(),

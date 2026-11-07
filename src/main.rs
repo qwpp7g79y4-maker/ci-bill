@@ -109,14 +109,22 @@ fn report(
     let rows = match usage::read_usage(usage_path) {
         Ok(rows) => rows,
         Err(err) => {
-            eprintln!("ci-bill: {}: {err}", usage_path.display());
+            eprintln!(
+                "ci-bill: {}: {err}\n  what to do: {}",
+                usage_path.display(),
+                err.hint()
+            );
             return ExitCode::from(2);
         }
     };
     let ranking = match rank::rank(&rows, None) {
         Ok(ranking) => ranking,
         Err(err) => {
-            eprintln!("ci-bill: {}: {err}", usage_path.display());
+            eprintln!(
+                "ci-bill: {}: {err}\n  what to do: {}",
+                usage_path.display(),
+                err.hint()
+            );
             return ExitCode::from(2);
         }
     };
@@ -124,7 +132,11 @@ fn report(
         Some(dir) => match workflow::scan_dir(dir) {
             Ok(scanned) => scanned,
             Err(err) => {
-                eprintln!("ci-bill: {}: {err}", err.path.display());
+                eprintln!(
+                    "ci-bill: {}: {err}\n  what to do: {}",
+                    err.path.display(),
+                    err.hint()
+                );
                 return ExitCode::from(2);
             }
         },
@@ -138,7 +150,11 @@ fn report(
         match result {
             Ok(items) => Some(items),
             Err(err) => {
-                eprintln!("ci-bill: {}: {err}", err.path.display());
+                eprintln!(
+                    "ci-bill: {}: {err}\n  what to do: {}",
+                    err.path.display(),
+                    err.hint()
+                );
                 return ExitCode::from(2);
             }
         }
@@ -151,7 +167,11 @@ fn report(
         Some(dir) => match api::read_dir(dir) {
             Ok(data) => Some(data),
             Err(err) => {
-                eprintln!("ci-bill: {}: {err}", err.path.display());
+                eprintln!(
+                    "ci-bill: {}: {err}\n  what to do: {}",
+                    err.path.display(),
+                    err.hint()
+                );
                 return ExitCode::from(2);
             }
         },

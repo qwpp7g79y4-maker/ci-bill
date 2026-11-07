@@ -267,6 +267,29 @@ impl std::fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
+impl ApiError {
+    /// What the user can do about this error.
+    pub fn hint(&self) -> &'static str {
+        match self.kind {
+            ApiErrorKind::Directory => {
+                "check that --runs points to an existing, readable directory"
+            }
+            ApiErrorKind::File => {
+                "check the file's permissions; pages are named runs-*.json and jobs-<run_id>*.json"
+            }
+            ApiErrorKind::Json => {
+                "save the page again with `ci-bill fetch`; do not edit the API response"
+            }
+            ApiErrorKind::DuplicateId => {
+                "remove the repeated run from one of the runs-*.json files"
+            }
+            ApiErrorKind::RunMismatch => {
+                "rename the file to jobs-<run_id>*.json with the run id its jobs belong to"
+            }
+        }
+    }
+}
+
 /// Read every runs page and `jobs?filter=all` page in `dir`.
 ///
 /// Names are sorted, then pages are merged. A later file that repeats a run

@@ -84,7 +84,10 @@ impl std::fmt::Display for PriceFail {
         match self {
             Self::Input { path, message } if path.is_empty() => write!(f, "{message}"),
             Self::Input { path, message } => write!(f, "{path}: {message}"),
-            Self::UnknownLabel(label) => write!(f, "unknown runner label: {label}"),
+            Self::UnknownLabel(label) => write!(
+                f,
+                "unknown runner label: {label}; pass --sku instead, or add the label to a --runner-map CSV of `label,sku` rows"
+            ),
             Self::Usage(message) => f.write_str(message),
         }
     }

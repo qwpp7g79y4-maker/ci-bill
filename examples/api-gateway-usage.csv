@@ -1,0 +1,5 @@
+date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path
+2026-10-05,actions,actions_linux,720,minutes,0.008,5.760,0,5.760,sara,acme-demo,acme-demo/api-gateway,.github/workflows/ci.yml
+2026-10-06,actions,actions_linux,655,minutes,0.008,5.240,0,5.240,tim,acme-demo,acme-demo/api-gateway,.github/workflows/ci.yml
+2026-10-06,actions,actions_linux_4_core,180,minutes,0.016,2.880,0,2.880,sara,acme-demo,acme-demo/api-gateway,.github/workflows/deploy.yml
+2026-10-07,actions,actions_linux,95,minutes,0.008,0.760,0,0.760,tim,acme-demo,acme-demo/api-gateway,.github/workflows/docs.yml

@@ -108,7 +108,9 @@ pub fn fetch(
     let (owner, name) = split_repo(repo).map_err(FetchError::usage)?;
     let until = until.unwrap_or_else(today_utc);
     if since.unix() > until.unix() {
-        return Err(FetchError::usage("--until is before --since"));
+        return Err(FetchError::usage(
+            "--until is before --since; swap the two dates",
+        ));
     }
     let secrets = secrets_from_env()?;
     let base = api_base().map_err(|message| redact_error(message, &secrets.needles))?;
@@ -191,7 +193,7 @@ fn secrets_from_env() -> Result<Secrets, FetchError> {
             .bytes()
             .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
         {
-            return Err(FetchError::usage("set GH_TOKEN or GITHUB_TOKEN"));
+            return Err(FetchError::usage("set GH_TOKEN or GITHUB_TOKEN to a GitHub token with actions:read access, then run again"));
         }
         if auth.is_none() {
             auth = Some(token.to_string());
@@ -201,7 +203,7 @@ fn secrets_from_env() -> Result<Secrets, FetchError> {
         }
     }
     let Some(auth) = auth else {
-        return Err(FetchError::usage("set GH_TOKEN or GITHUB_TOKEN"));
+        return Err(FetchError::usage("set GH_TOKEN or GITHUB_TOKEN to a GitHub token with actions:read access, then run again"));
     };
     needles.sort_by_key(|item| std::cmp::Reverse(item.len()));
     Ok(Secrets { auth, needles })
@@ -217,7 +219,7 @@ fn api_base() -> Result<String, FetchError> {
                 Ok(base)
             } else {
                 Err(FetchError::usage(
-                    "GITHUB_API_URL must be an http or https URL",
+                    "GITHUB_API_URL must be an http or https URL; unset it to use https://api.github.com",
                 ))
             }
         }
@@ -734,7 +736,9 @@ impl Client {
     }
 
     fn network(&self, err: &impl std::fmt::Display) -> FetchError {
-        FetchError::input(self.redact_text(&format!("cannot reach the GitHub API: {err}")))
+        FetchError::input(self.redact_text(&format!(
+            "cannot reach the GitHub API: {err}; check your network connection and try again"
+        )))
     }
 }
 
@@ -783,7 +787,7 @@ where
             }
             Decision::Unauthorized => {
                 return Err(FetchError::input(
-                    "unauthorized; GH_TOKEN or GITHUB_TOKEN was rejected",
+                    "unauthorized; GH_TOKEN or GITHUB_TOKEN was rejected; check that the token is valid and not expired",
                 ));
             }
             Decision::Permission => {
@@ -802,7 +806,7 @@ where
 }
 
 fn rate_limit(needles: &[String]) -> FetchError {
-    FetchError::input(redact_all_str("rate limit; saved files were kept", needles))
+    FetchError::input(redact_all_str("rate limit; saved files were kept; wait for the limit to reset, then run the same command again to continue", needles))
 }
 
 /// Primary limit (`x-ratelimit-remaining: 0`) waits until `x-ratelimit-reset`.

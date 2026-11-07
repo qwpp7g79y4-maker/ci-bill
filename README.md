@@ -143,6 +143,46 @@ options. `-h` is the short form of `--help` on the top-level command and
 on `report`, `prices`, and `fetch`. `-V` and `--version` print the version
 and are accepted only on the top-level command.
 
+## Options
+
+Every option in `--help`, per command.
+
+`ci-bill` (top level):
+
+- `-h`, `--help`: print help.
+- `-V`, `--version`: print the version.
+
+`ci-bill report`:
+
+- `--usage <CSV>`: detailed usage report CSV (required). `-` reads standard input.
+- `--workflows <DIR>`: directory of workflow YAML files to scan for findings.
+- `--runs <DIR>`: saved Actions API JSON and cached remote workflows, as written by `ci-bill fetch`.
+- `--top <N>`: show the N workflows with the highest net amount.
+- `--json`: print one JSON object instead of the text report.
+- `--budget <AMOUNT>`: net total budget in USD; exit 1 when the total is above it.
+- `--fix-diff`: print a unified diff fixing the highest-savings finding.
+- `--md`: print a one-page Markdown teardown instead of the report.
+- `-h`, `--help`: print help.
+
+`ci-bill prices`:
+
+- `--json`: print one JSON object instead of the text table.
+- `--runner-map <CSV>`: CSV of `label,sku` rows that replace the built-in map. `-` reads standard input.
+- `--label <LABEL>`: runner label or list, for example `ubuntu-latest`.
+- `--sku <SKU>`: Actions SKU. With `--label`, it must be the SKU the label resolves to.
+- `--usage <CSV>`: usage report whose own rows replace the table rate. `-` reads standard input.
+- `--repository <OWNER/REPO>`: repository that owns the usage rows.
+- `--workflow <PATH>`: workflow path inside the usage report.
+- `-h`, `--help`: print help.
+
+`ci-bill fetch`:
+
+- `--repo <OWNER/REPO>`: repository to read (required).
+- `--out <DIR>`: directory for the saved files (required).
+- `--since <DATE>`: first day to fetch, `YYYY-MM-DD` in UTC (required).
+- `--until <DATE>`: last day to fetch, `YYYY-MM-DD` in UTC. Defaults to today.
+- `-h`, `--help`: print help.
+
 ## Measured vs invoice
 
 Each workflow's measured cost is its jobs' runtime priced at the current
@@ -233,7 +273,8 @@ example-org/sample-app (no workflow)                    0.00    0.01      0.01  
   measured 0.00  invoice 0.00  difference 0.00
 ```
 
-The sample data above is invented; see `samples/README.md`.
+The sample data above is invented; see `samples/README.md`. More invented
+inputs with their expected output are in `examples/`.
 
 ## Known limitations
 

@@ -220,3 +220,31 @@ fn example_command_exits_as_documented() {
         );
     }
 }
+
+/// Every long option and short flag in any `--help` appears in both READMEs.
+#[test]
+fn every_help_option_is_in_both_readmes() {
+    let mut options = BTreeSet::new();
+    for args in [
+        vec!["--help"],
+        vec!["report", "--help"],
+        vec!["prices", "--help"],
+        vec!["fetch", "--help"],
+    ] {
+        let output = ci_bill().args(&args).output().expect("run ci-bill");
+        assert!(output.status.success(), "{}", stderr_of(&output));
+        options.extend(long_options(&stdout_of(&output)));
+    }
+    assert!(options.contains("--usage") && options.contains("--until"));
+    for file in ["README.md", "README.nl.md"] {
+        let text = manifest_file(file);
+        for option in &options {
+            assert!(
+                text.contains(&format!("`{option}")),
+                "{file} does not mention {option}"
+            );
+        }
+        assert!(text.contains("`-V`"), "{file} does not mention -V");
+        assert!(text.contains("`-h`"), "{file} does not mention -h");
+    }
+}
