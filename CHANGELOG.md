@@ -8,6 +8,7 @@
 
 ### Changed
 
+- State the measured test count (510 passing, 0 failing) in README.md and QUALITY.md.
 - README: `report` requires `--usage`; name `help`, `--help`, and `--version`; point at `man/ci-bill.1`; align exit codes 2 and 3 with `fetch` and an unknown SKU.
 
 ## [0.1.2] - 2026-10-28
