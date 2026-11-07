@@ -12,7 +12,7 @@
 ### Changed
 
 - Input errors in `report` now add a `what to do:` line; the unknown-runner-label, missing-token, rate-limit, unauthorized, reversed-date and `GITHUB_API_URL` errors name a next step. Exit codes are unchanged (`tests/error_hints.rs`).
-- State the measured test count (510 passing, 0 failing) in README.md and QUALITY.md.
+- State the measured test count (518 passing, 0 failing, measured on commit a6f3b9c) in README.md, README.nl.md and QUALITY.md.
 - README: `report` requires `--usage`; name `help`, `--help`, and `--version`; point at `man/ci-bill.1`; align exit codes 2 and 3 with `fetch` and an unknown SKU.
 
 ## [0.1.2] - 2026-10-28

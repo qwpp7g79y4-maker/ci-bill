@@ -37,7 +37,7 @@ install -m 755 ci-bill-*/ci-bill "$HOME/.local/bin/"
 ```
 
 De tests draaien in CI op Linux, Windows, macOS (Apple Silicon en Intel) en op
-Rust 1.85. De suite heeft 517 tests (325 unit, 192 integratie), alle geslaagd.
+Rust 1.85. De suite heeft 518 tests (325 unit, 193 integratie), alle geslaagd.
 
 ## Voorbeeld
 
