@@ -13,8 +13,7 @@ MSRV 1.85 were not run for this entry):
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
 - 536 tests total, 536 passed, 0 failed, 0 ignored, measured on commit
-  `80a5d8a` plus the working-tree change that adds the example test (the "Aan de slag in 5
-  minuten" section and its test were already in) (branch `prep/w08-provider`). The earlier
+  `efb7cf3` (branch `prep/w24-fout`). The earlier
   figure of 623 was measured on another branch and does not describe this one.
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are both
@@ -243,7 +242,7 @@ line-numbered sense of "fixed, not theorized":
 
 ## Measured: 100 MiB input (W-26, 2026-11-08)
 
-Release build (`cargo build --release`, commit `706dd68`, tree clean). Input: a synthetic usage CSV of exactly 104857600 bytes (100 MiB), made in `/tmp` and not committed. It is the header and the one data row of `examples/usage.csv` repeated, so the rows are almost identical; the last row has a longer `username` to reach the exact size. The tool read it without error and exited 0.
+Release build (`cargo build --release`, commit `efb7cf3`, branch `prep/w24-fout`, tree clean). Input: a synthetic usage CSV of exactly 104857600 bytes (100 MiB), made in `/tmp` and not committed. It is the header and the one data row of `examples/usage.csv` repeated, so the rows are almost identical; the last row has a longer `username` to reach the exact size. The tool read it without error and exited 0.
 
 Command:
 
