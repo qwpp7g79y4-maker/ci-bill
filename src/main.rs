@@ -311,7 +311,7 @@ fn show_prices(
 /// Rank workflow costs from a GitHub detailed usage report.
 #[derive(Debug, Parser)]
 #[command(name = "ci-bill", version, about)]
-struct Cli {
+pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,
 }
