@@ -8,11 +8,11 @@ by PEPAI (pep_ai@icloud.com).
 `cargo test` (debug and release, stable 1.99 and MSRV 1.85, all green):
 
 - 325 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
-- 193 integration tests across 26 files under `tests/`, driving the real
+- 298 integration tests across 26 files under `tests/`, driving the real
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
-- 518 tests total, 518 passed, 0 failed, 0 ignored, measured on commit
-  `a6f3b9c` (branch `prep/v1-kwaliteit`).
+- 623 tests total, 623 passed, 0 failed, 0 ignored, measured on commit
+  `2f49253` (branch `v1-kandidaat`).
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are both
 clean, for the main crate and for `fuzz/`.
