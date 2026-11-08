@@ -61,7 +61,7 @@ Supported systems for the archives:
 - Windows: Windows 10 or newer, x86_64.
 
 The tests run in CI on Linux, Windows, macOS on Apple Silicon and macOS on
-Intel, and on Rust 1.85. The suite has 519 tests (325 unit, 194 integration),
+Intel, and on Rust 1.85. The suite has 520 tests (325 unit, 195 integration),
 all passing. Other systems may work with `cargo install`, but are
 not tested.
 

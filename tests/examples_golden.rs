@@ -40,3 +40,9 @@ fn api_gateway_example_matches_golden_output() {
     ]);
     assert_eq!(got, expected("api-gateway-usage.expected.txt"));
 }
+
+#[test]
+fn minimal_usage_example_is_accepted() {
+    let got = run(&["report", "--usage", "examples/usage.csv"]);
+    assert!(!got.is_empty());
+}
