@@ -10,7 +10,7 @@ MSRV 1.85 were not run. `cargo test --release --test version` passed.
 
 ### 2026-11-08 (W-66, version, branch prep/w24-fout)
 
-- `-V` and `--version` print crate version 1.0.0 and exit 0. A debug build also prints the git commit when git itself provides one. `tests/version.rs` checks both flags. A release build prints the crate version and does not print that commit (`cargo test --release --test version`). No flag was renamed. No new exit code. SIGINT stays exit 130. The input limit stays 268435456 bytes. The fetch HTTP body cap stays 33554432 bytes.
+- `-V` and `--version` print crate version 1.0.0 and exit 0. A debug build also prints the git commit when git itself provides one. The debug commit follows the branch ref, including in a worktree. `tests/version.rs` checks both flags. A release build prints the crate version and does not print that commit (`cargo test --release --test version`). No flag was renamed. No new exit code. SIGINT stays exit 130. The input limit stays 268435456 bytes. The fetch HTTP body cap stays 33554432 bytes.
 - `cargo test --no-fail-fast`: 551 passed / 0 failed / 0 ignored.
 - `cargo fmt --check`: clean. `cargo clippy --all-targets -- -D warnings`: clean.
 - Version stays 1.0.0. `rust-version` stays 1.85.

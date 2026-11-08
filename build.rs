@@ -24,32 +24,12 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()))
 }
 
-/// Rebuild when HEAD moves, including a worktree whose `.git` is a file.
+/// Rebuild when the commit changes. In a worktree, `HEAD` stays
+/// `ref: refs/heads/...` and the sha lives in the common git dir.
 fn track_git_head() {
-    let manifest = manifest_dir();
-    let git = manifest.join(".git");
-    let gitdir = if git.is_dir() {
-        git
-    } else if git.is_file() {
-        let Ok(text) = std::fs::read_to_string(&git) else {
-            return;
-        };
-        let Some(rest) = text.trim().strip_prefix("gitdir:") else {
-            return;
-        };
-        let path = PathBuf::from(rest.trim());
-        if path.is_absolute() {
-            path
-        } else {
-            manifest.join(path)
-        }
-    } else {
+    let Some(head) = git_path("HEAD") else {
         return;
     };
-    let head = gitdir.join("HEAD");
-    if !head.is_file() {
-        return;
-    }
     println!("cargo:rerun-if-changed={}", head.display());
     let Ok(text) = std::fs::read_to_string(&head) else {
         return;
@@ -57,20 +37,41 @@ fn track_git_head() {
     let Some(rest) = text.trim().strip_prefix("ref:") else {
         return;
     };
-    let ref_path = gitdir.join(rest.trim());
-    if ref_path.is_file() {
-        println!("cargo:rerun-if-changed={}", ref_path.display());
+    let name = rest.trim();
+    if let Some(path) = git_path(name) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    } else if let Some(packed) = git_path("packed-refs") {
+        println!("cargo:rerun-if-changed={}", packed.display());
     }
 }
 
-fn git_sha() -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--verify", "HEAD"])
+fn git_path(name: &str) -> Option<PathBuf> {
+    let output = git(["rev-parse", "--git-path", name])?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let path = PathBuf::from(text.trim());
+    let path = if path.is_absolute() {
+        path
+    } else {
+        manifest_dir().join(path)
+    };
+    path.is_file().then_some(path)
+}
+
+fn git(args: [&str; 3]) -> Option<std::process::Output> {
+    Command::new("git")
+        .args(args)
         .current_dir(manifest_dir())
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .output()
-        .ok()?;
+        .ok()
+}
+
+fn git_sha() -> Option<String> {
+    let output = git(["rev-parse", "--verify", "HEAD"])?;
     if !output.status.success() {
         return None;
     }
