@@ -124,9 +124,9 @@ All five exit 0. The data covers GitHub Actions only, as in the rest of this REA
 ```sh
 ci-bill [-h | --help] [-V | --version] <COMMAND>
 ci-bill report --usage CSV [--workflows DIR] [--runs DIR] [--top N] \
-    [--json] [--budget AMOUNT] [--fix-diff] [--md]
+    [--json] [--budget AMOUNT] [--fix-diff] [--md] [--output PATH]
 ci-bill prices [--json] [--runner-map CSV] [--label LABEL] [--sku SKU] \
-    [--usage CSV --repository OWNER/REPO --workflow PATH]
+    [--usage CSV --repository OWNER/REPO --workflow PATH] [--output PATH]
 ci-bill fetch --repo OWNER/REPO --out DIR --since DATE [--until DATE]
 ci-bill help [COMMAND]...
 ```
@@ -182,6 +182,7 @@ Every option in `--help`, per command.
 - `--budget <AMOUNT>`: net total budget in USD; exit 1 when the total is above it.
 - `--fix-diff`: print a unified diff fixing the highest-savings finding.
 - `--md`: print a one-page Markdown teardown instead of the report.
+- `--output <PATH>`: write the report to this file instead of standard output. An existing file is replaced. A missing parent directory exits 1 and is not created.
 - `-h`, `--help`: print help.
 
 `ci-bill prices`:
@@ -193,6 +194,7 @@ Every option in `--help`, per command.
 - `--usage <CSV>`: usage report whose own rows replace the table rate. `-` reads standard input.
 - `--repository <OWNER/REPO>`: repository that owns the usage rows.
 - `--workflow <PATH>`: workflow path inside the usage report.
+- `--output <PATH>`: write the report to this file instead of standard output. An existing file is replaced. A missing parent directory exits 1 and is not created.
 - `-h`, `--help`: print help.
 
 `ci-bill fetch`:
@@ -244,7 +246,7 @@ usage".
 | Code | Meaning |
 | ---- | ------- |
 | 0 | ok |
-| 1 | `--budget` given and the Actions net total is over it, or stdout could not be written (e.g. disk full) |
+| 1 | `--budget` given and the Actions net total is over it, or the report could not be written (stdout, or `--output`; for example a full disk or a missing parent directory) |
 | 2 | an input could not be used: missing column, broken number, invalid YAML/JSON, unreadable file, unknown SKU, or `fetch` could not use the GitHub API |
 | 3 | a usage error: unknown option, missing required flag, an invalid `--budget` amount, a runner label not in the price table, or `fetch` usage such as a missing token or `--until` before `--since` |
 

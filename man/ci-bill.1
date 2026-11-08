@@ -90,6 +90,11 @@ Print a unified diff fixing the highest-savings finding instead of the report.
 .B --md
 Print a one-page Markdown teardown instead of the report.
 .TP
+.B --output <PATH>
+Write the report to this file instead of standard output.
+An existing file is replaced.
+If the parent directory does not exist, the command exits 1 and does not create it.
+.TP
 .B -h, --help
 Print help.
 .SS prices
@@ -122,6 +127,11 @@ Repository (`owner/repo') that owns the usage rows.
 .TP
 .B --workflow <PATH>
 Workflow path inside the usage report.
+.TP
+.B --output <PATH>
+Write the report to this file instead of standard output.
+An existing file is replaced.
+If the parent directory does not exist, the command exits 1 and does not create it.
 .TP
 .B -h, --help
 Print help.
@@ -170,7 +180,7 @@ Success, including --help and --version.
 A closed stdout pipe (a reader that exits early) is also success.
 .TP
 .B 1
---budget was set and the Actions net total is above it, or stdout could not be written for a reason other than a closed pipe (for example a full disk).
+--budget was set and the Actions net total is above it, or the report could not be written (stdout for a reason other than a closed pipe, or --output; for example a full disk or a missing parent directory).
 .TP
 .B 2
 An input could not be used: missing column, a value that is not a number, invalid YAML or JSON, an unreadable file, an unknown SKU, or

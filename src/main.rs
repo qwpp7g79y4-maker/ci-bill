@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::{error::ErrorKind, Parser, Subcommand};
 
 use ci_bill::{
-    api, fetch, findings, fix_diff, matrix_cost, md,
+    api, display, fetch, findings, fix_diff, matrix_cost, md,
     money::{DecimalError, Micros},
     overlap, prices, rank, report, rerun, savings, usage, workflow,
 };
@@ -25,6 +25,33 @@ fn write_stdout(text: &str) -> Result<(), ExitCode> {
     }
 }
 
+/// Write the report to `--output`, or to stdout when that flag is absent.
+/// A missing parent directory is not created. The failure uses exit 1, the
+/// same code as a stdout write error.
+fn write_report(path: Option<&Path>, text: &str) -> Result<(), ExitCode> {
+    let Some(path) = path else {
+        return write_stdout(text);
+    };
+    match std::fs::File::create(path) {
+        Ok(mut file) => {
+            if let Err(err) = file.write_all(text.as_bytes()) {
+                return Err(report_file_error(path, err));
+            }
+            if let Err(err) = file.flush() {
+                return Err(report_file_error(path, err));
+            }
+            Ok(())
+        }
+        Err(err) => Err(report_file_error(path, err)),
+    }
+}
+
+fn report_file_error(path: &Path, err: std::io::Error) -> ExitCode {
+    let shown = display::escape_display(&display::display_path(path));
+    eprintln!("ci-bill: could not write report to {shown}: {err}");
+    ExitCode::from(1)
+}
+
 fn main() -> ExitCode {
     match Cli::try_parse() {
         Ok(cli) => match cli.command {
@@ -37,6 +64,7 @@ fn main() -> ExitCode {
                 budget,
                 fix_diff,
                 md,
+                output,
             } => report(
                 &usage,
                 workflows.as_deref(),
@@ -46,6 +74,7 @@ fn main() -> ExitCode {
                 budget,
                 fix_diff,
                 md,
+                output.as_deref(),
             ),
             Command::Prices {
                 json,
@@ -55,6 +84,7 @@ fn main() -> ExitCode {
                 usage,
                 repository,
                 workflow,
+                output,
             } => show_prices(
                 json,
                 runner_map.as_deref(),
@@ -63,6 +93,7 @@ fn main() -> ExitCode {
                 usage.as_deref(),
                 repository.as_deref(),
                 workflow.as_deref(),
+                output.as_deref(),
             ),
             Command::Fetch {
                 repo,
@@ -105,6 +136,7 @@ fn report(
     budget: Option<Micros>,
     fix_diff: bool,
     md: bool,
+    output: Option<&Path>,
 ) -> ExitCode {
     let rows = match usage::read_usage(usage_path) {
         Ok(rows) => rows,
@@ -202,7 +234,7 @@ fn report(
         let public_repo = api.as_ref().is_some_and(|data| data.public);
         savings::apply(items, ranked, &scanned, public_repo);
     }
-    let text = if md {
+    let mut text = if md {
         md::render(
             ranked,
             &ranking.bill,
@@ -246,17 +278,21 @@ fn report(
             &scanned,
         )
     };
-    if let Err(code) = write_stdout(&text) {
-        return code;
-    }
     // The budget is the Actions net total, including workflows omitted by --top.
     let total_net = ranking.bill.total_net;
-    if let Some(amount) = budget.filter(|amount| total_net > *amount) {
-        let line = report::budget_exceeded_line(total_net, amount);
+    let over_budget = budget.filter(|amount| total_net > *amount);
+    if let Some(amount) = over_budget {
+        if !json {
+            text.push_str(&report::budget_exceeded_line(total_net, amount));
+            text.push('\n');
+        }
+    }
+    if let Err(code) = write_report(output, &text) {
+        return code;
+    }
+    if let Some(amount) = over_budget {
         if json {
-            eprintln!("{line}");
-        } else if let Err(code) = write_stdout(&format!("{line}\n")) {
-            return code;
+            eprintln!("{}", report::budget_exceeded_line(total_net, amount));
         }
         return ExitCode::from(1);
     }
@@ -283,6 +319,7 @@ fn parse_budget(raw: &str) -> Result<Micros, String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_prices(
     json: bool,
     runner_map: Option<&Path>,
@@ -291,9 +328,10 @@ fn show_prices(
     usage: Option<&Path>,
     repository: Option<&str>,
     workflow: Option<&str>,
+    output: Option<&Path>,
 ) -> ExitCode {
     match prices::render(json, runner_map, label, sku, usage, repository, workflow) {
-        Ok(text) => match write_stdout(&text) {
+        Ok(text) => match write_report(output, &text) {
             Ok(()) => ExitCode::SUCCESS,
             Err(code) => code,
         },
@@ -350,6 +388,10 @@ enum Command {
         /// Print a one-page Markdown teardown instead of the report.
         #[arg(long)]
         md: bool,
+        /// Write the report to this file instead of standard output.
+        /// An existing file is replaced. A missing parent directory is an error.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
     },
     /// Show Actions runner prices and the minute rate for a label or SKU.
     Prices {
@@ -376,6 +418,10 @@ enum Command {
         /// Workflow path inside the usage report.
         #[arg(long, value_name = "PATH")]
         workflow: Option<String>,
+        /// Write the report to this file instead of standard output.
+        /// An existing file is replaced. A missing parent directory is an error.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
     },
     /// Save Actions runs, jobs, and referenced reusable workflows.
     Fetch {

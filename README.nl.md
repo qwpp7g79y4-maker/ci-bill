@@ -107,6 +107,7 @@ Elke optie uit `--help`, per commando.
 - `--budget <AMOUNT>`: budget voor het netto totaal in USD; exitcode 1 als het totaal hoger is.
 - `--fix-diff`: print een unified diff die de bevinding met de hoogste besparing herstelt.
 - `--md`: print een Markdown-analyse van één pagina in plaats van het rapport.
+- `--output <PATH>`: schrijf het rapport naar dit bestand in plaats van standaarduitvoer. Een bestaand bestand wordt overschreven. Een ontbrekende bovenliggende map is exitcode 1 en wordt niet aangemaakt.
 - `-h`, `--help`: toon de hulptekst.
 
 `ci-bill prices`:
@@ -118,6 +119,7 @@ Elke optie uit `--help`, per commando.
 - `--usage <CSV>`: usage report waarvan de eigen rijen het tabeltarief vervangen. `-` leest standaardinvoer.
 - `--repository <OWNER/REPO>`: repository die de usage-rijen bezit.
 - `--workflow <PATH>`: workflowpad in het usage report.
+- `--output <PATH>`: schrijf het rapport naar dit bestand in plaats van standaarduitvoer. Een bestaand bestand wordt overschreven. Een ontbrekende bovenliggende map is exitcode 1 en wordt niet aangemaakt.
 - `-h`, `--help`: toon de hulptekst.
 
 `ci-bill fetch`:
@@ -133,7 +135,7 @@ Elke optie uit `--help`, per commando.
 | Code | Betekenis |
 | ---- | --------- |
 | 0 | goed |
-| 1 | `--budget` is overschreden, of stdout was niet te schrijven (bijvoorbeeld schijf vol) |
+| 1 | `--budget` is overschreden, of het rapport was niet te schrijven (stdout of `--output`, bijvoorbeeld schijf vol of een ontbrekende bovenliggende map) |
 | 2 | een invoer was onbruikbaar: ontbrekende kolom, kapot getal, ongeldige YAML/JSON, onleesbaar bestand, onbekende SKU, of `fetch` kon de GitHub API niet gebruiken |
 | 3 | verkeerd gebruik: onbekende optie, ontbrekende verplichte optie, ongeldig `--budget`-bedrag, runnerlabel niet in de prijstabel, of `fetch`-gebruik zoals een ontbrekend token of `--until` vóór `--since` |
 

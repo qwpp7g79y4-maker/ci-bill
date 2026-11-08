@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--output PATH` on `report` and `prices`: write the report to a file instead of standard output. An existing file is replaced. A missing parent directory exits 1 and is not created. `fetch` keeps `--out` as its directory. Exit codes are unchanged.
 - README.md and README.nl.md: section "Aan de slag in 5 minuten" with five offline commands on `samples/` and `tests/fixtures/api/`. `tests/readme.rs` runs them literally.
 - `CONTRIBUTING.md`.
 - Bash and zsh completions from `clap_complete`: `cargo run --example gen_completions -- DIR` writes `DIR/ci-bill.bash` and `DIR/_ci-bill`. The crate is a dev-dependency; the binary and `--help` are unchanged. The existing man page already matches `--help` (`tests/handbook_help.rs`) and is unchanged.
