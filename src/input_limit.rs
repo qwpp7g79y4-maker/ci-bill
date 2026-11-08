@@ -39,7 +39,11 @@ pub fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
 /// and the rest is not kept.
 fn read_capped_reader(reader: impl Read) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
-    reader.take(MAX_INPUT_BYTES + 1).read_to_end(&mut buf)?;
+    // `read_to_end` retries EINTR. The wrapper turns a caught SIGINT into a
+    // different error so the read stops instead of continuing.
+    crate::interrupt::StopOnSigint::new(reader)
+        .take(MAX_INPUT_BYTES + 1)
+        .read_to_end(&mut buf)?;
     if buf.len() as u64 > MAX_INPUT_BYTES {
         return Err(too_large());
     }

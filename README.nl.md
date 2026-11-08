@@ -38,7 +38,7 @@ install -m 755 ci-bill-*/ci-bill "$HOME/.local/bin/"
 ```
 
 De tests draaien in CI op Linux, Windows, macOS (Apple Silicon en Intel) en op
-Rust 1.85. De suite heeft 549 tests (325 unit, 224 integratie), alle geslaagd.
+Rust 1.85. De suite heeft 550 tests (325 unit, 225 integratie), alle geslaagd.
 
 ## Aan de slag in 5 minuten
 
@@ -141,8 +141,9 @@ Elke optie uit `--help`, per commando.
 | 1 | `--budget` is overschreden, of het rapport was niet te schrijven (stdout of `--output`, bijvoorbeeld schijf vol of een ontbrekende bovenliggende map) |
 | 2 | een invoer was onbruikbaar: ontbrekende kolom, kapot getal, ongeldige YAML/JSON, onleesbaar bestand, een bestand of standaardinvoer groter dan 268435456 bytes (256 MiB), onbekende SKU, of `fetch` kon de GitHub API niet gebruiken |
 | 3 | verkeerd gebruik: onbekende optie, ontbrekende verplichte optie, ongeldig `--budget`-bedrag, runnerlabel niet in de prijstabel, of `fetch`-gebruik zoals een ontbrekend token of `--until` vóór `--since` |
+| 130 | SIGINT. Geen half rapport. Een bestaand `--output`-bestand blijft staan als het nieuwe rapport niet af was. Stderr is `ci-bill: interrupted by SIGINT`. |
 
-Elk verbruiksbestand, workflowbestand, runs-JSON-bestand, runner-map en standaardinvoer is hoogstens 268435456 bytes (256 MiB). Een grotere invoer eindigt met exitcode 2 en wordt niet ingelezen. De melding bevat `file is larger than 268435456 bytes`. `fetch` weigert een HTTP-antwoord boven 33554432 bytes (32 MiB) nog steeds; die grens is niet verhoogd en is niet deze bestandslimiet.
+Elk verbruiksbestand, workflowbestand, runs-JSON-bestand, runner-map en standaardinvoer is hoogstens 268435456 bytes (256 MiB). Een grotere invoer eindigt met exitcode 2 en wordt niet ingelezen. De melding bevat `file is larger than 268435456 bytes`. `fetch` weigert een HTTP-antwoord boven 33554432 bytes (32 MiB) nog steeds; die grens is niet verhoogd en is niet deze bestandslimiet. SIGINT eindigt met exitcode 130. Een signaal voordat het rapport af is schrijft niets naar stdout en laat een bestaand `--output`-bestand staan. Een `fetch` die zijn cache nog niet heeft gepubliceerd laat die cache staan. Exitcodes 0, 1, 2 en 3 blijven gelijk.
 
 Bij een fout noemt `ci-bill` wat er misging en, bij invoerfouten, onder
 "what to do" wat je eraan kunt doen.

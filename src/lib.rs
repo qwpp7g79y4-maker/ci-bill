@@ -7,6 +7,7 @@ pub mod fetch;
 pub mod findings;
 pub mod fix_diff;
 mod input_limit;
+pub mod interrupt;
 pub mod job_cost;
 pub mod matrix_cost;
 pub mod md;

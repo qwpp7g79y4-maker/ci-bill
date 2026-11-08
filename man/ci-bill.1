@@ -216,6 +216,19 @@ Usage error: unknown option, missing required flag, an invalid --budget amount, 
 flags, or a
 .B fetch
 usage error such as a missing token, a bad date, or --until before --since.
+.TP
+.B 130
+SIGINT.
+The report is not left half-written.
+An existing
+.B --output
+file is kept when the new report was not finished, and nothing is written to stdout.
+Stderr is
+.BR "ci-bill: interrupted by SIGINT" .
+A
+.B fetch
+that has not published its cache yet leaves that cache as it was.
+Exit codes 0, 1, 2 and 3 are unchanged.
 .SH EXAMPLES
 The CSV below is not installed with the binary.
 It lives in the source tree and is invented.

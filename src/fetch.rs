@@ -136,18 +136,34 @@ pub fn fetch(
     let merged = merge_runs(&cache, &incoming);
     let job_pages = client.fetch_needed_jobs(&cache, &merged.jobs)?;
     let files = client.workflow_files(out, &merged.discovered, &default_branch)?;
-    commit(
-        out,
-        &repo_body,
-        &RunWrite {
-            cache: &cache,
-            pages: &run_pages,
-            merged: &merged.runs,
-            rewrite_runs: merged.rewrite_runs,
-        },
-        &job_pages,
-        &files,
-    )?;
+    if crate::interrupt::interrupted() {
+        return Err(FetchError::input("interrupted by SIGINT"));
+    }
+    // Hold SIGINT across the cache publish so a signal cannot cut a file in
+    // half. A signal that was already pending skips the publish and leaves
+    // the previous cache as it was.
+    let committed = crate::interrupt::with_sigint_blocked(|| {
+        if crate::interrupt::interrupted() {
+            return None;
+        }
+        Some(commit(
+            out,
+            &repo_body,
+            &RunWrite {
+                cache: &cache,
+                pages: &run_pages,
+                merged: &merged.runs,
+                rewrite_runs: merged.rewrite_runs,
+            },
+            &job_pages,
+            &files,
+        ))
+    });
+    match committed {
+        None => return Err(FetchError::input("interrupted by SIGINT")),
+        Some(Err(error)) => return Err(error),
+        Some(Ok(())) => {}
+    }
     let jobs = job_pages.iter().map(|page| page.jobs).sum::<usize>();
     Ok(format!(
         "{owner}/{name} {} .. {}\nruns {}\njobs {jobs}\nworkflow files {}\n",
@@ -679,6 +695,9 @@ impl Client {
     }
 
     fn request_once(&self, url: &str, accept: &str, send_auth: bool) -> Result<Wire, FetchError> {
+        if crate::interrupt::interrupted() {
+            return Err(FetchError::input("interrupted by SIGINT"));
+        }
         let auth = format!("Bearer {}", self.token);
         let mut call = self
             .agent

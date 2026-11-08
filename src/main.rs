@@ -5,18 +5,35 @@ use std::process::ExitCode;
 use clap::{error::ErrorKind, Parser, Subcommand};
 
 use ci_bill::{
-    api, display, fetch, findings, fix_diff, matrix_cost, md,
+    api, display, fetch, findings, fix_diff, interrupt, matrix_cost, md,
     money::{DecimalError, Micros},
     overlap, prices, rank, report, rerun, savings, usage, workflow,
 };
 
-/// Write `text` to stdout. `print!`/`println!` panic when the write fails
-/// (broken pipe, full disk); this treats a closed reader (e.g. `| head`) as
-/// a quiet success like most Unix tools, and any other write error as a
-/// clean exit instead of a panic.
-fn write_stdout(text: &str) -> Result<(), ExitCode> {
-    match std::io::stdout().write_all(text.as_bytes()) {
+/// Path of a temporary file next to `path`, on the same filesystem, so the
+/// finished report can replace `path` in one rename. SIGINT before that
+/// rename deletes the temporary file and leaves `path` as it was.
+fn temp_beside(path: &Path) -> PathBuf {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut name = std::ffi::OsString::from(".");
+    name.push(
+        path.file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("report")),
+    );
+    name.push(format!(".ci-bill-{}.tmp", std::process::id()));
+    parent.join(name)
+}
+
+/// `Err` is the process status. Broken pipe stays success (exit 0). SIGINT
+/// is 130 and prints nothing here; `main` writes the one stderr line.
+fn write_result(result: std::io::Result<()>) -> Result<(), ExitCode> {
+    match result {
+        Ok(()) if interrupt::interrupted() => Err(ExitCode::from(interrupt::EXIT_INTERRUPTED)),
         Ok(()) => Ok(()),
+        Err(_) if interrupt::interrupted() => Err(ExitCode::from(interrupt::EXIT_INTERRUPTED)),
         Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Err(ExitCode::SUCCESS),
         Err(err) => {
             note(&format!("ci-bill: could not write to stdout: {err}"));
@@ -25,24 +42,74 @@ fn write_stdout(text: &str) -> Result<(), ExitCode> {
     }
 }
 
+/// Write `text` to stdout. `print!`/`println!` panic when the write fails
+/// (broken pipe, full disk); this treats a closed reader (e.g. `| head`) as
+/// a quiet success like most Unix tools, and any other write error as a
+/// clean exit instead of a panic. SIGINT during the write is held back so
+/// the bytes are not cut in half.
+fn write_stdout(text: &str) -> Result<(), ExitCode> {
+    if interrupt::interrupted() {
+        return Err(ExitCode::from(interrupt::EXIT_INTERRUPTED));
+    }
+    let result = interrupt::with_sigint_blocked(|| {
+        if interrupt::interrupted() {
+            return None;
+        }
+        let mut out = std::io::stdout().lock();
+        Some(out.write_all(text.as_bytes()).and_then(|()| out.flush()))
+    });
+    match result {
+        None => Err(ExitCode::from(interrupt::EXIT_INTERRUPTED)),
+        Some(result) => write_result(result),
+    }
+}
+
 /// Write the report to `--output`, or to stdout when that flag is absent.
 /// A missing parent directory is not created. The failure uses exit 1, the
-/// same code as a stdout write error.
+/// same code as a stdout write error. SIGINT publishes nothing partial: the
+/// destination is replaced only after the new bytes are complete.
 fn write_report(path: Option<&Path>, text: &str) -> Result<(), ExitCode> {
+    if interrupt::interrupted() {
+        return Err(ExitCode::from(interrupt::EXIT_INTERRUPTED));
+    }
     let Some(path) = path else {
         return write_stdout(text);
     };
-    match std::fs::File::create(path) {
-        Ok(mut file) => {
-            if let Err(err) = file.write_all(text.as_bytes()) {
-                return Err(report_file_error(path, err));
-            }
-            if let Err(err) = file.flush() {
-                return Err(report_file_error(path, err));
-            }
-            Ok(())
+    let tmp = temp_beside(path);
+    let created = std::fs::File::create(&tmp).and_then(|mut file| {
+        file.write_all(text.as_bytes())?;
+        file.flush()
+    });
+    if let Err(err) = created {
+        let _ = std::fs::remove_file(&tmp);
+        if interrupt::interrupted() {
+            return Err(ExitCode::from(interrupt::EXIT_INTERRUPTED));
         }
-        Err(err) => Err(report_file_error(path, err)),
+        return Err(report_file_error(path, err));
+    }
+    let renamed = interrupt::with_sigint_blocked(|| {
+        if interrupt::interrupted() {
+            return None;
+        }
+        Some(std::fs::rename(&tmp, path))
+    });
+    match renamed {
+        None => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(ExitCode::from(interrupt::EXIT_INTERRUPTED))
+        }
+        Some(Ok(())) if interrupt::interrupted() => {
+            Err(ExitCode::from(interrupt::EXIT_INTERRUPTED))
+        }
+        Some(Ok(())) => Ok(()),
+        Some(Err(_)) if interrupt::interrupted() => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(ExitCode::from(interrupt::EXIT_INTERRUPTED))
+        }
+        Some(Err(err)) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(report_file_error(path, err))
+        }
     }
 }
 
@@ -75,6 +142,16 @@ fn note(line: &str) {
     let _ = writeln!(std::io::stderr(), "{line}");
 }
 
+/// Input failure, exit 2, unless SIGINT was caught. The SIGINT line is printed
+/// once, from `main`, so this stays quiet in that case.
+fn input_exit(head: &str, hint: &str, extra: bool) -> ExitCode {
+    if interrupt::interrupted() {
+        return ExitCode::from(interrupt::EXIT_INTERRUPTED);
+    }
+    emit_hinted(head, hint, extra);
+    ExitCode::from(2)
+}
+
 /// Writes the error line. When `extra` is set, adds the existing `what to do` line.
 fn emit_hinted(head: &str, hint: &str, extra: bool) {
     if extra {
@@ -85,7 +162,8 @@ fn emit_hinted(head: &str, hint: &str, extra: bool) {
 }
 
 fn main() -> ExitCode {
-    match Cli::try_parse() {
+    interrupt::install();
+    let code = match Cli::try_parse() {
         Ok(cli) => {
             let extra = show_extra(cli.quiet, cli.verbose);
             let verbose = cli.verbose;
@@ -151,17 +229,31 @@ fn main() -> ExitCode {
                         Err(code) => code,
                     },
                     Err(err) => {
-                        note(&format!("ci-bill: {err}"));
-                        ExitCode::from(err.code())
+                        if !interrupt::interrupted() {
+                            note(&format!("ci-bill: {err}"));
+                        }
+                        ExitCode::from(if interrupt::interrupted() {
+                            interrupt::EXIT_INTERRUPTED
+                        } else {
+                            err.code()
+                        })
                     }
                 },
             }
         }
         Err(err) => usage_exit(err),
+    };
+    if interrupt::interrupted() {
+        note("ci-bill: interrupted by SIGINT");
+        return ExitCode::from(interrupt::EXIT_INTERRUPTED);
     }
+    code
 }
 
 fn usage_exit(err: clap::Error) -> ExitCode {
+    if interrupt::interrupted() {
+        return ExitCode::from(interrupt::EXIT_INTERRUPTED);
+    }
     if matches!(
         err.kind(),
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
@@ -189,35 +281,32 @@ fn report(
     let rows = match usage::read_usage(usage_path) {
         Ok(rows) => rows,
         Err(err) => {
-            emit_hinted(
+            return input_exit(
                 &format!("ci-bill: {}: {err}", usage_path.display()),
                 err.hint(),
                 extra,
             );
-            return ExitCode::from(2);
         }
     };
     let ranking = match rank::rank(&rows, None) {
         Ok(ranking) => ranking,
         Err(err) => {
-            emit_hinted(
+            return input_exit(
                 &format!("ci-bill: {}: {err}", usage_path.display()),
                 err.hint(),
                 extra,
             );
-            return ExitCode::from(2);
         }
     };
     let scanned = match workflows {
         Some(dir) => match workflow::scan_dir(dir) {
             Ok(scanned) => scanned,
             Err(err) => {
-                emit_hinted(
+                return input_exit(
                     &format!("ci-bill: {}: {err}", err.path.display()),
                     err.hint(),
                     extra,
                 );
-                return ExitCode::from(2);
             }
         },
         None => Vec::new(),
@@ -230,12 +319,11 @@ fn report(
         match result {
             Ok(items) => Some(items),
             Err(err) => {
-                emit_hinted(
+                return input_exit(
                     &format!("ci-bill: {}: {err}", err.path.display()),
                     err.hint(),
                     extra,
                 );
-                return ExitCode::from(2);
             }
         }
     } else {
@@ -247,12 +335,11 @@ fn report(
         Some(dir) => match api::read_dir(dir) {
             Ok(data) => Some(data),
             Err(err) => {
-                emit_hinted(
+                return input_exit(
                     &format!("ci-bill: {}: {err}", err.path.display()),
                     err.hint(),
                     extra,
                 );
-                return ExitCode::from(2);
             }
         },
         None => None,
@@ -399,6 +486,9 @@ fn show_prices(
             Err(code) => code,
         },
         Err(err) => {
+            if interrupt::interrupted() {
+                return ExitCode::from(interrupt::EXIT_INTERRUPTED);
+            }
             let code = err.exit_code();
             match err.hint() {
                 Some(hint) => emit_hinted(&format!("ci-bill: {err}"), hint, extra),

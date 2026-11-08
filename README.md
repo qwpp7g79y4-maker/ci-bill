@@ -62,7 +62,7 @@ Supported systems for the archives:
 - Windows: Windows 10 or newer, x86_64.
 
 The tests run in CI on Linux, Windows, macOS on Apple Silicon and macOS on
-Intel, and on Rust 1.85. The suite has 549 tests (325 unit, 224 integration),
+Intel, and on Rust 1.85. The suite has 550 tests (325 unit, 225 integration),
 all passing. Other systems may work with `cargo install`, but are
 not tested.
 
@@ -252,8 +252,9 @@ usage".
 | 1 | `--budget` given and the Actions net total is over it, or the report could not be written (stdout, or `--output`; for example a full disk or a missing parent directory) |
 | 2 | an input could not be used: missing column, broken number, invalid YAML/JSON, unreadable file, a file or standard input larger than 268435456 bytes (256 MiB), unknown SKU, or `fetch` could not use the GitHub API |
 | 3 | a usage error: unknown option, missing required flag, an invalid `--budget` amount, a runner label not in the price table, or `fetch` usage such as a missing token or `--until` before `--since` |
+| 130 | SIGINT. No half-written report. An existing `--output` file is kept when the new report was not finished. Stderr is `ci-bill: interrupted by SIGINT`. |
 
-Each usage file, workflow file, runs JSON file, runner map, and standard input may be at most 268435456 bytes (256 MiB). A larger input exits 2 and is not loaded. The message contains `file is larger than 268435456 bytes`. `fetch` still refuses an HTTP body over 33554432 bytes (32 MiB); that cap was not raised and is not this file limit.
+Each usage file, workflow file, runs JSON file, runner map, and standard input may be at most 268435456 bytes (256 MiB). A larger input exits 2 and is not loaded. The message contains `file is larger than 268435456 bytes`. `fetch` still refuses an HTTP body over 33554432 bytes (32 MiB); that cap was not raised and is not this file limit. SIGINT exits 130. A signal before the report is finished writes nothing to stdout and leaves an existing `--output` file as it was. A `fetch` that has not published its cache yet leaves that cache as it was. Exit codes 0, 1, 2 and 3 are unchanged.
 
 ## Example
 

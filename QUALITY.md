@@ -8,6 +8,13 @@ by PEPAI (pep_ai@icloud.com).
 `cargo test --no-fail-fast` (debug mode, default toolchain, all green; release mode and
 MSRV 1.85 were not run for this entry):
 
+### 2026-11-08 (W-48, SIGINT, branch prep/w24-fout)
+
+- SIGINT exits 130. Stderr is `ci-bill: interrupted by SIGINT`. The report is not left half-written. `tests/sigint.rs` sends the signal through a pidfd of the child it spawned. Ordinary exit codes stay 0, 1, 2 and 3. The input limit stays 268435456 bytes. The fetch HTTP body cap stays 33554432 bytes.
+- `cargo test --no-fail-fast`: 550 passed / 0 failed / 0 ignored.
+- `cargo fmt --check`: clean. `cargo clippy --all-targets -- -D warnings`: clean.
+- Version stays 1.0.0. `rust-version` stays 1.85.
+
 ### 2026-11-08 (W-46, input limit, branch prep/w24-fout)
 
 - Each usage file, workflow file, runs JSON file, runner map, and standard input may be at most 268435456 bytes (256 MiB). A larger input exits 2 with `file is larger than 268435456 bytes` and is not loaded. The limit is new. The measured 100 MiB input stays under it. The over-limit file is created in `/tmp` by the test and is not committed. The fetch HTTP body cap stays 33554432 bytes (32 MiB) and was not raised. Exit codes stay 0, 1, 2 and 3.
@@ -22,11 +29,11 @@ MSRV 1.85 were not run for this entry):
 - Version stays 1.0.0. `rust-version` stays 1.85. Exit codes stay 0, 1, 2 and 3.
 
 - 325 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
-- 224 integration tests under `tests/`, driving the real
+- 225 integration tests under `tests/`, driving the real
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
-- 549 tests total, 549 passed, 0 failed, 0 ignored, measured on branch
-  `prep/w24-fout` after the input-limit test. The earlier
+- 550 tests total, 550 passed, 0 failed, 0 ignored, measured on branch
+  `prep/w24-fout` after the SIGINT test. The earlier
   figure of 536 was measured on commit `efb7cf3` and does not describe this tip.
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are both

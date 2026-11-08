@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- SIGINT exits 130. Stderr is `ci-bill: interrupted by SIGINT`. The report is not left half-written: `--output` keeps the previous file until the new report is complete, and a signal before that writes nothing. A `fetch` that has not published its cache yet leaves that cache as it was. Ordinary exit codes stay 0, 1, 2 and 3. The input limit stays 268435456 bytes. The fetch HTTP body cap stays 33554432 bytes.
 - Each usage file, workflow file, runs JSON file, runner map, and standard input may be at most 268435456 bytes (256 MiB). A larger input exits 2 with `file is larger than 268435456 bytes` and is not loaded. The measured 100 MiB input stays under this limit. The fetch HTTP body cap stays 33554432 bytes (32 MiB) and was not raised. Exit codes stay 0, 1, 2 and 3.
 - `tests/offline.rs`: `webshop_report_matches_expected_output_with_outgoing_connections_blocked` runs `report` on `examples/webshop-usage.csv` in a network namespace (`unshare --user --map-root-user --net`) whose route table is empty. The report matches `examples/webshop-usage.expected.txt`. No provider and no price were added. The price table is unchanged.
 - `--quiet` and `--verbose`, on every command. A pipe or a redirect omits the `what to do` line. `--verbose` prints that line and, on success, one `context:` line on stderr. `--quiet` omits both even on a terminal. The report on stdout is unchanged. Exit codes stay 0, 1, 2 and 3. `--quiet` together with `--verbose` is exit 3.
