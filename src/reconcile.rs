@@ -33,6 +33,7 @@ pub enum CostMethod {
 }
 
 impl CostMethod {
+    /// `billed_minutes`, `yaml_weight`, or `list_price`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BilledMinutes => "billed_minutes",
@@ -45,38 +46,52 @@ impl CostMethod {
 /// One USD amount and the rule that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Amount {
+    /// USD as millionths.
     pub micros: Micros,
+    /// How `micros` was chosen.
     pub method: CostMethod,
 }
 
 /// One job's reconciled cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobCost {
+    /// Job name.
     pub name: String,
+    /// Workflow file this job was read from. Empty for a saved Actions job.
     pub file: String,
+    /// 1-based line, when the job came from YAML. Absent for a saved Actions job.
     pub line: Option<usize>,
+    /// Actions job id, when the job came from a saved run. Absent for a YAML-only job.
     pub job_id: Option<u64>,
+    /// Runner SKU, when the labels resolved.
     pub sku: Option<String>,
+    /// Reconciled cost of this job.
     pub amount: Amount,
 }
 
 /// Measured list price, invoice net, and their difference for one workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowCost {
+    /// List price measured from jobs, before it is fitted to the CSV.
     pub measured: Amount,
+    /// CSV net for this workflow.
     pub invoice: Amount,
+    /// `invoice` minus `measured`.
     pub difference: Amount,
+    /// One row per job that contributed.
     pub jobs: Vec<JobCost>,
 }
 
 /// Reconciled costs aligned with the ranked workflow slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reconciliation {
+    /// One entry per ranked workflow, in the same order.
     pub workflows: Vec<WorkflowCost>,
     jobs: HashMap<u64, Amount>,
 }
 
 impl Reconciliation {
+    /// Reconciled amount for an Actions job id, when this reconciliation has one.
     pub fn job(&self, id: u64) -> Option<&Amount> {
         self.jobs.get(&id)
     }

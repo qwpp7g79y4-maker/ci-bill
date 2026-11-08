@@ -33,16 +33,22 @@ pub const UNKNOWN_WORKFLOW: &str = "(unknown workflow)";
 /// One workflow run from `workflow_runs[]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowRun {
+    /// Actions run id.
     pub id: u64,
     /// Linked workflow path: `@ref` and an `owner/repo/` prefix are removed.
     pub path: String,
     /// `owner/repo` taken from the raw run path before linking. `None` when
     /// the path has no two-segment prefix in front of `.github/workflows`.
     pub repository: Option<String>,
+    /// `run_attempt` from the JSON. A missing or non-integer value rejects the run.
     pub run_attempt: u64,
+    /// `run_number` from the JSON. A missing or non-integer value rejects the run.
     pub run_number: u64,
+    /// `event`, such as `push` or `pull_request`.
     pub event: String,
+    /// `conclusion`. `None` while the run has not finished.
     pub conclusion: Option<String>,
+    /// `run_started_at`, as GitHub wrote it. Missing and null stay `None`.
     pub run_started_at: Option<String>,
     /// Branch name from `head_branch`. Missing and null stay `None`.
     pub head_branch: Option<String>,
@@ -64,14 +70,23 @@ impl WorkflowRun {
 /// completion time is stored as given and still counts as in progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
+    /// Actions job id.
     pub id: u64,
+    /// Run this job belongs to.
     pub run_id: u64,
+    /// `run_attempt` from the job JSON. A missing or non-integer value rejects the job.
     pub run_attempt: u64,
+    /// Job name.
     pub name: String,
+    /// Runner labels from `labels`.
     pub labels: Vec<String>,
+    /// `started_at`. Missing and null stay `None`.
     pub started_at: Option<String>,
+    /// `completed_at`. Missing and null stay `None`. A blank string is kept.
     pub completed_at: Option<String>,
+    /// `conclusion`. `None` while the job has not finished.
     pub conclusion: Option<String>,
+    /// `runner_name`, when GitHub sent one.
     pub runner_name: Option<String>,
 }
 
@@ -93,7 +108,9 @@ impl Job {
 /// the finished ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiData {
+    /// Workflow runs, in the order the files were read.
     pub runs: Vec<WorkflowRun>,
+    /// Finished and in-progress jobs. [`Job::counts`] selects the finished ones.
     pub jobs: Vec<Job>,
     /// `true` when `repo.json` says `private` is false.
     ///
@@ -202,6 +219,7 @@ pub fn workflow_paths_match(left: &str, right: &str) -> bool {
 /// Messages name the kind of problem. They do not include the file body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {
+    /// File or directory that could not be used.
     pub path: PathBuf,
     kind: ApiErrorKind,
 }

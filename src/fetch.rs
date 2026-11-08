@@ -30,6 +30,7 @@ pub struct FetchError {
 }
 
 impl FetchError {
+    /// Process exit code for this failure.
     pub fn code(&self) -> u8 {
         self.code
     }

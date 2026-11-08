@@ -1,3 +1,6 @@
+//! Rank GitHub Actions cost per workflow from the billing usage CSV
+//! and point to likely causes.
+
 pub mod api;
 pub mod display;
 pub mod fetch;

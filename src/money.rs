@@ -1,3 +1,5 @@
+//! Exact decimal amounts as an integer count of millionths of a dollar.
+
 /// Exact decimal stored as an integer count of millionths (10^-6).
 ///
 /// CSV amounts and quantities are parsed from decimal text. Nothing in this
@@ -16,6 +18,7 @@ pub enum DecimalError {
 }
 
 impl Micros {
+    /// Zero.
     pub const ZERO: Self = Self(0);
     /// 1.0 = 1_000_000.
     pub const SCALE: i64 = 1_000_000;

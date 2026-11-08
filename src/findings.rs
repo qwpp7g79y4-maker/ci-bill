@@ -1,3 +1,5 @@
+//! File-and-line findings for a workflow or job, and what each one would save.
+
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -100,9 +102,13 @@ impl SavingsMethod {
 /// One cause, pointing at a file line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
+    /// File the finding points at.
     pub path: std::path::PathBuf,
+    /// 1-based line in `path`.
     pub line: usize,
+    /// Which check produced this finding.
     pub kind: FindingKind,
+    /// Text shown for this finding.
     pub message: String,
     /// Set on invoice findings so the row stays on its repository workflow.
     pub repository: Option<String>,

@@ -15,10 +15,17 @@ use crate::prices::{embedded_table, sku_for_labels};
 /// What one job adds at list price.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobBill {
+    /// Billed minutes. Zero for an inherited copy, a job that did not run,
+    /// and a job with no completion time. A finished zero-length interval
+    /// is one minute.
     pub minutes: u64,
+    /// Runner SKU from the job labels. `None` when the labels do not resolve.
     pub sku: Option<String>,
+    /// Table rate for `sku`. `None` when there is no SKU.
     pub usd_per_minute: Option<Micros>,
+    /// `minutes` times the table rate. Zero while in progress or for an inherited copy.
     pub list_price: Micros,
+    /// The job has no completion time, so it is not billed.
     pub in_progress: bool,
 }
 

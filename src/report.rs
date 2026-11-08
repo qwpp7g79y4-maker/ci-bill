@@ -1,3 +1,5 @@
+//! Text and JSON reports of a ranked Actions bill.
+
 use std::fmt::Write;
 use std::path::Path;
 

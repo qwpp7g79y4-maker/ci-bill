@@ -1,3 +1,5 @@
+//! GitHub's detailed billing usage CSV.
+
 use std::path::Path;
 
 use crate::money::{DecimalError, Micros};
@@ -10,18 +12,31 @@ use crate::money::{DecimalError, Micros};
 pub struct UsageRow {
     /// 1-based physical line in the CSV file. The header is line 1.
     pub line: u64,
+    /// `date` column, as written.
     pub date: String,
+    /// `product` column.
     pub product: String,
+    /// `sku` column.
     pub sku: String,
+    /// `quantity` column.
     pub quantity: Micros,
+    /// `unit_type` column. Minutes are summed only when this is `minutes`.
     pub unit_type: String,
+    /// `applied_cost_per_quantity` column, USD per unit.
     pub applied_cost_per_quantity: Micros,
+    /// `gross_amount` column.
     pub gross: Micros,
+    /// `discount_amount` column.
     pub discount: Micros,
+    /// `net_amount` column.
     pub net: Micros,
+    /// `username` column.
     pub username: String,
+    /// `organization` column.
     pub organization: String,
+    /// `repository` column.
     pub repository: String,
+    /// `workflow_path` column. Empty in the file becomes `(no workflow)`.
     pub workflow_path: String,
 }
 
@@ -30,20 +45,27 @@ pub struct UsageRow {
 /// Messages name the line and the column. They never include cell text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageError {
+    /// 1-based CSV line, or 0 when the body was not read.
     pub line: u64,
+    /// What went wrong.
     pub kind: UsageErrorKind,
 }
 
+/// Why a usage row or the file around it was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageErrorKind {
     /// The file could not be opened. `line` is 0 because no row was read.
     Unreadable,
-    /// The file or stdin stream is past [`crate::input_limit::MAX_INPUT_BYTES`].
+    /// The file or stdin stream is past 268435456 bytes.
     /// `line` is 0 because the body is not read.
     TooLarge,
+    /// A required column is absent. The name is the column.
     MissingColumn(&'static str),
+    /// The named column is not a decimal.
     NotANumber(&'static str),
+    /// The named column needs more than six decimal places.
     TooManyDecimals(&'static str),
+    /// The row is not valid CSV.
     InvalidCsv,
     /// A running total overflowed `i64` micros. `line` is the row that caused
     /// it, or 0 when the overflow is in a total summed across the whole
@@ -131,6 +153,9 @@ const COLUMNS: [&str; 13] = [
     "workflow_path",
 ];
 
+/// Read a detailed usage CSV from `path`, or from standard input when `path` is `-`.
+///
+/// A file past 268435456 bytes is [`UsageErrorKind::TooLarge`] and is not parsed.
 pub fn read_usage(path: &Path) -> Result<Vec<UsageRow>, UsageError> {
     let bytes = match read_bytes(path) {
         Ok(bytes) => bytes,
