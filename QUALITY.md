@@ -252,3 +252,9 @@ Command:
 ```
 
 Three runs, wall clock: 1.13 s, 1.12 s, 1.15 s. Peak memory (max resident set size): 493008 KB, 493272 KB, 491860 KB. These are measurements on one host with near-identical rows; real exports with varied rows may be slower. No throughput is claimed.
+
+## Measured: line coverage (W-28, 2026-11-08)
+
+Line coverage: 96.95% (22935 lines, 699 missed), as printed in the TOTAL row of `cargo llvm-cov`. Measured on 2026-11-08 on branch `prep/w24-fout`. Goal was above 90%; no tests were added to reach it. The existing test count above is left as it was.
+
+Command: `PATH="$HOME/.cargo/bin:$PATH" cargo llvm-cov`
