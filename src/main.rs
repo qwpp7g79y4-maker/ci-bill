@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -19,7 +19,7 @@ fn write_stdout(text: &str) -> Result<(), ExitCode> {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Err(ExitCode::SUCCESS),
         Err(err) => {
-            eprintln!("ci-bill: could not write to stdout: {err}");
+            note(&format!("ci-bill: could not write to stdout: {err}"));
             Err(ExitCode::from(1))
         }
     }
@@ -48,69 +48,115 @@ fn write_report(path: Option<&Path>, text: &str) -> Result<(), ExitCode> {
 
 fn report_file_error(path: &Path, err: std::io::Error) -> ExitCode {
     let shown = display::escape_display(&display::display_path(path));
-    eprintln!("ci-bill: could not write report to {shown}: {err}");
+    note(&format!(
+        "ci-bill: could not write report to {shown}: {err}"
+    ));
     ExitCode::from(1)
+}
+
+/// The `what to do` line is extra context.
+///
+/// A terminal shows it. A pipe or a redirect does not, so captured stderr
+/// stays the error line. `--verbose` shows it anyway. `--quiet` hides it
+/// even on a terminal. The report on stdout is unchanged either way.
+/// Both flags together are a clap usage error (exit 3) and never reach a report.
+fn show_extra(quiet: bool, verbose: bool) -> bool {
+    if quiet {
+        false
+    } else if verbose {
+        true
+    } else {
+        std::io::stderr().is_terminal()
+    }
+}
+
+/// One stderr line. A closed stderr must not panic.
+fn note(line: &str) {
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
+/// Writes the error line. When `extra` is set, adds the existing `what to do` line.
+fn emit_hinted(head: &str, hint: &str, extra: bool) {
+    if extra {
+        note(&format!("{head}\n  what to do: {hint}"));
+    } else {
+        note(head);
+    }
 }
 
 fn main() -> ExitCode {
     match Cli::try_parse() {
-        Ok(cli) => match cli.command {
-            Command::Report {
-                usage,
-                workflows,
-                runs,
-                top,
-                json,
-                budget,
-                fix_diff,
-                md,
-                output,
-            } => report(
-                &usage,
-                workflows.as_deref(),
-                runs.as_deref(),
-                top,
-                json,
-                budget,
-                fix_diff,
-                md,
-                output.as_deref(),
-            ),
-            Command::Prices {
-                json,
-                runner_map,
-                label,
-                sku,
-                usage,
-                repository,
-                workflow,
-                output,
-            } => show_prices(
-                json,
-                runner_map.as_deref(),
-                label.as_deref(),
-                sku.as_deref(),
-                usage.as_deref(),
-                repository.as_deref(),
-                workflow.as_deref(),
-                output.as_deref(),
-            ),
-            Command::Fetch {
-                repo,
-                out,
-                since,
-                until,
-            } => match fetch::fetch(&repo, &out, since, until) {
-                Ok(text) => match write_stdout(&text) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(code) => code,
+        Ok(cli) => {
+            let extra = show_extra(cli.quiet, cli.verbose);
+            let verbose = cli.verbose;
+            match cli.command {
+                Command::Report {
+                    usage,
+                    workflows,
+                    runs,
+                    top,
+                    json,
+                    budget,
+                    fix_diff,
+                    md,
+                    output,
+                } => report(
+                    &usage,
+                    workflows.as_deref(),
+                    runs.as_deref(),
+                    top,
+                    json,
+                    budget,
+                    fix_diff,
+                    md,
+                    output.as_deref(),
+                    extra,
+                    verbose,
+                ),
+                Command::Prices {
+                    json,
+                    runner_map,
+                    label,
+                    sku,
+                    usage,
+                    repository,
+                    workflow,
+                    output,
+                } => show_prices(
+                    json,
+                    runner_map.as_deref(),
+                    label.as_deref(),
+                    sku.as_deref(),
+                    usage.as_deref(),
+                    repository.as_deref(),
+                    workflow.as_deref(),
+                    output.as_deref(),
+                    extra,
+                    verbose,
+                ),
+                Command::Fetch {
+                    repo,
+                    out,
+                    since,
+                    until,
+                } => match fetch::fetch(&repo, &out, since, until) {
+                    Ok(text) => match write_stdout(&text) {
+                        Ok(()) => {
+                            if verbose {
+                                let lines = text.lines().filter(|line| !line.is_empty()).count();
+                                note(&format!("context: lines {lines}"));
+                            }
+                            ExitCode::SUCCESS
+                        }
+                        Err(code) => code,
+                    },
+                    Err(err) => {
+                        note(&format!("ci-bill: {err}"));
+                        ExitCode::from(err.code())
+                    }
                 },
-                Err(err) => {
-                    eprintln!("ci-bill: {err}");
-                    ExitCode::from(err.code())
-                }
-            },
-        },
+            }
+        }
         Err(err) => usage_exit(err),
     }
 }
@@ -137,14 +183,16 @@ fn report(
     fix_diff: bool,
     md: bool,
     output: Option<&Path>,
+    extra: bool,
+    verbose: bool,
 ) -> ExitCode {
     let rows = match usage::read_usage(usage_path) {
         Ok(rows) => rows,
         Err(err) => {
-            eprintln!(
-                "ci-bill: {}: {err}\n  what to do: {}",
-                usage_path.display(),
-                err.hint()
+            emit_hinted(
+                &format!("ci-bill: {}: {err}", usage_path.display()),
+                err.hint(),
+                extra,
             );
             return ExitCode::from(2);
         }
@@ -152,10 +200,10 @@ fn report(
     let ranking = match rank::rank(&rows, None) {
         Ok(ranking) => ranking,
         Err(err) => {
-            eprintln!(
-                "ci-bill: {}: {err}\n  what to do: {}",
-                usage_path.display(),
-                err.hint()
+            emit_hinted(
+                &format!("ci-bill: {}: {err}", usage_path.display()),
+                err.hint(),
+                extra,
             );
             return ExitCode::from(2);
         }
@@ -164,10 +212,10 @@ fn report(
         Some(dir) => match workflow::scan_dir(dir) {
             Ok(scanned) => scanned,
             Err(err) => {
-                eprintln!(
-                    "ci-bill: {}: {err}\n  what to do: {}",
-                    err.path.display(),
-                    err.hint()
+                emit_hinted(
+                    &format!("ci-bill: {}: {err}", err.path.display()),
+                    err.hint(),
+                    extra,
                 );
                 return ExitCode::from(2);
             }
@@ -182,10 +230,10 @@ fn report(
         match result {
             Ok(items) => Some(items),
             Err(err) => {
-                eprintln!(
-                    "ci-bill: {}: {err}\n  what to do: {}",
-                    err.path.display(),
-                    err.hint()
+                emit_hinted(
+                    &format!("ci-bill: {}: {err}", err.path.display()),
+                    err.hint(),
+                    extra,
                 );
                 return ExitCode::from(2);
             }
@@ -199,10 +247,10 @@ fn report(
         Some(dir) => match api::read_dir(dir) {
             Ok(data) => Some(data),
             Err(err) => {
-                eprintln!(
-                    "ci-bill: {}: {err}\n  what to do: {}",
-                    err.path.display(),
-                    err.hint()
+                emit_hinted(
+                    &format!("ci-bill: {}: {err}", err.path.display()),
+                    err.hint(),
+                    extra,
                 );
                 return ExitCode::from(2);
             }
@@ -292,9 +340,16 @@ fn report(
     }
     if let Some(amount) = over_budget {
         if json {
-            eprintln!("{}", report::budget_exceeded_line(total_net, amount));
+            note(&report::budget_exceeded_line(total_net, amount));
         }
         return ExitCode::from(1);
+    }
+    if verbose {
+        let findings = found.as_ref().map(Vec::len).unwrap_or(0);
+        note(&format!(
+            "context: workflows {}, findings {findings}",
+            ranked.len()
+        ));
     }
     ExitCode::SUCCESS
 }
@@ -329,17 +384,25 @@ fn show_prices(
     repository: Option<&str>,
     workflow: Option<&str>,
     output: Option<&Path>,
+    extra: bool,
+    verbose: bool,
 ) -> ExitCode {
     match prices::render(json, runner_map, label, sku, usage, repository, workflow) {
         Ok(text) => match write_report(output, &text) {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(()) => {
+                if verbose {
+                    let lines = text.lines().filter(|line| !line.is_empty()).count();
+                    note(&format!("context: lines {lines}"));
+                }
+                ExitCode::SUCCESS
+            }
             Err(code) => code,
         },
         Err(err) => {
             let code = err.exit_code();
             match err.hint() {
-                Some(hint) => eprintln!("ci-bill: {err}\n  what to do: {hint}"),
-                None => eprintln!("ci-bill: {err}"),
+                Some(hint) => emit_hinted(&format!("ci-bill: {err}"), hint, extra),
+                None => note(&format!("ci-bill: {err}")),
             }
             ExitCode::from(code)
         }
@@ -350,6 +413,12 @@ fn show_prices(
 #[derive(Debug, Parser)]
 #[command(name = "ci-bill", version, about)]
 pub(crate) struct Cli {
+    /// Hide the `what to do` line. No context line.
+    #[arg(long, global = true, conflicts_with = "verbose")]
+    quiet: bool,
+    /// Print the `what to do` line, and on success one context line on stderr.
+    #[arg(long, global = true, conflicts_with = "quiet")]
+    verbose: bool,
     #[command(subcommand)]
     command: Command,
 }

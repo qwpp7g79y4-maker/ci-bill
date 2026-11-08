@@ -96,6 +96,8 @@ Elke optie uit `--help`, per commando.
 
 - `-h`, `--help`: toon de hulptekst.
 - `-V`, `--version`: toon de versie.
+- `--quiet`: verberg de `what to do`-regel, ook op een terminal. Geen contextregel. Geldt ook voor `report`, `prices` en `fetch`.
+- `--verbose`: toon de `what to do`-regel, en bij succes één `context:`-regel op stderr, ook in een pipe. Geldt ook voor `report`, `prices` en `fetch`.
 
 `ci-bill report`:
 

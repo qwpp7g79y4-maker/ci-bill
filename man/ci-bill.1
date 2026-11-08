@@ -59,6 +59,29 @@ Print help.
 Print version.
 Accepted only on the top-level command.
 A subcommand rejects --version.
+.TP
+.B --quiet
+Hide the
+.B what to do
+line, even when stderr is a terminal.
+No context line.
+Accepted on
+.BR report ,
+.BR prices ,
+and
+.B fetch
+as well.
+.TP
+.B --verbose
+Print the
+.B what to do
+line, and on success one context line on stderr, even when stderr is a pipe.
+Accepted on
+.BR report ,
+.BR prices ,
+and
+.B fetch
+as well.
 .SS report
 Rank workflow costs from a detailed usage report.
 .PP

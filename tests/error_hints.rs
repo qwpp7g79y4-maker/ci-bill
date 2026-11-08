@@ -16,7 +16,12 @@ fn stderr(output: &Output) -> String {
 
 #[test]
 fn unreadable_usage_file_says_how_to_fix_it() {
-    let out = ci_bill(&["report", "--usage", "examples/does-not-exist.csv"]);
+    let out = ci_bill(&[
+        "--verbose",
+        "report",
+        "--usage",
+        "examples/does-not-exist.csv",
+    ]);
     assert_eq!(out.status.code(), Some(2));
     let err = stderr(&out);
     assert!(err.contains("cannot read file"), "{err}");
@@ -26,6 +31,7 @@ fn unreadable_usage_file_says_how_to_fix_it() {
 #[test]
 fn missing_workflows_directory_says_how_to_fix_it() {
     let out = ci_bill(&[
+        "--verbose",
         "report",
         "--usage",
         "examples/usage.csv",
@@ -41,6 +47,7 @@ fn missing_workflows_directory_says_how_to_fix_it() {
 #[test]
 fn missing_runs_directory_says_how_to_fix_it() {
     let out = ci_bill(&[
+        "--verbose",
         "report",
         "--usage",
         "examples/usage.csv",

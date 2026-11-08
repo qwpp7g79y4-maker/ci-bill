@@ -171,6 +171,8 @@ Every option in `--help`, per command.
 
 - `-h`, `--help`: print help.
 - `-V`, `--version`: print the version.
+- `--quiet`: hide the `what to do` line, even on a terminal. No context line. Also accepted on `report`, `prices`, and `fetch`.
+- `--verbose`: print the `what to do` line, and on success one `context:` line on stderr, even on a pipe. Also accepted on `report`, `prices`, and `fetch`.
 
 `ci-bill report`:
 

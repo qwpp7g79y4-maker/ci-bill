@@ -16,7 +16,10 @@ fn ci_bill(args: &[&str]) -> Output {
 }
 
 fn fails(args: &[&str], code: i32) -> String {
-    let out = ci_bill(args);
+    // The next step is the `what to do` line, which a pipe omits unless `--verbose`.
+    let mut full = vec!["--verbose"];
+    full.extend_from_slice(args);
+    let out = ci_bill(&full);
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
     assert_eq!(out.status.code(), Some(code), "{err}");
     assert!(out.stdout.is_empty(), "stdout not empty");
