@@ -1435,6 +1435,11 @@ fn a_server_error_is_returned_without_a_long_wait() {
         "{}",
         stderr_of(&output)
     );
+    assert!(
+        stderr_of(&output).contains("run the same command again"),
+        "{}",
+        stderr_of(&output)
+    );
     assert!(started.elapsed() < Duration::from_secs(20));
     assert_eq!(server.hits().len(), 1, "{}", targets_of(&server.hits()));
     assert_kept(&out);
@@ -1464,6 +1469,11 @@ fn invalid_runs_json_writes_nothing() {
         "{}",
         stderr_of(&output)
     );
+    assert!(
+        stderr_of(&output).contains("run the same command again"),
+        "{}",
+        stderr_of(&output)
+    );
     assert!(!stderr_of(&output).contains(TOKEN));
     assert_kept(&out);
 }
@@ -1483,6 +1493,11 @@ fn a_missing_repository_exits_2() {
     assert_code(&output, 2);
     assert!(
         stderr_of(&output).contains("repository not found"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(
+        stderr_of(&output).contains("check --repo OWNER/REPO"),
         "{}",
         stderr_of(&output)
     );

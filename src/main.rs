@@ -263,7 +263,8 @@ fn report(
     ExitCode::SUCCESS
 }
 
-const BUDGET_ERROR: &str = "expected a finite USD amount greater than or equal to zero";
+const BUDGET_ERROR: &str =
+    "expected a finite USD amount greater than or equal to zero, for example 25.50";
 
 /// USD budget for the Actions net total.
 ///
@@ -298,7 +299,10 @@ fn show_prices(
         },
         Err(err) => {
             let code = err.exit_code();
-            eprintln!("ci-bill: {err}");
+            match err.hint() {
+                Some(hint) => eprintln!("ci-bill: {err}\n  what to do: {hint}"),
+                None => eprintln!("ci-bill: {err}"),
+            }
             ExitCode::from(code)
         }
     }

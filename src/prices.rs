@@ -79,6 +79,43 @@ impl PriceFail {
     }
 }
 
+impl PriceFail {
+    /// What the user can do about this error. `None` when the message
+    /// already carries the next step.
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::UnknownLabel(_) => None,
+            Self::Input { message, .. } if message.contains("cannot read file") => Some(
+                "check that the path exists and is readable, or pass `-` to read standard input",
+            ),
+            Self::Input { message, .. } if message.contains("unknown sku") => {
+                Some("run `ci-bill prices` without flags to list the SKUs, then pass one of them")
+            }
+            Self::Input { message, .. } if message.contains("more than one repository") => {
+                Some("add --repository OWNER/REPO to pick one of the repositories listed")
+            }
+            Self::Input { message, .. }
+                if message.contains("out of range") || message.contains("does not fit") =>
+            {
+                Some("check the usage file for an implausibly large amount, or narrow it with --repository and --workflow")
+            }
+            Self::Input { .. } => Some(
+                "fix the file named above: --usage takes the detailed usage report CSV from GitHub billing, --runner-map takes a CSV with `label` and `sku` columns",
+            ),
+            Self::Usage(message) if message.contains("requires --usage") => {
+                Some("add --usage CSV, or drop the flag that needs it")
+            }
+            Self::Usage(message) if message.contains("requires --label or --sku") => {
+                Some("add --label or --sku to say which runner to price, or drop --usage")
+            }
+            Self::Usage(message) if message.contains("resolves to") => {
+                Some("drop --sku, or pass the SKU that the label resolves to")
+            }
+            Self::Usage(_) => None,
+        }
+    }
+}
+
 impl std::fmt::Display for PriceFail {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
