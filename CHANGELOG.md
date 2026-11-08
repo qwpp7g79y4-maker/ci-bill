@@ -1,5 +1,20 @@
 # Changelog
 
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- `CONTRIBUTING.md`.
+
+### Changed
+
+- `SECURITY.md` names 1.0.x as the supported version.
+
 ## [1.0.0] - 2026-11-08
 
 The previous version is 0.1.2.
@@ -35,7 +50,7 @@ The previous version is 0.1.2.
 - Track flow-bracket depth when a fix diff finds where a key's value ends, so an F1 or F3 diff keeps a multi-line flow map or sequence valid YAML.
 - Escape a literal backslash in a Markdown table cell before escaping `|`, so a cell that contains `\|` does not split the row.
 
-## 0.1.1 - 2026-10-21
+## [0.1.1] - 2026-10-21
 
 ### Security
 
@@ -49,6 +64,12 @@ These crates are only used by `ci-bill fetch`; `report` and `prices` make no net
 - Release archives include THIRD-PARTY-LICENSES.html with the licenses of the third-party crates in the binary.
 - CI checks dependency licenses with cargo-deny.
 
-## 0.1.0
+## [0.1.0] - 2026-10-19
 
 First release. See the [v0.1.0 release](https://github.com/qwpp7g79y4-maker/ci-bill/releases/tag/v0.1.0).
+
+[Unreleased]: https://github.com/qwpp7g79y4-maker/ci-bill/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/qwpp7g79y4-maker/ci-bill/compare/v0.1.2...v1.0.0
+[0.1.2]: https://github.com/qwpp7g79y4-maker/ci-bill/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/qwpp7g79y4-maker/ci-bill/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/qwpp7g79y4-maker/ci-bill/releases/tag/v0.1.0
