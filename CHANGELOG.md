@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.0] - 2026-11-08
+
+The previous version is 0.1.2.
 
 ### Added
 
