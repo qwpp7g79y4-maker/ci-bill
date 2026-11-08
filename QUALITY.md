@@ -9,10 +9,10 @@ by PEPAI (pep_ai@icloud.com).
 MSRV 1.85 were not run for this entry):
 
 - 325 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
-- 195 integration tests under `tests/`, driving the real
+- 211 integration tests under `tests/`, driving the real
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
-- 520 tests total, 520 passed, 0 failed, 0 ignored, measured on commit
+- 536 tests total, 536 passed, 0 failed, 0 ignored, measured on commit
   `80a5d8a` plus the working-tree change that adds the example test (the "Aan de slag in 5
   minuten" section and its test were already in) (branch `prep/w08-provider`). The earlier
   figure of 623 was measured on another branch and does not describe this one.
