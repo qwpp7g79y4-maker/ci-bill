@@ -13,6 +13,7 @@ met `bestand:regel` naar de waarschijnlijke oorzaak. Het leest twee soorten invo
 
 `report` en `prices` werken offline: geen token, geen netwerk. Alleen `fetch`
 gebruikt het netwerk, met een `GH_TOKEN` of `GITHUB_TOKEN` uit de omgeving.
+`tests/offline.rs` draait `report` op `examples/webshop-usage.csv` met uitgaande verbindingen geblokkeerd.
 
 ## Installatie
 
@@ -37,7 +38,7 @@ install -m 755 ci-bill-*/ci-bill "$HOME/.local/bin/"
 ```
 
 De tests draaien in CI op Linux, Windows, macOS (Apple Silicon en Intel) en op
-Rust 1.85. De suite heeft 536 tests (325 unit, 211 integratie), alle geslaagd.
+Rust 1.85. De suite heeft 548 tests (325 unit, 223 integratie), alle geslaagd.
 
 ## Aan de slag in 5 minuten
 

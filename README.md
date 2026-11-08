@@ -27,6 +27,7 @@ data and breaks it down per repository, workflow, and job, with a
 
 `report` and `prices` are offline: no token, no network. Only `fetch` talks
 to the network, using a `GH_TOKEN` or `GITHUB_TOKEN` from the environment.
+`tests/offline.rs` runs `report` on `examples/webshop-usage.csv` with outgoing connections blocked.
 
 Manual page: `man/ci-bill.1`.
 
@@ -61,7 +62,7 @@ Supported systems for the archives:
 - Windows: Windows 10 or newer, x86_64.
 
 The tests run in CI on Linux, Windows, macOS on Apple Silicon and macOS on
-Intel, and on Rust 1.85. The suite has 536 tests (325 unit, 211 integration),
+Intel, and on Rust 1.85. The suite has 548 tests (325 unit, 223 integration),
 all passing. Other systems may work with `cargo install`, but are
 not tested.
 

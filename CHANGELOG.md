@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `tests/offline.rs`: `webshop_report_matches_expected_output_with_outgoing_connections_blocked` runs `report` on `examples/webshop-usage.csv` in a network namespace (`unshare --user --map-root-user --net`) whose route table is empty. The report matches `examples/webshop-usage.expected.txt`. No provider and no price were added. The price table is unchanged.
 - `--quiet` and `--verbose`, on every command. A pipe or a redirect omits the `what to do` line. `--verbose` prints that line and, on success, one `context:` line on stderr. `--quiet` omits both even on a terminal. The report on stdout is unchanged. Exit codes stay 0, 1, 2 and 3. `--quiet` together with `--verbose` is exit 3.
 - `--output PATH` on `report` and `prices`: write the report to a file instead of standard output. An existing file is replaced. A missing parent directory exits 1 and is not created. `fetch` keeps `--out` as its directory. Exit codes are unchanged.
 - README.md and README.nl.md: section "Aan de slag in 5 minuten" with five offline commands on `samples/` and `tests/fixtures/api/`. `tests/readme.rs` runs them literally.
