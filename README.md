@@ -61,7 +61,7 @@ Supported systems for the archives:
 - Windows: Windows 10 or newer, x86_64.
 
 The tests run in CI on Linux, Windows, macOS on Apple Silicon and macOS on
-Intel, and on Rust 1.85. The suite has 623 tests (325 unit, 298 integration),
+Intel, and on Rust 1.85. The suite has 519 tests (325 unit, 194 integration),
 all passing. Other systems may work with `cargo install`, but are
 not tested.
 
@@ -98,6 +98,26 @@ example-org/sample-app .github/workflows/ci.yml  0.96   0.96      0.00      120 
 
 The CSV above is invented. See the Example section below for a larger
 walkthrough on the `samples/` data in this repository.
+
+## Aan de slag in 5 minuten
+
+Five commands, offline, on the invented data in `samples/` and `tests/fixtures/api/`. They need no token, no network and no TUI, and read no system logs. Run them from the root of a clone, with `ci-bill` on your `PATH` (after `cargo install --locked --path .`, or use `target/release/ci-bill`). A test runs the commands in this block literally.
+
+```sh
+ci-bill report --usage samples/usage-sample.csv --workflows samples/.github/workflows --top 2
+ci-bill report --usage samples/usage-sample.csv --workflows samples/.github/workflows --md
+ci-bill report --usage samples/usage-sample.csv --json
+ci-bill report --usage samples/usage-sample.csv --runs tests/fixtures/api
+ci-bill prices --label ubuntu-latest
+```
+
+1. The report for the sample usage CSV, with findings from the sample workflows, limited to the top 2 workflows.
+2. The same as a one-page Markdown teardown.
+3. The usage-only report as one JSON object.
+4. The report with the saved Actions API runs and jobs from `tests/fixtures/api/`.
+5. The built-in USD per minute rate for the runner label `ubuntu-latest`, as the price table of this repository gives it.
+
+All five exit 0. The data covers GitHub Actions only, as in the rest of this README. For your own account, export the detailed usage report and pass it with `--usage`; see [Quick start](#quick-start).
 
 ## Commands
 

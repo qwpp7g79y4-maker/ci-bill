@@ -39,6 +39,26 @@ install -m 755 ci-bill-*/ci-bill "$HOME/.local/bin/"
 De tests draaien in CI op Linux, Windows, macOS (Apple Silicon en Intel) en op
 Rust 1.85. De suite heeft 623 tests (325 unit, 298 integratie), alle geslaagd.
 
+## Aan de slag in 5 minuten
+
+Vijf opdrachten, offline, op de verzonnen gegevens in `samples/` en `tests/fixtures/api/`. Ze hebben geen token, geen netwerk en geen TUI nodig en lezen geen systeemlogs. Draai ze in de hoofdmap van een kloon, met `ci-bill` op je `PATH` (na `cargo install --locked --path .`, of gebruik `target/release/ci-bill`). Een test draait de opdrachten in dit blok letterlijk.
+
+```sh
+ci-bill report --usage samples/usage-sample.csv --workflows samples/.github/workflows --top 2
+ci-bill report --usage samples/usage-sample.csv --workflows samples/.github/workflows --md
+ci-bill report --usage samples/usage-sample.csv --json
+ci-bill report --usage samples/usage-sample.csv --runs tests/fixtures/api
+ci-bill prices --label ubuntu-latest
+```
+
+1. Het rapport voor de voorbeeld-usage-CSV, met bevindingen uit de voorbeeldworkflows, beperkt tot de top 2 workflows.
+2. Hetzelfde als Markdown-teardown van één pagina.
+3. Het rapport alleen op usage-gegevens als één JSON-object.
+4. Het rapport met de opgeslagen Actions-API-runs en -jobs uit `tests/fixtures/api/`.
+5. Het ingebouwde tarief in USD per minuut voor het runnerlabel `ubuntu-latest`, zoals de prijstabel van deze repository het geeft.
+
+Alle vijf geven exit 0. De gegevens gaan alleen over GitHub Actions, net als de rest van deze README. Exporteer voor je eigen account het detailed usage report en geef het door met `--usage`; zie het voorbeeld hieronder.
+
 ## Voorbeeld
 
 Bewaar een CSV met één rij (verzonnen gegevens) en draai `ci-bill report`:

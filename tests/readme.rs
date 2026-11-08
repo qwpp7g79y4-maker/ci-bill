@@ -177,3 +177,52 @@ fn readme_lists_known_limitations() {
         assert!(section.contains(id), "Known limitations is missing {id}");
     }
 }
+
+/// The commands of the "Aan de slag in 5 minuten" section of both READMEs,
+/// run literally through `sh` with the freshly built binary first on `PATH`.
+#[test]
+fn five_minute_section_commands_run_literally() {
+    // (exit code, text that must be on stdout) per command, in order.
+    let expected: [(i32, &str); 5] = [
+        (0, "Total net: 284.21"),
+        (0, "# ci-bill teardown"),
+        (0, "\"currency\": \"USD\""),
+        (0, "Total net: 284.21"),
+        (0, "usd_per_minute: 0.006000"),
+    ];
+    let bin_dir = std::path::Path::new(env!("CARGO_BIN_EXE_ci-bill"))
+        .parent()
+        .expect("binary directory")
+        .to_path_buf();
+    let mut path = std::ffi::OsString::from(&bin_dir);
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    for (page, text) in [
+        ("README.md", README),
+        ("README.nl.md", include_str!("../README.nl.md")),
+    ] {
+        let part = text
+            .split("## Aan de slag in 5 minuten\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .unwrap_or_else(|| panic!("{page}: no 5-minute section"));
+        let block = fenced_block(part, "sh");
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(lines.len(), expected.len(), "{page}: command count");
+        for (line, (code, needle)) in lines.iter().zip(expected) {
+            for banned in ["/var/log", "journalctl", "http://", "https://", "fetch"] {
+                assert!(!line.contains(banned), "{page}: {line} uses {banned}");
+            }
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(line)
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .env("PATH", &path)
+                .output()
+                .expect("start sh");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(out.status.code(), Some(code), "{page}: {line}\n{stdout}");
+            assert!(stdout.contains(needle), "{page}: {line}\n{stdout}");
+        }
+    }
+}

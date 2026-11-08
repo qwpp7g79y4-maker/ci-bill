@@ -5,14 +5,17 @@ by PEPAI (pep_ai@icloud.com).
 
 ## Tests
 
-`cargo test` (debug and release, stable 1.99 and MSRV 1.85, all green):
+`cargo test --no-fail-fast` (debug mode, default toolchain, all green; release mode and
+MSRV 1.85 were not run for this entry):
 
 - 325 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
-- 298 integration tests across 26 files under `tests/`, driving the real
+- 194 integration tests under `tests/`, driving the real
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
-- 623 tests total, 623 passed, 0 failed, 0 ignored, measured on commit
-  `2f49253` (branch `v1-kandidaat`).
+- 519 tests total, 519 passed, 0 failed, 0 ignored, measured on commit
+  `a28de54` plus the working-tree change that adds the "Aan de slag in 5
+  minuten" section and its test (branch `prep/w08-provider`). The earlier
+  figure of 623 was measured on another branch and does not describe this one.
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are both
 clean, for the main crate and for `fuzz/`.

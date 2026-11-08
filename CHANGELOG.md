@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- README.md and README.nl.md: section "Aan de slag in 5 minuten" with five offline commands on `samples/` and `tests/fixtures/api/`. `tests/readme.rs` runs them literally.
 - `CONTRIBUTING.md`.
 
 ### Changed
