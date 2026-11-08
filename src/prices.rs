@@ -88,6 +88,9 @@ impl PriceFail {
             Self::Input { message, .. } if message.contains("cannot read file") => Some(
                 "check that the path exists and is readable, or pass `-` to read standard input",
             ),
+            Self::Input { message, .. } if message.contains("larger than") => {
+                Some("split the file so it stays under the size named above")
+            }
             Self::Input { message, .. } if message.contains("unknown sku") => {
                 Some("run `ci-bill prices` without flags to list the SKUs, then pass one of them")
             }
@@ -654,10 +657,24 @@ fn strip_core_word(body: &str) -> Option<&str> {
 
 /// CSV with header names `label` and `sku`, in any order.
 pub fn load_runner_map(path: &Path, table: &PriceTable) -> Result<RunnerMap, PriceFail> {
-    let bytes = crate::usage::read_bytes(path).map_err(|_| PriceFail::Input {
-        path: path.display().to_string(),
-        message: "line 0: cannot read file".to_string(),
-    })?;
+    let bytes = match crate::usage::read_bytes(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::FileTooLarge => {
+            return Err(PriceFail::Input {
+                path: path.display().to_string(),
+                message: format!(
+                    "file is larger than {} bytes",
+                    crate::input_limit::MAX_INPUT_BYTES
+                ),
+            });
+        }
+        Err(_) => {
+            return Err(PriceFail::Input {
+                path: path.display().to_string(),
+                message: "line 0: cannot read file".to_string(),
+            });
+        }
+    };
     parse_runner_map(&bytes, table).map_err(|message| PriceFail::Input {
         path: path.display().to_string(),
         message,

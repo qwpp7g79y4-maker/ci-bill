@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::Path;
 
 use crate::money::{DecimalError, Micros};
@@ -39,6 +38,9 @@ pub struct UsageError {
 pub enum UsageErrorKind {
     /// The file could not be opened. `line` is 0 because no row was read.
     Unreadable,
+    /// The file or stdin stream is past [`crate::input_limit::MAX_INPUT_BYTES`].
+    /// `line` is 0 because the body is not read.
+    TooLarge,
     MissingColumn(&'static str),
     NotANumber(&'static str),
     TooManyDecimals(&'static str),
@@ -54,6 +56,11 @@ impl std::fmt::Display for UsageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.kind {
             UsageErrorKind::Unreadable => write!(f, "line {}: cannot read file", self.line),
+            UsageErrorKind::TooLarge => write!(
+                f,
+                "file is larger than {} bytes",
+                crate::input_limit::MAX_INPUT_BYTES
+            ),
             UsageErrorKind::MissingColumn(column) => {
                 write!(f, "line {}: missing column {column}", self.line)
             }
@@ -88,6 +95,7 @@ impl UsageError {
             UsageErrorKind::Unreadable => {
                 "check that the path exists and is readable, or pass `-` to read standard input"
             }
+            UsageErrorKind::TooLarge => "split the file so it stays under the size named above",
             UsageErrorKind::MissingColumn(_) => {
                 "use the detailed usage report CSV exported from GitHub billing, with its header row unchanged"
             }
@@ -124,26 +132,31 @@ const COLUMNS: [&str; 13] = [
 ];
 
 pub fn read_usage(path: &Path) -> Result<Vec<UsageRow>, UsageError> {
-    let bytes = read_bytes(path).map_err(|_| UsageError {
-        line: 0,
-        kind: UsageErrorKind::Unreadable,
-    })?;
+    let bytes = match read_bytes(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::FileTooLarge => {
+            return Err(UsageError {
+                line: 0,
+                kind: UsageErrorKind::TooLarge,
+            });
+        }
+        Err(_) => {
+            return Err(UsageError {
+                line: 0,
+                kind: UsageErrorKind::Unreadable,
+            });
+        }
+    };
     parse_bytes(&bytes)
 }
 
-/// Read `path`, or standard input when `path` is `-`.
+/// Read `path`, or standard input when `path` is `-`, up to the input limit.
 pub(crate) fn read_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
-    if path == Path::new("-") {
-        let mut bytes = Vec::new();
-        std::io::stdin().read_to_end(&mut bytes)?;
-        Ok(bytes)
-    } else {
-        std::fs::read(path)
-    }
+    crate::input_limit::read_capped(path)
 }
 
 #[cfg(test)]
-fn read_reader<R: Read>(mut reader: R) -> Result<Vec<UsageRow>, UsageError> {
+fn read_reader<R: std::io::Read>(mut reader: R) -> Result<Vec<UsageRow>, UsageError> {
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes).map_err(|_| UsageError {
         line: 0,

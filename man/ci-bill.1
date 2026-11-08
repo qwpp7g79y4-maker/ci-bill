@@ -206,7 +206,7 @@ A closed stdout pipe (a reader that exits early) is also success.
 --budget was set and the Actions net total is above it, or the report could not be written (stdout for a reason other than a closed pipe, or --output; for example a full disk or a missing parent directory).
 .TP
 .B 2
-An input could not be used: missing column, a value that is not a number, invalid YAML or JSON, an unreadable file, an unknown SKU, or
+An input could not be used: missing column, a value that is not a number, invalid YAML or JSON, an unreadable file, a file or standard input larger than 268435456 bytes (256 MiB), an unknown SKU, or
 .B fetch
 could not use the GitHub API (network, HTTP status, rejected token, or rate limit).
 .TP

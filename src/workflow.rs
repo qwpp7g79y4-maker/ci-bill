@@ -237,6 +237,7 @@ pub struct ScanError {
 enum ScanErrorKind {
     Directory,
     File,
+    TooLarge,
     Yaml { line: usize },
 }
 
@@ -245,6 +246,11 @@ impl std::fmt::Display for ScanError {
         match self.kind {
             ScanErrorKind::Directory => write!(f, "cannot read directory"),
             ScanErrorKind::File => write!(f, "cannot read file"),
+            ScanErrorKind::TooLarge => write!(
+                f,
+                "file is larger than {} bytes",
+                crate::input_limit::MAX_INPUT_BYTES
+            ),
             ScanErrorKind::Yaml { line } => write!(f, "line {line}: invalid YAML"),
         }
     }
@@ -260,6 +266,7 @@ impl ScanError {
                 "check that --workflows points to an existing, readable directory"
             }
             ScanErrorKind::File => "check the file's permissions and that it is valid UTF-8",
+            ScanErrorKind::TooLarge => "split the file so it stays under the size named above",
             ScanErrorKind::Yaml { .. } => {
                 "fix the syntax at or just above that line; a YAML linter can help"
             }
@@ -282,11 +289,29 @@ impl ScanError {
         }
     }
 
+    pub(crate) fn too_large(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            kind: ScanErrorKind::TooLarge,
+        }
+    }
+
     fn yaml(path: &Path, line: usize) -> Self {
         Self {
             path: path.to_path_buf(),
             kind: ScanErrorKind::Yaml { line: line.max(1) },
         }
+    }
+}
+
+/// Read one workflow or action file as UTF-8, refusing a file past the input limit.
+pub(crate) fn read_workflow_text(path: &Path) -> Result<String, ScanError> {
+    match crate::input_limit::read_capped(path) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| ScanError::file(path)),
+        Err(err) if err.kind() == std::io::ErrorKind::FileTooLarge => {
+            Err(ScanError::too_large(path))
+        }
+        Err(_) => Err(ScanError::file(path)),
     }
 }
 
@@ -308,7 +333,7 @@ pub fn scan_dir(dir: &Path) -> Result<Vec<Workflow>, ScanError> {
 
     let mut workflows = Vec::with_capacity(paths.len());
     for path in paths {
-        let text = fs::read_to_string(&path).map_err(|_| ScanError::file(&path))?;
+        let text = read_workflow_text(&path)?;
         workflows.push(scan_yaml(&path, &text)?);
     }
     Ok(workflows)
@@ -1968,7 +1993,7 @@ fn join_relative(root: &Path, relative: &str) -> PathBuf {
 
 /// Read one action file. Invalid YAML names the file and the line.
 pub fn load_action(path: &Path) -> Result<ParsedAction, ScanError> {
-    let text = fs::read_to_string(path).map_err(|_| ScanError::file(path))?;
+    let text = read_workflow_text(path)?;
     parse_action(path, &text)
 }
 

@@ -1423,7 +1423,17 @@ fn load_cache(dir: &Path) -> Result<Cache, FetchError> {
 }
 
 fn read_file_text(path: &Path) -> Result<String, FetchError> {
-    let bytes = fs::read(path).map_err(|_| path_error(path, "cannot read file"))?;
+    let bytes = match crate::input_limit::read_capped(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::FileTooLarge => {
+            return Err(FetchError::input(format!(
+                "{}: file is larger than {} bytes; split the file or pass a smaller one",
+                path.display(),
+                crate::input_limit::MAX_INPUT_BYTES
+            )));
+        }
+        Err(_) => return Err(path_error(path, "cannot read file")),
+    };
     let bytes = strip_bom(&bytes);
     String::from_utf8(bytes.to_vec()).map_err(|_| path_error(path, "invalid JSON"))
 }

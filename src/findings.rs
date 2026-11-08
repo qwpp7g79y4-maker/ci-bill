@@ -5,8 +5,8 @@ use std::path::{Component, Path, PathBuf};
 use crate::money;
 use crate::usage::UsageRow;
 use crate::workflow::{
-    load_action, locate_action, repository_root, scan_yaml, ActionStep, Job, LocalAction, Matrix,
-    RemoteWorkflow, ReusableCall, ReusableSource, RunsOn, ScanError, Workflow,
+    load_action, locate_action, read_workflow_text, repository_root, scan_yaml, ActionStep, Job,
+    LocalAction, Matrix, RemoteWorkflow, ReusableCall, ReusableSource, RunsOn, ScanError, Workflow,
 };
 
 /// Why a workflow or job was flagged.
@@ -549,7 +549,7 @@ fn child_ignore_ascii_case(
 }
 
 fn load_cached(path: &Path) -> Result<Workflow, ScanError> {
-    let text = fs::read_to_string(path).map_err(|_| ScanError::file(path))?;
+    let text = read_workflow_text(path)?;
     scan_yaml(path, &text)
 }
 
