@@ -499,9 +499,23 @@ fn show_prices(
     }
 }
 
+// `-V` and `--version` print this. A debug build appends the commit git
+// reported at compile time. A release build stays the crate version.
+// A missing git, or a value that is not a full sha, adds nothing.
+#[cfg(all(debug_assertions, ci_bill_git_sha))]
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("CI_BILL_GIT_SHA"),
+    ")"
+);
+
+#[cfg(not(all(debug_assertions, ci_bill_git_sha)))]
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Rank workflow costs from a GitHub detailed usage report.
 #[derive(Debug, Parser)]
-#[command(name = "ci-bill", version, about)]
+#[command(name = "ci-bill", version = VERSION, about)]
 pub(crate) struct Cli {
     /// Hide the `what to do` line. No context line.
     #[arg(long, global = true, conflicts_with = "verbose")]

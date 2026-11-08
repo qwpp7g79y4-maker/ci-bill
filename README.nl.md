@@ -38,7 +38,7 @@ install -m 755 ci-bill-*/ci-bill "$HOME/.local/bin/"
 ```
 
 De tests draaien in CI op Linux, Windows, macOS (Apple Silicon en Intel) en op
-Rust 1.85. De suite heeft 550 tests (325 unit, 225 integratie), alle geslaagd.
+Rust 1.85. De suite heeft 551 tests (325 unit, 226 integratie), alle geslaagd.
 
 ## Aan de slag in 5 minuten
 
@@ -96,7 +96,7 @@ Elke optie uit `--help`, per commando.
 `ci-bill` (hoofdniveau):
 
 - `-h`, `--help`: toon de hulptekst.
-- `-V`, `--version`: toon de versie.
+- `-V`, `--version`: toon crate-versie 1.0.0 en stop met exit 0. Een debug-build toont ook de git-commit als git die zelf geeft. Een release-build toont de crate-versie.
 - `--quiet`: verberg de `what to do`-regel, ook op een terminal. Geen contextregel. Geldt ook voor `report`, `prices` en `fetch`.
 - `--verbose`: toon de `what to do`-regel, en bij succes één `context:`-regel op stderr, ook in een pipe. Geldt ook voor `report`, `prices` en `fetch`.
 

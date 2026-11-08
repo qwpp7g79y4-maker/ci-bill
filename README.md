@@ -62,7 +62,7 @@ Supported systems for the archives:
 - Windows: Windows 10 or newer, x86_64.
 
 The tests run in CI on Linux, Windows, macOS on Apple Silicon and macOS on
-Intel, and on Rust 1.85. The suite has 550 tests (325 unit, 225 integration),
+Intel, and on Rust 1.85. The suite has 551 tests (325 unit, 226 integration),
 all passing. Other systems may work with `cargo install`, but are
 not tested.
 
@@ -161,8 +161,10 @@ workflows they call, into `--out DIR` in the layout `--runs` reads.
 `ci-bill help` prints the same text as `--help`. `ci-bill help` plus a
 command name (`report`, `prices`, or `fetch`) prints that command's
 options. `-h` is the short form of `--help` on the top-level command and
-on `report`, `prices`, and `fetch`. `-V` and `--version` print the version
-and are accepted only on the top-level command.
+on `report`, `prices`, and `fetch`. `-V` and `--version` print crate version
+1.0.0 and exit 0. A debug build also prints the git commit when git itself
+provides one. A release build prints the crate version. Both flags are
+accepted only on the top-level command.
 
 ## Options
 
@@ -171,7 +173,7 @@ Every option in `--help`, per command.
 `ci-bill` (top level):
 
 - `-h`, `--help`: print help.
-- `-V`, `--version`: print the version.
+- `-V`, `--version`: print crate version 1.0.0 and exit 0. A debug build also prints the git commit when git itself provides one. A release build prints the crate version.
 - `--quiet`: hide the `what to do` line, even on a terminal. No context line. Also accepted on `report`, `prices`, and `fetch`.
 - `--verbose`: print the `what to do` line, and on success one `context:` line on stderr, even on a pipe. Also accepted on `report`, `prices`, and `fetch`.
 

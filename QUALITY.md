@@ -5,8 +5,15 @@ by PEPAI (pep_ai@icloud.com).
 
 ## Tests
 
-`cargo test --no-fail-fast` (debug mode, default toolchain, all green; release mode and
-MSRV 1.85 were not run for this entry):
+`cargo test --no-fail-fast` (debug mode, default toolchain, all green). The full release suite and
+MSRV 1.85 were not run. `cargo test --release --test version` passed.
+
+### 2026-11-08 (W-66, version, branch prep/w24-fout)
+
+- `-V` and `--version` print crate version 1.0.0 and exit 0. A debug build also prints the git commit when git itself provides one. `tests/version.rs` checks both flags. A release build prints the crate version and does not print that commit (`cargo test --release --test version`). No flag was renamed. No new exit code. SIGINT stays exit 130. The input limit stays 268435456 bytes. The fetch HTTP body cap stays 33554432 bytes.
+- `cargo test --no-fail-fast`: 551 passed / 0 failed / 0 ignored.
+- `cargo fmt --check`: clean. `cargo clippy --all-targets -- -D warnings`: clean.
+- Version stays 1.0.0. `rust-version` stays 1.85.
 
 ### 2026-11-08 (W-48, SIGINT, branch prep/w24-fout)
 
@@ -29,12 +36,12 @@ MSRV 1.85 were not run for this entry):
 - Version stays 1.0.0. `rust-version` stays 1.85. Exit codes stay 0, 1, 2 and 3.
 
 - 325 unit tests (`src/lib.rs`, `#[cfg(test)]` modules across the crate).
-- 225 integration tests under `tests/`, driving the real
+- 226 integration tests under `tests/`, driving the real
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
-- 550 tests total, 550 passed, 0 failed, 0 ignored, measured on branch
-  `prep/w24-fout` after the SIGINT test. The earlier
-  figure of 536 was measured on commit `efb7cf3` and does not describe this tip.
+- 551 tests total, 551 passed, 0 failed, 0 ignored, measured on branch
+  `prep/w24-fout` after the version test. The earlier
+  figure of 550 was the SIGINT entry. The figure of 536 was measured on commit `efb7cf3` and does not describe this tip.
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are both
 clean, for the main crate and for `fuzz/`.
