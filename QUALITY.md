@@ -240,3 +240,15 @@ line-numbered sense of "fixed, not theorized":
   write, not concurrent-writer races.
 - The `fetch` cache case collision on case-insensitive filesystems (see
   "Cross-OS fixes" above).
+
+## Measured: 100 MiB input (W-26, 2026-11-08)
+
+Release build (`cargo build --release`, commit `706dd68`, tree clean). Input: a synthetic usage CSV of exactly 104857600 bytes (100 MiB), made in `/tmp` and not committed. It is the header and the one data row of `examples/usage.csv` repeated, so the rows are almost identical; the last row has a longer `username` to reach the exact size. The tool read it without error and exited 0.
+
+Command:
+
+```
+/usr/bin/time -f "%e s %M KB" target/release/ci-bill report --usage /tmp/w26-in/big.csv
+```
+
+Three runs, wall clock: 1.13 s, 1.12 s, 1.15 s. Peak memory (max resident set size): 493008 KB, 493272 KB, 491860 KB. These are measurements on one host with near-identical rows; real exports with varied rows may be slower. No throughput is claimed.
