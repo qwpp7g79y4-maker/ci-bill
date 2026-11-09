@@ -18,14 +18,12 @@ MSRV 1.85 were not run. `cargo test --release --test version` passed.
 ### 2026-11-08 (W-48, SIGINT, branch prep/w24-fout)
 
 - SIGINT exits 130. Stderr is `ci-bill: interrupted by SIGINT`. The report is not left half-written. `tests/sigint.rs` sends the signal through a pidfd of the child it spawned. Ordinary exit codes stay 0, 1, 2 and 3. The input limit stays 268435456 bytes. The fetch HTTP body cap stays 33554432 bytes.
-- `cargo test --no-fail-fast`: 550 passed / 0 failed / 0 ignored.
 - `cargo fmt --check`: clean. `cargo clippy --all-targets -- -D warnings`: clean.
 - Version stays 1.0.0. `rust-version` stays 1.85.
 
 ### 2026-11-08 (W-46, input limit, branch prep/w24-fout)
 
 - Each usage file, workflow file, runs JSON file, runner map, and standard input may be at most 268435456 bytes (256 MiB). A larger input exits 2 with `file is larger than 268435456 bytes` and is not loaded. The limit is new. The measured 100 MiB input stays under it. The over-limit file is created in `/tmp` by the test and is not committed. The fetch HTTP body cap stays 33554432 bytes (32 MiB) and was not raised. Exit codes stay 0, 1, 2 and 3.
-- `cargo test --no-fail-fast`: 549 passed / 0 failed / 0 ignored.
 - `cargo fmt --check`: clean. `cargo clippy --all-targets -- -D warnings`: clean.
 - Version stays 1.0.0. `rust-version` stays 1.85.
 
@@ -39,9 +37,7 @@ MSRV 1.85 were not run. `cargo test --release --test version` passed.
 - 226 integration tests under `tests/`, driving the real
   `ci-bill` binary as a subprocess (CSV/YAML/JSON fixtures on disk, checked
   exit codes, stdout/stderr, and JSON snapshots).
-- 551 tests total, 551 passed, 0 failed, 0 ignored, measured on branch
-  `prep/w24-fout` after the version test. The earlier
-  figure of 550 was the SIGINT entry. The figure of 536 was measured on commit `efb7cf3` and does not describe this tip.
+- 551 tests total, 551 passed, 0 failed, 0 ignored, measured on commit `1973314` plus these changes. The sum is every `test result:` line from `cargo test --no-fail-fast` (library tests, `src/main.rs`, integration tests under `tests/`, and doc-tests).
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are both
 clean, for the main crate and for `fuzz/`.

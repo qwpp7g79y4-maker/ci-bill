@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - unreleased (release candidate)
+
+The previous version is 0.1.2.
+
 ### Added
 
 - `-V` and `--version` print crate version 1.0.0 and exit 0. A debug build also prints the git commit when git itself provides one, and rebuilds that commit when the branch ref moves, including in a worktree. A release build prints the crate version. The flags stay `-V` and `--version`. Exit codes stay 0, 1, 2, 3 and 130. The input limit stays 268435456 bytes. The fetch HTTP body cap stays 33554432 bytes.
@@ -18,26 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README.md and README.nl.md: section "Aan de slag in 5 minuten" with five offline commands on `samples/` and `tests/fixtures/api/`. `tests/readme.rs` runs them literally.
 - `CONTRIBUTING.md`.
 - Bash and zsh completions from `clap_complete`: `cargo run --example gen_completions -- DIR` writes `DIR/ci-bill.bash` and `DIR/_ci-bill`. The crate is a dev-dependency; the binary and `--help` are unchanged. The existing man page already matches `--help` (`tests/handbook_help.rs`) and is unchanged.
+- Document the binary: manual page `man/ci-bill.1`, an invented usage fixture under `examples/`, and `tests/handbook_help.rs`, which checks `--help` against that page.
+- Add `README.nl.md` (Dutch), an Options section in both READMEs, two more invented inputs under `examples/` with their expected output, and golden tests for them (`tests/examples_golden.rs`).
+- Add a test that every option in any `--help` appears in both READMEs.
+- Rustdoc on the public library API (`src/lib.rs` and the public modules).
+- `tests/json_schema.rs` pins the keys and value types of `report --json` (`schema_version` 2), including 6-decimal money strings.
 
 ### Changed
 
 - `SECURITY.md` names 1.0.x as the supported version.
-
-## [1.0.0] - 2026-11-08
-
-The previous version is 0.1.2.
-
-### Added
-
-- Document the binary: manual page `man/ci-bill.1`, an invented usage fixture under `examples/`, and `tests/handbook_help.rs`, which checks `--help` against that page.
-
-- Add `README.nl.md` (Dutch), an Options section in both READMEs, two more invented inputs under `examples/` with their expected output, and golden tests for them (`tests/examples_golden.rs`).
-- Add a test that every option in any `--help` appears in both READMEs.
-
-### Changed
-
 - Input errors in `report` now add a `what to do:` line; the unknown-runner-label, missing-token, rate-limit, unauthorized, reversed-date and `GITHUB_API_URL` errors name a next step. Exit codes are unchanged (`tests/error_hints.rs`).
-- State the measured test count (518 passing, 0 failing, measured on commit a6f3b9c) in README.md, README.nl.md and QUALITY.md.
+- `prices` errors add a `what to do:` line. `fetch` errors (HTTP status, invalid JSON, missing repository, file paths) and the `--repo`, `--since` and `--budget` value errors name the next step. Exit codes are unchanged (`tests/w24_errors.rs`, `tests/fetch.rs`).
+- The SIGINT test `sigint_on_blocked_stdin_writes_no_report_and_exits_130` is omitted when `cfg(coverage)` is set, which `cargo llvm-cov` sets. A normal `cargo test` still runs it. `unexpected_cfgs` recognizes `cfg(coverage)`.
+- README.md, README.nl.md and QUALITY.md state the measured test count: 551 passed, 0 failed, 0 ignored, measured on commit `1973314` plus these changes.
 - README: `report` requires `--usage`; name `help`, `--help`, and `--version`; point at `man/ci-bill.1`; align exit codes 2 and 3 with `fetch` and an unknown SKU.
 
 ## [0.1.2] - 2026-10-28
