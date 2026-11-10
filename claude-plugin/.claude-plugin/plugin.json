@@ -1,0 +1,22 @@
+{
+  "name": "ci-bill",
+  "displayName": "CI Bill",
+  "version": "0.1.2",
+  "description": "Rank which GitHub Actions workflows cost money from a billing usage CSV and local workflow files, and point to likely causes.",
+  "author": {
+    "name": "PEPAI",
+    "url": "https://github.com/qwpp7g79y4-maker"
+  },
+  "homepage": "https://github.com/qwpp7g79y4-maker/ci-bill",
+  "repository": "https://github.com/qwpp7g79y4-maker/ci-bill",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "github-actions",
+    "ci",
+    "cost",
+    "billing",
+    "cli"
+  ],
+  "documentationUrl": "https://github.com/qwpp7g79y4-maker/ci-bill",
+  "supportUrl": "https://github.com/qwpp7g79y4-maker/ci-bill/issues"
+}
