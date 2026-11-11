@@ -15,7 +15,7 @@ met `bestand:regel` naar de waarschijnlijke oorzaak. Het leest twee soorten invo
 
 `report` en `prices` werken offline: geen token, geen netwerk. Alleen `fetch`
 gebruikt het netwerk, met een `GH_TOKEN` of `GITHUB_TOKEN` uit de omgeving.
-`tests/offline.rs` draait `report` op `examples/webshop-usage.csv` met uitgaande verbindingen geblokkeerd.
+`tests/offline.rs` draait `report` op `examples/webshop-usage.csv` met uitgaande verbindingen geblokkeerd. De test slaat over als die namespace niet mag.
 
 ## Installatie
 

@@ -23,13 +23,13 @@ MSRV 1.85 were not run. `cargo test --release --test version` passed.
 
 ### 2026-11-08 (W-46, input limit, branch prep/w24-fout)
 
-- Each usage file, workflow file, runs JSON file, runner map, and standard input may be at most 268435456 bytes (256 MiB). A larger input exits 2 with `file is larger than 268435456 bytes` and is not loaded. The limit is new. The measured 100 MiB input stays under it. The over-limit file is created in `/tmp` by the test and is not committed. The fetch HTTP body cap stays 33554432 bytes (32 MiB) and was not raised. Exit codes stay 0, 1, 2 and 3.
+- Each usage file, workflow file, runs JSON file, runner map, and standard input may be at most 268435456 bytes (256 MiB). A larger input exits 2 with `file is larger than 268435456 bytes` and is not loaded. The limit is new. The measured 100 MiB input stays under it. The over-limit file is created in the system temp directory by the test and is not committed. The fetch HTTP body cap stays 33554432 bytes (32 MiB) and was not raised. Exit codes stay 0, 1, 2 and 3.
 - `cargo fmt --check`: clean. `cargo clippy --all-targets -- -D warnings`: clean.
 - Version stays 1.0.0. `rust-version` stays 1.85.
 
 ### 2026-11-08 (W-45, webshop report with outgoing connections blocked, branch prep/w24-fout)
 
-- `tests/offline.rs`: `webshop_report_matches_expected_output_with_outgoing_connections_blocked` runs `report` on `examples/webshop-usage.csv` inside `unshare --user --map-root-user --net`. That namespace has an empty route table. The report matches `examples/webshop-usage.expected.txt`. No provider and no price were added. The price table is unchanged.
+- `tests/offline.rs`: `webshop_report_matches_expected_output_with_outgoing_connections_blocked` runs `report` on `examples/webshop-usage.csv` inside `unshare --user --map-root-user --net`. That namespace has an empty route table. The report matches `examples/webshop-usage.expected.txt`. No provider and no price were added. The price table is unchanged. When `unshare` is missing, or the namespace is not permitted, the test prints `overgeslagen` and returns. Any other `unshare` failure still fails the test.
 - `cargo fmt --check`: clean. `cargo clippy --all-targets -- -D warnings`: clean.
 - Version stays 1.0.0. `rust-version` stays 1.85. Exit codes stay 0, 1, 2 and 3.
 

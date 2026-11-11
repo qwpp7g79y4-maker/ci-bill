@@ -27,7 +27,7 @@ data and breaks it down per repository, workflow, and job, with a
 
 `report` and `prices` are offline: no token, no network. Only `fetch` talks
 to the network, using a `GH_TOKEN` or `GITHUB_TOKEN` from the environment.
-`tests/offline.rs` runs `report` on `examples/webshop-usage.csv` with outgoing connections blocked.
+`tests/offline.rs` runs `report` on `examples/webshop-usage.csv` with outgoing connections blocked. It skips when that namespace is not permitted.
 
 Manual page: `man/ci-bill.1`.
 

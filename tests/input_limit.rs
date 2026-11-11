@@ -1,6 +1,6 @@
 //! One byte over the documented input limit is exit 2.
-//! The file is sparse, lives in `/tmp`, and is removed when the test ends.
-//! It is not a repository file.
+//! The file is sparse, lives in the system temp directory, and is removed
+//! when the test ends. It is not a repository file.
 
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -37,11 +37,11 @@ fn usage_over_the_byte_limit_exits_2() {
             let _ = std::fs::remove_file(&self.0);
         }
     }
-    let path = Gone(std::path::PathBuf::from(format!(
-        "/tmp/ci-bill-w46-over-limit-{}.csv",
-        std::process::id()
-    )));
-    let file = std::fs::File::create(&path.0).expect("create over-limit file in /tmp");
+    let path = Gone(
+        std::env::temp_dir().join(format!("ci-bill-w46-over-limit-{}.csv", std::process::id())),
+    );
+    let file =
+        std::fs::File::create(&path.0).expect("create over-limit file in the temp directory");
     file.set_len(LIMIT + 1)
         .expect("sparse length one byte over the limit");
     drop(file);
