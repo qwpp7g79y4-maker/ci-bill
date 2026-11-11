@@ -33,16 +33,22 @@ pub const UNKNOWN_WORKFLOW: &str = "(unknown workflow)";
 /// One workflow run from `workflow_runs[]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowRun {
+    /// Actions run id.
     pub id: u64,
     /// Linked workflow path: `@ref` and an `owner/repo/` prefix are removed.
     pub path: String,
     /// `owner/repo` taken from the raw run path before linking. `None` when
     /// the path has no two-segment prefix in front of `.github/workflows`.
     pub repository: Option<String>,
+    /// `run_attempt` from the JSON. A missing or non-integer value rejects the run.
     pub run_attempt: u64,
+    /// `run_number` from the JSON. A missing or non-integer value rejects the run.
     pub run_number: u64,
+    /// `event`, such as `push` or `pull_request`.
     pub event: String,
+    /// `conclusion`. `None` while the run has not finished.
     pub conclusion: Option<String>,
+    /// `run_started_at`, as GitHub wrote it. Missing and null stay `None`.
     pub run_started_at: Option<String>,
     /// Branch name from `head_branch`. Missing and null stay `None`.
     pub head_branch: Option<String>,
@@ -64,14 +70,23 @@ impl WorkflowRun {
 /// completion time is stored as given and still counts as in progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
+    /// Actions job id.
     pub id: u64,
+    /// Run this job belongs to.
     pub run_id: u64,
+    /// `run_attempt` from the job JSON. A missing or non-integer value rejects the job.
     pub run_attempt: u64,
+    /// Job name.
     pub name: String,
+    /// Runner labels from `labels`.
     pub labels: Vec<String>,
+    /// `started_at`. Missing and null stay `None`.
     pub started_at: Option<String>,
+    /// `completed_at`. Missing and null stay `None`. A blank string is kept.
     pub completed_at: Option<String>,
+    /// `conclusion`. `None` while the job has not finished.
     pub conclusion: Option<String>,
+    /// `runner_name`, when GitHub sent one.
     pub runner_name: Option<String>,
 }
 
@@ -93,7 +108,9 @@ impl Job {
 /// the finished ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiData {
+    /// Workflow runs, in the order the files were read.
     pub runs: Vec<WorkflowRun>,
+    /// Finished and in-progress jobs. [`Job::counts`] selects the finished ones.
     pub jobs: Vec<Job>,
     /// `true` when `repo.json` says `private` is false.
     ///
@@ -202,6 +219,7 @@ pub fn workflow_paths_match(left: &str, right: &str) -> bool {
 /// Messages name the kind of problem. They do not include the file body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {
+    /// File or directory that could not be used.
     pub path: PathBuf,
     kind: ApiErrorKind,
 }
@@ -210,6 +228,7 @@ pub struct ApiError {
 enum ApiErrorKind {
     Directory,
     File,
+    TooLarge,
     Json,
     DuplicateId,
     RunMismatch,
@@ -227,6 +246,13 @@ impl ApiError {
         Self {
             path: path.to_path_buf(),
             kind: ApiErrorKind::File,
+        }
+    }
+
+    fn too_large(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            kind: ApiErrorKind::TooLarge,
         }
     }
 
@@ -254,18 +280,46 @@ impl ApiError {
 
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self.kind {
-            ApiErrorKind::Directory => "cannot read directory",
-            ApiErrorKind::File => "cannot read file",
-            ApiErrorKind::Json => "invalid JSON",
-            ApiErrorKind::DuplicateId => "duplicate id",
-            ApiErrorKind::RunMismatch => "run id does not match file name",
-        };
-        f.write_str(message)
+        match self.kind {
+            ApiErrorKind::Directory => f.write_str("cannot read directory"),
+            ApiErrorKind::File => f.write_str("cannot read file"),
+            ApiErrorKind::TooLarge => write!(
+                f,
+                "file is larger than {} bytes",
+                crate::input_limit::MAX_INPUT_BYTES
+            ),
+            ApiErrorKind::Json => f.write_str("invalid JSON"),
+            ApiErrorKind::DuplicateId => f.write_str("duplicate id"),
+            ApiErrorKind::RunMismatch => f.write_str("run id does not match file name"),
+        }
     }
 }
 
 impl std::error::Error for ApiError {}
+
+impl ApiError {
+    /// What the user can do about this error.
+    pub fn hint(&self) -> &'static str {
+        match self.kind {
+            ApiErrorKind::Directory => {
+                "check that --runs points to an existing, readable directory"
+            }
+            ApiErrorKind::File => {
+                "check the file's permissions; pages are named runs-*.json and jobs-<run_id>*.json"
+            }
+            ApiErrorKind::TooLarge => "split the file so it stays under the size named above",
+            ApiErrorKind::Json => {
+                "save the page again with `ci-bill fetch`; do not edit the API response"
+            }
+            ApiErrorKind::DuplicateId => {
+                "remove the repeated run from one of the runs-*.json files"
+            }
+            ApiErrorKind::RunMismatch => {
+                "rename the file to jobs-<run_id>*.json with the run id its jobs belong to"
+            }
+        }
+    }
+}
 
 /// Read every runs page and `jobs?filter=all` page in `dir`.
 ///
@@ -387,7 +441,13 @@ fn matching_files(dir: &Path) -> Result<Vec<PathBuf>, ApiError> {
 }
 
 fn read_text(path: &Path) -> Result<String, ApiError> {
-    let bytes = fs::read(path).map_err(|_| ApiError::file(path))?;
+    let bytes = match crate::input_limit::read_capped(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::FileTooLarge => {
+            return Err(ApiError::too_large(path));
+        }
+        Err(_) => return Err(ApiError::file(path)),
+    };
     let without_bom = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
     String::from_utf8(without_bom.to_vec()).map_err(|_| ApiError::json(path))
 }

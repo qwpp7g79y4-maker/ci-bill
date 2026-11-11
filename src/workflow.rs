@@ -1,3 +1,5 @@
+//! GitHub Actions workflow files: triggers, jobs, steps, and matrices.
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::panic::AssertUnwindSafe;
@@ -12,9 +14,11 @@ use yaml_rust2::Event;
 /// Line numbers are 1-based positions of keys in the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workflow {
+    /// Path of the workflow file.
     pub path: PathBuf,
     /// Line of the top-level `on:` key, when present.
     pub on_line: Option<usize>,
+    /// `on:` names `pull_request`.
     pub has_pull_request: bool,
     /// `pull_request_target` is present under `on:`.
     pub has_pull_request_target: bool,
@@ -23,6 +27,7 @@ pub struct Workflow {
     pub cancel_in_progress: bool,
     /// Line of the top-level `concurrency:` key. The key match ignores ASCII case.
     pub concurrency_line: Option<usize>,
+    /// Jobs under `jobs:`, in file order.
     pub jobs: Vec<Job>,
     /// Repeated mapping keys, in document order. The later value won.
     pub duplicate_keys: Vec<DuplicateKey>,
@@ -31,12 +36,15 @@ pub struct Workflow {
 /// One job under top-level `jobs:`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
+    /// Job id: the key under `jobs:`.
     pub name: String,
     /// Line of the job key.
     pub line: usize,
     /// Job-level `name:` value, when it is written separately from the key.
     pub display_name: Option<String>,
+    /// `runs-on`, when the job has one.
     pub runs_on: Option<RunsOn>,
+    /// The job sets `timeout-minutes`.
     pub has_timeout_minutes: bool,
     /// Text of `run` steps, one step per line. Multiline scripts keep their lines.
     pub steps_text: String,
@@ -67,7 +75,10 @@ pub struct Job {
 /// repository. A reusable workflow path and a remote action stay empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
+    /// Step name: the `name` scalar, otherwise the `uses` scalar, otherwise
+    /// the first non-empty line of `run`. Empty when none of those keys has text.
     pub name: String,
+    /// 1-based line of the key that supplied `name`, or of the step itself.
     pub line: usize,
     /// `uses: ./path` for a local action directory, when present.
     pub local_action: Option<LocalAction>,
@@ -91,19 +102,26 @@ pub struct LocalAction {
 /// `runs` from an action file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedAction {
+    /// Path of the action file (`action.yml` or `action.yaml`).
     pub path: PathBuf,
     /// Trimmed `runs.using` text. Empty when the key is missing.
     pub using: String,
+    /// Steps under `runs.steps`, in document order.
     pub steps: Vec<ActionStep>,
 }
 
 /// One step under `runs.steps` of an action file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionStep {
+    /// First content line of `name`. Empty when that key is missing or blank.
     pub name: String,
+    /// Line of the `name` key. Absent when `name` is empty.
     pub name_line: Option<usize>,
+    /// `run` script text, with surrounding breaks trimmed. Empty when there is no `run`.
     pub run_text: String,
+    /// Line of the `run` key. Absent when `run_text` is empty.
     pub run_line: Option<usize>,
+    /// Local `uses: ./` action, when this step has one.
     pub local_action: Option<LocalAction>,
 }
 
@@ -132,7 +150,9 @@ pub enum ReusableSource {
 /// A reusable workflow in another repository, pinned to a tag, branch, or SHA.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteWorkflow {
+    /// GitHub owner in `owner/repo/...@ref`.
     pub owner: String,
+    /// GitHub repository in `owner/repo/...@ref`.
     pub repo: String,
     /// Path inside the repository, for example `.github/workflows/lint.yml`.
     pub workflow_path: String,
@@ -183,6 +203,7 @@ pub struct RunsOn {
     pub line: usize,
     /// Runner text, for example `ubuntu-latest` or `[self-hosted, macos]`.
     pub value: String,
+    /// Labels parsed from `value`.
     pub labels: Vec<String>,
 }
 
@@ -199,6 +220,7 @@ pub struct Matrix {
     pub line: usize,
     /// Exact count, or the lower bound when `at_least` or `jobs_hi` is set.
     pub jobs: u64,
+    /// An axis value is a `${{ ... }}` expression, so `jobs` is a lower bound.
     pub at_least: bool,
     /// Finite upper bound, present only when it is greater than `jobs`.
     pub jobs_hi: Option<u64>,
@@ -209,6 +231,7 @@ pub struct Matrix {
 /// One matrix axis, including keys that appear only under `include`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatrixAxis {
+    /// Axis key, including a key that appears only under `include`.
     pub name: String,
     /// Line of the axis key. Include-only keys use the first include key line.
     pub line: usize,
@@ -219,6 +242,7 @@ pub struct MatrixAxis {
 /// One repeated mapping key. The later line wins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateKey {
+    /// The repeated mapping key. The later value won.
     pub key: String,
     /// Line of the earlier occurrence.
     pub first: usize,
@@ -229,6 +253,7 @@ pub struct DuplicateKey {
 /// The workflow directory or a workflow file could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanError {
+    /// Directory or file that could not be read.
     pub path: PathBuf,
     kind: ScanErrorKind,
 }
@@ -237,6 +262,7 @@ pub struct ScanError {
 enum ScanErrorKind {
     Directory,
     File,
+    TooLarge,
     Yaml { line: usize },
 }
 
@@ -245,12 +271,33 @@ impl std::fmt::Display for ScanError {
         match self.kind {
             ScanErrorKind::Directory => write!(f, "cannot read directory"),
             ScanErrorKind::File => write!(f, "cannot read file"),
+            ScanErrorKind::TooLarge => write!(
+                f,
+                "file is larger than {} bytes",
+                crate::input_limit::MAX_INPUT_BYTES
+            ),
             ScanErrorKind::Yaml { line } => write!(f, "line {line}: invalid YAML"),
         }
     }
 }
 
 impl std::error::Error for ScanError {}
+
+impl ScanError {
+    /// What the user can do about this error.
+    pub fn hint(&self) -> &'static str {
+        match self.kind {
+            ScanErrorKind::Directory => {
+                "check that --workflows points to an existing, readable directory"
+            }
+            ScanErrorKind::File => "check the file's permissions and that it is valid UTF-8",
+            ScanErrorKind::TooLarge => "split the file so it stays under the size named above",
+            ScanErrorKind::Yaml { .. } => {
+                "fix the syntax at or just above that line; a YAML linter can help"
+            }
+        }
+    }
+}
 
 impl ScanError {
     pub(crate) fn directory(path: &Path) -> Self {
@@ -267,11 +314,29 @@ impl ScanError {
         }
     }
 
+    pub(crate) fn too_large(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            kind: ScanErrorKind::TooLarge,
+        }
+    }
+
     fn yaml(path: &Path, line: usize) -> Self {
         Self {
             path: path.to_path_buf(),
             kind: ScanErrorKind::Yaml { line: line.max(1) },
         }
+    }
+}
+
+/// Read one workflow or action file as UTF-8, refusing a file past the input limit.
+pub(crate) fn read_workflow_text(path: &Path) -> Result<String, ScanError> {
+    match crate::input_limit::read_capped(path) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| ScanError::file(path)),
+        Err(err) if err.kind() == std::io::ErrorKind::FileTooLarge => {
+            Err(ScanError::too_large(path))
+        }
+        Err(_) => Err(ScanError::file(path)),
     }
 }
 
@@ -293,7 +358,7 @@ pub fn scan_dir(dir: &Path) -> Result<Vec<Workflow>, ScanError> {
 
     let mut workflows = Vec::with_capacity(paths.len());
     for path in paths {
-        let text = fs::read_to_string(&path).map_err(|_| ScanError::file(&path))?;
+        let text = read_workflow_text(&path)?;
         workflows.push(scan_yaml(&path, &text)?);
     }
     Ok(workflows)
@@ -1953,7 +2018,7 @@ fn join_relative(root: &Path, relative: &str) -> PathBuf {
 
 /// Read one action file. Invalid YAML names the file and the line.
 pub fn load_action(path: &Path) -> Result<ParsedAction, ScanError> {
-    let text = fs::read_to_string(path).map_err(|_| ScanError::file(path))?;
+    let text = read_workflow_text(path)?;
     parse_action(path, &text)
 }
 

@@ -20,28 +20,37 @@ const NO_WORKFLOW: &str = "(no workflow)";
 /// One SKU from the embedded price table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkuPrice {
+    /// Canonical SKU name from the embedded table.
     pub sku: String,
+    /// USD per minute from the table.
     pub usd_per_minute: Micros,
+    /// Whether a public repository is charged for this SKU.
+    /// Standard runners are free there; larger runners stay charged.
     pub billed_on_public: bool,
 }
 
 /// Embedded Actions minute prices.
 #[derive(Debug, Clone)]
 pub struct PriceTable {
+    /// When the embedded rates were copied, as written in `prices/actions.json`.
     pub retrieved: String,
+    /// First day the rates apply, as written in the table.
     pub effective_from: String,
+    /// URLs the rates were taken from.
     pub sources: Vec<String>,
     skus: BTreeMap<String, SkuPrice>,
     by_lower: HashMap<String, String>,
 }
 
 impl PriceTable {
+    /// The SKU, matched without ASCII case.
     pub fn get(&self, sku: &str) -> Option<&SkuPrice> {
         self.by_lower
             .get(&sku.to_ascii_lowercase())
             .and_then(|name| self.skus.get(name))
     }
 
+    /// Every SKU, in name order.
     pub fn iter(&self) -> impl Iterator<Item = &SkuPrice> {
         self.skus.values()
     }
@@ -54,6 +63,7 @@ pub struct RunnerMap {
 }
 
 impl RunnerMap {
+    /// Canonical SKU for a label key, when `--runner-map` names it.
     pub fn get(&self, key: &str) -> Option<&str> {
         self.entries.get(key).map(String::as_str)
     }
@@ -63,7 +73,12 @@ impl RunnerMap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PriceFail {
     /// Exit 2. `path` is the file that could not be used. Empty when there is no file.
-    Input { path: String, message: String },
+    Input {
+        /// File that could not be used. Empty when there is no file.
+        path: String,
+        /// What went wrong. This text does not include the file body.
+        message: String,
+    },
     /// Exit 3. The runner label is not in the built-in map or `--runner-map`.
     UnknownLabel(String),
     /// Exit 3. The flags disagree or a price flag is missing its partner.
@@ -71,10 +86,51 @@ pub enum PriceFail {
 }
 
 impl PriceFail {
+    /// Process exit code: 2 for [`PriceFail::Input`], 3 for an unknown label or a usage mistake.
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::UnknownLabel(_) | Self::Usage(_) => 3,
             Self::Input { .. } => 2,
+        }
+    }
+}
+
+impl PriceFail {
+    /// What the user can do about this error. `None` when the message
+    /// already carries the next step.
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::UnknownLabel(_) => None,
+            Self::Input { message, .. } if message.contains("cannot read file") => Some(
+                "check that the path exists and is readable, or pass `-` to read standard input",
+            ),
+            Self::Input { message, .. } if message.contains("larger than") => {
+                Some("split the file so it stays under the size named above")
+            }
+            Self::Input { message, .. } if message.contains("unknown sku") => {
+                Some("run `ci-bill prices` without flags to list the SKUs, then pass one of them")
+            }
+            Self::Input { message, .. } if message.contains("more than one repository") => {
+                Some("add --repository OWNER/REPO to pick one of the repositories listed")
+            }
+            Self::Input { message, .. }
+                if message.contains("out of range") || message.contains("does not fit") =>
+            {
+                Some("check the usage file for an implausibly large amount, or narrow it with --repository and --workflow")
+            }
+            Self::Input { .. } => Some(
+                "fix the file named above: --usage takes the detailed usage report CSV from GitHub billing, --runner-map takes a CSV with `label` and `sku` columns",
+            ),
+            Self::Usage(message) if message.contains("requires --usage") => {
+                Some("add --usage CSV, or drop the flag that needs it")
+            }
+            Self::Usage(message) if message.contains("requires --label or --sku") => {
+                Some("add --label or --sku to say which runner to price, or drop --usage")
+            }
+            Self::Usage(message) if message.contains("resolves to") => {
+                Some("drop --sku, or pass the SKU that the label resolves to")
+            }
+            Self::Usage(_) => None,
         }
     }
 }
@@ -84,7 +140,10 @@ impl std::fmt::Display for PriceFail {
         match self {
             Self::Input { path, message } if path.is_empty() => write!(f, "{message}"),
             Self::Input { path, message } => write!(f, "{path}: {message}"),
-            Self::UnknownLabel(label) => write!(f, "unknown runner label: {label}"),
+            Self::UnknownLabel(label) => write!(
+                f,
+                "unknown runner label: {label}; pass --sku instead, or add the label to a --runner-map CSV of `label,sku` rows"
+            ),
             Self::Usage(message) => f.write_str(message),
         }
     }
@@ -93,11 +152,14 @@ impl std::fmt::Display for PriceFail {
 /// Where `usd_per_minute` came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RateSource {
+    /// The embedded price table.
     Table,
+    /// This workflow's own usage rows (`net / quantity`).
     Csv,
 }
 
 impl RateSource {
+    /// `table` or `csv`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Table => "table",
@@ -109,12 +171,19 @@ impl RateSource {
 /// The minute rate for one resolved runner or SKU.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quote {
+    /// Runner labels this quote was asked for. Empty when none were given.
     pub labels: Vec<String>,
+    /// Canonical SKU.
     pub sku: String,
+    /// USD per minute.
     pub usd_per_minute: Micros,
+    /// Whether a public repository is charged for `sku`.
     pub billed_on_public: bool,
+    /// Where `usd_per_minute` came from.
     pub source: RateSource,
+    /// Repository the CSV rate was taken from, when `source` is [`RateSource::Csv`].
     pub repository: Option<String>,
+    /// Workflow path the CSV rate was taken from, when `source` is [`RateSource::Csv`].
     pub workflow_path: Option<String>,
 }
 
@@ -614,10 +683,24 @@ fn strip_core_word(body: &str) -> Option<&str> {
 
 /// CSV with header names `label` and `sku`, in any order.
 pub fn load_runner_map(path: &Path, table: &PriceTable) -> Result<RunnerMap, PriceFail> {
-    let bytes = crate::usage::read_bytes(path).map_err(|_| PriceFail::Input {
-        path: path.display().to_string(),
-        message: "line 0: cannot read file".to_string(),
-    })?;
+    let bytes = match crate::usage::read_bytes(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::FileTooLarge => {
+            return Err(PriceFail::Input {
+                path: path.display().to_string(),
+                message: format!(
+                    "file is larger than {} bytes",
+                    crate::input_limit::MAX_INPUT_BYTES
+                ),
+            });
+        }
+        Err(_) => {
+            return Err(PriceFail::Input {
+                path: path.display().to_string(),
+                message: "line 0: cannot read file".to_string(),
+            });
+        }
+    };
     parse_runner_map(&bytes, table).map_err(|message| PriceFail::Input {
         path: path.display().to_string(),
         message,

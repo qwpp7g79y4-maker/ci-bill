@@ -1,3 +1,5 @@
+//! File-and-line findings for a workflow or job, and what each one would save.
+
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -5,8 +7,8 @@ use std::path::{Component, Path, PathBuf};
 use crate::money;
 use crate::usage::UsageRow;
 use crate::workflow::{
-    load_action, locate_action, repository_root, scan_yaml, ActionStep, Job, LocalAction, Matrix,
-    RemoteWorkflow, ReusableCall, ReusableSource, RunsOn, ScanError, Workflow,
+    load_action, locate_action, read_workflow_text, repository_root, scan_yaml, ActionStep, Job,
+    LocalAction, Matrix, RemoteWorkflow, ReusableCall, ReusableSource, RunsOn, ScanError, Workflow,
 };
 
 /// Why a workflow or job was flagged.
@@ -100,9 +102,13 @@ impl SavingsMethod {
 /// One cause, pointing at a file line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
+    /// File the finding points at.
     pub path: std::path::PathBuf,
+    /// 1-based line in `path`.
     pub line: usize,
+    /// Which check produced this finding.
     pub kind: FindingKind,
+    /// Text shown for this finding.
     pub message: String,
     /// Set on invoice findings so the row stays on its repository workflow.
     pub repository: Option<String>,
@@ -549,7 +555,7 @@ fn child_ignore_ascii_case(
 }
 
 fn load_cached(path: &Path) -> Result<Workflow, ScanError> {
-    let text = fs::read_to_string(path).map_err(|_| ScanError::file(path))?;
+    let text = read_workflow_text(path)?;
     scan_yaml(path, &text)
 }
 

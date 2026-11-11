@@ -13,8 +13,9 @@ likely causes with `file:line`. It reads two kinds of input:
   `ci-bill fetch` (or any other means) into a directory of
   `runs-*.json`/`jobs-<run_id>*.json` files, given with `--runs`
 
-Either input works on its own; together they add measured, per-job cost on
-top of the invoice. It also reads `.github/workflows/*.yml`/`*.yaml`,
+`report` requires `--usage`. `--runs` is optional; together with the usage
+CSV it adds measured, per-job cost on top of the invoice. ci-bill also reads
+`.github/workflows/*.yml`/`*.yaml`,
 including reusable workflows and composite actions, with `--workflows`.
 
 Download the `--usage` CSV as a **detailed usage report** export from your
@@ -26,15 +27,20 @@ data and breaks it down per repository, workflow, and job, with a
 
 `report` and `prices` are offline: no token, no network. Only `fetch` talks
 to the network, using a `GH_TOKEN` or `GITHUB_TOKEN` from the environment.
+`tests/offline.rs` runs `report` on `examples/webshop-usage.csv` with outgoing connections blocked. It skips when that namespace is not permitted.
+
+Manual page: `man/ci-bill.1`.
 
 ## Installation
 
-With Rust 1.85 or newer, install from [crates.io](https://crates.io/crates/ci-bill):
+Version 1.0.0 is on [crates.io](https://crates.io/crates/ci-bill). With Rust 1.85 or newer:
 
 ```sh
-cargo install --locked ci-bill
+cargo install ci-bill
 ci-bill --help
 ```
+
+`cargo install --locked ci-bill` pins the crate's lockfile.
 
 Ready-made archives for Linux, Windows and macOS are attached to each
 [GitHub release](https://github.com/qwpp7g79y4-maker/ci-bill/releases), each
@@ -58,7 +64,9 @@ Supported systems for the archives:
 - Windows: Windows 10 or newer, x86_64.
 
 The tests run in CI on Linux, Windows, macOS on Apple Silicon and macOS on
-Intel, and on Rust 1.85. Other systems may work with `cargo install`, but are
+Intel, and on Rust 1.85. The suite has 551 tests (325 unit, 226 integration):
+551 passed, 0 failed, 0 ignored, measured on commit `1973314` plus these
+changes. Other systems may work with `cargo install`, but are
 not tested.
 
 For the latest `main`:
@@ -95,14 +103,36 @@ example-org/sample-app .github/workflows/ci.yml  0.96   0.96      0.00      120 
 The CSV above is invented. See the Example section below for a larger
 walkthrough on the `samples/` data in this repository.
 
+## Aan de slag in 5 minuten
+
+Five commands, offline, on the invented data in `samples/` and `tests/fixtures/api/`. They need no token, no network and no TUI, and read no system logs. Run them from the root of a clone, with `ci-bill` on your `PATH` (after `cargo install --locked --path .`, or use `target/release/ci-bill`). A test runs the commands in this block literally.
+
+```sh
+ci-bill report --usage samples/usage-sample.csv --workflows samples/.github/workflows --top 2
+ci-bill report --usage samples/usage-sample.csv --workflows samples/.github/workflows --md
+ci-bill report --usage samples/usage-sample.csv --json
+ci-bill report --usage samples/usage-sample.csv --runs tests/fixtures/api
+ci-bill prices --label ubuntu-latest
+```
+
+1. The report for the sample usage CSV, with findings from the sample workflows, limited to the top 2 workflows.
+2. The same as a one-page Markdown teardown.
+3. The usage-only report as one JSON object.
+4. The report with the saved Actions API runs and jobs from `tests/fixtures/api/`.
+5. The built-in USD per minute rate for the runner label `ubuntu-latest`, as the price table of this repository gives it.
+
+All five exit 0. The data covers GitHub Actions only, as in the rest of this README. For your own account, export the detailed usage report and pass it with `--usage`; see [Quick start](#quick-start).
+
 ## Commands
 
 ```sh
+ci-bill [-h | --help] [-V | --version] <COMMAND>
 ci-bill report --usage CSV [--workflows DIR] [--runs DIR] [--top N] \
-    [--json] [--budget AMOUNT] [--fix-diff] [--md]
+    [--json] [--budget AMOUNT] [--fix-diff] [--md] [--output PATH]
 ci-bill prices [--json] [--runner-map CSV] [--label LABEL] [--sku SKU] \
-    [--usage CSV --repository OWNER/REPO --workflow PATH]
+    [--usage CSV --repository OWNER/REPO --workflow PATH] [--output PATH]
 ci-bill fetch --repo OWNER/REPO --out DIR --since DATE [--until DATE]
+ci-bill help [COMMAND]...
 ```
 
 `report` ranks cost from the usage CSV and, with `--workflows`, scans the
@@ -130,6 +160,58 @@ them may be `-` in a single run.
 
 `fetch` downloads a repository's Actions runs and jobs, and any reusable
 workflows they call, into `--out DIR` in the layout `--runs` reads.
+
+`ci-bill help` prints the same text as `--help`. `ci-bill help` plus a
+command name (`report`, `prices`, or `fetch`) prints that command's
+options. `-h` is the short form of `--help` on the top-level command and
+on `report`, `prices`, and `fetch`. `-V` and `--version` print crate version
+1.0.0 and exit 0. A debug build also prints the git commit when git itself
+provides one. A release build prints the crate version. Both flags are
+accepted only on the top-level command.
+
+## Options
+
+Every option in `--help`, per command.
+
+`ci-bill` (top level):
+
+- `-h`, `--help`: print help.
+- `-V`, `--version`: print crate version 1.0.0 and exit 0. A debug build also prints the git commit when git itself provides one. A release build prints the crate version.
+- `--quiet`: hide the `what to do` line, even on a terminal. No context line. Also accepted on `report`, `prices`, and `fetch`.
+- `--verbose`: print the `what to do` line, and on success one `context:` line on stderr, even on a pipe. Also accepted on `report`, `prices`, and `fetch`.
+
+`ci-bill report`:
+
+- `--usage <CSV>`: detailed usage report CSV (required). `-` reads standard input.
+- `--workflows <DIR>`: directory of workflow YAML files to scan for findings.
+- `--runs <DIR>`: saved Actions API JSON and cached remote workflows, as written by `ci-bill fetch`.
+- `--top <N>`: show the N workflows with the highest net amount.
+- `--json`: print one JSON object instead of the text report.
+- `--budget <AMOUNT>`: net total budget in USD; exit 1 when the total is above it.
+- `--fix-diff`: print a unified diff fixing the highest-savings finding.
+- `--md`: print a one-page Markdown teardown instead of the report.
+- `--output <PATH>`: write the report to this file instead of standard output. An existing file is replaced. A missing parent directory exits 1 and is not created.
+- `-h`, `--help`: print help.
+
+`ci-bill prices`:
+
+- `--json`: print one JSON object instead of the text table.
+- `--runner-map <CSV>`: CSV of `label,sku` rows that replace the built-in map. `-` reads standard input.
+- `--label <LABEL>`: runner label or list, for example `ubuntu-latest`.
+- `--sku <SKU>`: Actions SKU. With `--label`, it must be the SKU the label resolves to.
+- `--usage <CSV>`: usage report whose own rows replace the table rate. `-` reads standard input.
+- `--repository <OWNER/REPO>`: repository that owns the usage rows.
+- `--workflow <PATH>`: workflow path inside the usage report.
+- `--output <PATH>`: write the report to this file instead of standard output. An existing file is replaced. A missing parent directory exits 1 and is not created.
+- `-h`, `--help`: print help.
+
+`ci-bill fetch`:
+
+- `--repo <OWNER/REPO>`: repository to read (required).
+- `--out <DIR>`: directory for the saved files (required).
+- `--since <DATE>`: first day to fetch, `YYYY-MM-DD` in UTC (required).
+- `--until <DATE>`: last day to fetch, `YYYY-MM-DD` in UTC. Defaults to today.
+- `-h`, `--help`: print help.
 
 ## Measured vs invoice
 
@@ -172,9 +254,12 @@ usage".
 | Code | Meaning |
 | ---- | ------- |
 | 0 | ok |
-| 1 | `--budget` given and the Actions net total is over it, or stdout could not be written (e.g. disk full) |
-| 2 | an input file could not be read: missing column, broken number, invalid YAML/JSON, unreadable file |
-| 3 | a usage error: unknown option, missing required flag, an invalid `--budget` amount, or a runner label not in the price table |
+| 1 | `--budget` given and the Actions net total is over it, or the report could not be written (stdout, or `--output`; for example a full disk or a missing parent directory) |
+| 2 | an input could not be used: missing column, broken number, invalid YAML/JSON, unreadable file, a file or standard input larger than 268435456 bytes (256 MiB), unknown SKU, or `fetch` could not use the GitHub API |
+| 3 | a usage error: unknown option, missing required flag, an invalid `--budget` amount, a runner label not in the price table, or `fetch` usage such as a missing token or `--until` before `--since` |
+| 130 | SIGINT. No half-written report. An existing `--output` file is kept when the new report was not finished. Stderr is `ci-bill: interrupted by SIGINT`. |
+
+Each usage file, workflow file, runs JSON file, runner map, and standard input may be at most 268435456 bytes (256 MiB). A larger input exits 2 and is not loaded. The message contains `file is larger than 268435456 bytes`. `fetch` still refuses an HTTP body over 33554432 bytes (32 MiB); that cap was not raised and is not this file limit. SIGINT exits 130. A signal before the report is finished writes nothing to stdout and leaves an existing `--output` file as it was. A `fetch` that has not published its cache yet leaves that cache as it was. Exit codes 0, 1, 2 and 3 are unchanged.
 
 ## Example
 
@@ -221,7 +306,8 @@ example-org/sample-app (no workflow)                    0.00    0.01      0.01  
   measured 0.00  invoice 0.00  difference 0.00
 ```
 
-The sample data above is invented; see `samples/README.md`.
+The sample data above is invented; see `samples/README.md`. More invented
+inputs with their expected output are in `examples/`.
 
 ## Known limitations
 

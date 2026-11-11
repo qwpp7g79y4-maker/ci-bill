@@ -1,0 +1,2 @@
+date,product,sku,quantity,unit_type,applied_cost_per_quantity,gross_amount,discount_amount,net_amount,username,organization,repository,workflow_path
+2026-01-15,actions,actions_linux,30,minutes,0.008,0.240,0,0.240,sam,handbook-example,handbook-example/toy,.github/workflows/ci.yml

@@ -62,6 +62,7 @@ fn help_shows_options() {
     assert!(text.contains("--budget"), "{text}");
     assert!(text.contains("--fix-diff"), "{text}");
     assert!(text.contains("--md"), "{text}");
+    assert!(text.contains("--output"), "{text}");
 }
 
 #[test]
@@ -117,6 +118,101 @@ fn unreadable_usage_exits_2() {
     assert!(err.contains("line 2"), "{err}");
     assert!(err.contains("quantity is not a number"), "{err}");
     assert!(!err.contains("NOT_A_NUMBER"), "{err}");
+}
+
+fn sample_report_args(output: &std::path::Path) -> Vec<String> {
+    vec![
+        "report".to_string(),
+        "--usage".to_string(),
+        "samples/usage-sample.csv".to_string(),
+        "--output".to_string(),
+        output.display().to_string(),
+    ]
+}
+
+fn sample_stdout() -> Vec<u8> {
+    let plain = run(&["report", "--usage", "samples/usage-sample.csv"]);
+    assert_eq!(
+        plain.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&plain),
+        stderr(&plain)
+    );
+    plain.stdout
+}
+
+#[test]
+fn output_flag_writes_a_new_file() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("output-new");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("report.txt");
+    assert!(!path.exists());
+    let expected = sample_stdout();
+    let args = sample_report_args(&path);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&arg_refs);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(output.stdout.is_empty(), "stdout must stay empty");
+    assert!(output.stderr.is_empty(), "stderr must stay empty");
+    assert_eq!(std::fs::read(&path).unwrap(), expected);
+}
+
+#[test]
+fn output_flag_overwrites_an_existing_file() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("output-overwrite");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("report.txt");
+    std::fs::write(&path, b"stale report that must be replaced\n").unwrap();
+    let expected = sample_stdout();
+    let args = sample_report_args(&path);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&arg_refs);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let body = std::fs::read(&path).unwrap();
+    assert_eq!(body, expected);
+    assert!(!String::from_utf8_lossy(&body).contains("stale"));
+}
+
+#[test]
+fn output_flag_missing_directory_exits_1() {
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("output-missing-parent");
+    let _ = std::fs::remove_dir_all(&root);
+    let missing_dir = root.join("nested");
+    let path = missing_dir.join("report.txt");
+    assert!(!missing_dir.exists());
+    let args = sample_report_args(&path);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&arg_refs);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(output.stdout.is_empty());
+    let err = stderr(&output);
+    assert!(err.contains("could not write report"), "{err}");
+    assert!(!path.exists());
+    assert!(
+        !missing_dir.exists(),
+        "a missing parent directory must not be created"
+    );
 }
 
 #[test]

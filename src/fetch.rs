@@ -30,6 +30,7 @@ pub struct FetchError {
 }
 
 impl FetchError {
+    /// Process exit code for this failure.
     pub fn code(&self) -> u8 {
         self.code
     }
@@ -93,7 +94,8 @@ pub fn parse_repo_arg(text: &str) -> Result<String, String> {
 
 /// `YYYY-MM-DD` for `--since` and `--until`.
 pub fn parse_utc_date(text: &str) -> Result<UtcDate, String> {
-    parse_date(text).ok_or_else(|| "expected a UTC date YYYY-MM-DD".to_string())
+    parse_date(text)
+        .ok_or_else(|| "expected a UTC date YYYY-MM-DD, for example 2026-01-31".to_string())
 }
 
 /// Fetch one repository into `out`.
@@ -108,7 +110,9 @@ pub fn fetch(
     let (owner, name) = split_repo(repo).map_err(FetchError::usage)?;
     let until = until.unwrap_or_else(today_utc);
     if since.unix() > until.unix() {
-        return Err(FetchError::usage("--until is before --since"));
+        return Err(FetchError::usage(
+            "--until is before --since; swap the two dates",
+        ));
     }
     let secrets = secrets_from_env()?;
     let base = api_base().map_err(|message| redact_error(message, &secrets.needles))?;
@@ -125,25 +129,41 @@ pub fn fetch(
         start: since.unix(),
         end: until.next_unix(),
     };
-    let repo_body = client.get_json(&client.repo_url(), "repository not found")?;
+    let repo_body = client.get_json(&client.repo_url(), "repository not found; check --repo OWNER/REPO for typos, and that the token can read that repository")?;
     let default_branch = default_branch(&repo_body)?;
     let run_pages = client.fetch_run_pages(window)?;
     let incoming = incoming_runs(&run_pages)?;
     let merged = merge_runs(&cache, &incoming);
     let job_pages = client.fetch_needed_jobs(&cache, &merged.jobs)?;
     let files = client.workflow_files(out, &merged.discovered, &default_branch)?;
-    commit(
-        out,
-        &repo_body,
-        &RunWrite {
-            cache: &cache,
-            pages: &run_pages,
-            merged: &merged.runs,
-            rewrite_runs: merged.rewrite_runs,
-        },
-        &job_pages,
-        &files,
-    )?;
+    if crate::interrupt::interrupted() {
+        return Err(FetchError::input("interrupted by SIGINT"));
+    }
+    // Hold SIGINT across the cache publish so a signal cannot cut a file in
+    // half. A signal that was already pending skips the publish and leaves
+    // the previous cache as it was.
+    let committed = crate::interrupt::with_sigint_blocked(|| {
+        if crate::interrupt::interrupted() {
+            return None;
+        }
+        Some(commit(
+            out,
+            &repo_body,
+            &RunWrite {
+                cache: &cache,
+                pages: &run_pages,
+                merged: &merged.runs,
+                rewrite_runs: merged.rewrite_runs,
+            },
+            &job_pages,
+            &files,
+        ))
+    });
+    match committed {
+        None => return Err(FetchError::input("interrupted by SIGINT")),
+        Some(Err(error)) => return Err(error),
+        Some(Ok(())) => {}
+    }
     let jobs = job_pages.iter().map(|page| page.jobs).sum::<usize>();
     Ok(format!(
         "{owner}/{name} {} .. {}\nruns {}\njobs {jobs}\nworkflow files {}\n",
@@ -191,7 +211,7 @@ fn secrets_from_env() -> Result<Secrets, FetchError> {
             .bytes()
             .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
         {
-            return Err(FetchError::usage("set GH_TOKEN or GITHUB_TOKEN"));
+            return Err(FetchError::usage("set GH_TOKEN or GITHUB_TOKEN to a GitHub token with actions:read access, then run again"));
         }
         if auth.is_none() {
             auth = Some(token.to_string());
@@ -201,7 +221,7 @@ fn secrets_from_env() -> Result<Secrets, FetchError> {
         }
     }
     let Some(auth) = auth else {
-        return Err(FetchError::usage("set GH_TOKEN or GITHUB_TOKEN"));
+        return Err(FetchError::usage("set GH_TOKEN or GITHUB_TOKEN to a GitHub token with actions:read access, then run again"));
     };
     needles.sort_by_key(|item| std::cmp::Reverse(item.len()));
     Ok(Secrets { auth, needles })
@@ -217,7 +237,7 @@ fn api_base() -> Result<String, FetchError> {
                 Ok(base)
             } else {
                 Err(FetchError::usage(
-                    "GITHUB_API_URL must be an http or https URL",
+                    "GITHUB_API_URL must be an http or https URL; unset it to use https://api.github.com",
                 ))
             }
         }
@@ -228,10 +248,10 @@ fn api_base() -> Result<String, FetchError> {
 fn split_repo(text: &str) -> Result<(String, String), String> {
     let text = text.trim();
     let Some((owner, repo)) = text.split_once('/') else {
-        return Err("expected OWNER/REPO".to_string());
+        return Err("expected OWNER/REPO, for example rust-lang/cargo".to_string());
     };
     if owner.contains('/') || repo.contains('/') || !valid_name(owner) || !valid_name(repo) {
-        return Err("expected OWNER/REPO".to_string());
+        return Err("expected OWNER/REPO, for example rust-lang/cargo".to_string());
     }
     Ok((owner.to_string(), repo.to_string()))
 }
@@ -451,10 +471,7 @@ impl Client {
         if wire.status == 404 {
             return Err(FetchError::input(missing));
         }
-        Err(FetchError::input(format!(
-            "the GitHub API returned HTTP {}",
-            wire.status
-        )))
+        Err(http_error(wire.status))
     }
 
     fn get_file(&self, url: &str) -> Result<Option<Vec<u8>>, FetchError> {
@@ -463,10 +480,7 @@ impl Client {
             return Ok(None);
         }
         if wire.status != 200 {
-            return Err(FetchError::input(format!(
-                "the GitHub API returned HTTP {}",
-                wire.status
-            )));
+            return Err(http_error(wire.status));
         }
         self.decode_contents(&wire)
     }
@@ -480,10 +494,7 @@ impl Client {
                     return Ok(None);
                 }
                 if next.status != 200 {
-                    return Err(FetchError::input(format!(
-                        "the GitHub API returned HTTP {}",
-                        next.status
-                    )));
+                    return Err(http_error(next.status));
                 }
                 match contents_bytes(&next.content_type, &next.body)? {
                     Contents::Bytes(bytes) => Ok(Some(self.redact_owned(&bytes))),
@@ -547,10 +558,7 @@ impl Client {
         if wire.status == 200 {
             return Ok(wire);
         }
-        Err(FetchError::input(format!(
-            "the GitHub API returned HTTP {}",
-            wire.status
-        )))
+        Err(http_error(wire.status))
     }
 
     fn fetch_needed_jobs(
@@ -655,19 +663,17 @@ impl Client {
         let mut seen = HashSet::new();
         for _ in 0..ATTEMPTS {
             if !seen.insert(current.clone()) {
-                return Err(FetchError::input("the GitHub API returned HTTP 302"));
+                return Err(http_error(302));
             }
             let wire = self.request(&current, accept, send_auth)?;
             if matches!(wire.status, 301 | 302 | 303 | 307 | 308) {
-                let loc = wire.location.clone().ok_or_else(|| {
-                    FetchError::input(format!("the GitHub API returned HTTP {}", wire.status))
-                })?;
+                let loc = wire
+                    .location
+                    .clone()
+                    .ok_or_else(|| http_error(wire.status))?;
                 let next = resolve_url(&wire.url, &loc);
                 if !(next.starts_with("http://") || next.starts_with("https://")) {
-                    return Err(FetchError::input(format!(
-                        "the GitHub API returned HTTP {}",
-                        wire.status
-                    )));
+                    return Err(http_error(wire.status));
                 }
                 send_auth = same_origin(&self.base, &next);
                 current = next;
@@ -675,7 +681,7 @@ impl Client {
             }
             return Ok(wire);
         }
-        Err(FetchError::input("the GitHub API returned HTTP 302"))
+        Err(http_error(302))
     }
 
     fn request(&self, url: &str, accept: &str, send_auth: bool) -> Result<Wire, FetchError> {
@@ -689,6 +695,9 @@ impl Client {
     }
 
     fn request_once(&self, url: &str, accept: &str, send_auth: bool) -> Result<Wire, FetchError> {
+        if crate::interrupt::interrupted() {
+            return Err(FetchError::input("interrupted by SIGINT"));
+        }
         let auth = format!("Bearer {}", self.token);
         let mut call = self
             .agent
@@ -734,7 +743,9 @@ impl Client {
     }
 
     fn network(&self, err: &impl std::fmt::Display) -> FetchError {
-        FetchError::input(self.redact_text(&format!("cannot reach the GitHub API: {err}")))
+        FetchError::input(self.redact_text(&format!(
+            "cannot reach the GitHub API: {err}; check your network connection and try again"
+        )))
     }
 }
 
@@ -783,7 +794,7 @@ where
             }
             Decision::Unauthorized => {
                 return Err(FetchError::input(
-                    "unauthorized; GH_TOKEN or GITHUB_TOKEN was rejected",
+                    "unauthorized; GH_TOKEN or GITHUB_TOKEN was rejected; check that the token is valid and not expired",
                 ));
             }
             Decision::Permission => {
@@ -792,9 +803,7 @@ where
                 ));
             }
             Decision::Stop(code) => {
-                return Err(FetchError::input(format!(
-                    "the GitHub API returned HTTP {code}"
-                )));
+                return Err(http_error(code));
             }
         }
     }
@@ -802,7 +811,7 @@ where
 }
 
 fn rate_limit(needles: &[String]) -> FetchError {
-    FetchError::input(redact_all_str("rate limit; saved files were kept", needles))
+    FetchError::input(redact_all_str("rate limit; saved files were kept; wait for the limit to reset, then run the same command again to continue", needles))
 }
 
 /// Primary limit (`x-ratelimit-remaining: 0`) waits until `x-ratelimit-reset`.
@@ -1025,7 +1034,7 @@ fn validate_job(value: &Value, expected_run: u64) -> Result<(), FetchError> {
     require_u64(obj, "id")?;
     let run_id = require_u64(obj, "run_id")?;
     if run_id != expected_run {
-        return Err(FetchError::input("run id does not match file name"));
+        return Err(FetchError::input("run id does not match file name; delete that jobs file in --out and run the same command again"));
     }
     require_u64(obj, "run_attempt")?;
     require_string(obj, "name")?;
@@ -1076,11 +1085,11 @@ fn parse_json_value(body: &[u8]) -> Result<Value, FetchError> {
 }
 
 fn invalid_json() -> FetchError {
-    FetchError::input("invalid JSON from the GitHub API")
+    FetchError::input("invalid JSON from the GitHub API; run the same command again, and check for a proxy that rewrites replies if it repeats")
 }
 
 fn invalid_contents() -> FetchError {
-    FetchError::input("invalid contents response")
+    FetchError::input("invalid contents response; run the same command again, and check for a proxy that rewrites replies if it repeats")
 }
 
 fn default_branch(body: &[u8]) -> Result<String, FetchError> {
@@ -1401,7 +1410,7 @@ fn load_cache(dir: &Path) -> Result<Cache, FetchError> {
                     .is_some()
                 {
                     return Err(FetchError::input(format!(
-                        "{}: duplicate id",
+                        "{}: duplicate id; keep one copy of the run in --out (delete the other file), then run again",
                         path.display()
                     )));
                 }
@@ -1434,7 +1443,17 @@ fn load_cache(dir: &Path) -> Result<Cache, FetchError> {
 }
 
 fn read_file_text(path: &Path) -> Result<String, FetchError> {
-    let bytes = fs::read(path).map_err(|_| path_error(path, "cannot read file"))?;
+    let bytes = match crate::input_limit::read_capped(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::FileTooLarge => {
+            return Err(FetchError::input(format!(
+                "{}: file is larger than {} bytes; split the file or pass a smaller one",
+                path.display(),
+                crate::input_limit::MAX_INPUT_BYTES
+            )));
+        }
+        Err(_) => return Err(path_error(path, "cannot read file")),
+    };
     let bytes = strip_bom(&bytes);
     String::from_utf8(bytes.to_vec()).map_err(|_| path_error(path, "invalid JSON"))
 }
@@ -1700,7 +1719,19 @@ fn write_temp(path: &Path, bytes: &[u8]) -> Result<(), FetchError> {
 }
 
 fn path_error(path: &Path, message: &str) -> FetchError {
-    FetchError::input(format!("{}: {message}", path.display()))
+    let next = if message == "cannot write file" {
+        "; check that the directory is writable and the disk is not full, then run again"
+    } else {
+        "; check that the path exists and is readable, then run again"
+    };
+    FetchError::input(format!("{}: {message}{next}", path.display()))
+}
+
+/// An unexpected HTTP status from the GitHub API, with the next step.
+fn http_error(status: impl std::fmt::Display) -> FetchError {
+    FetchError::input(format!(
+        "the GitHub API returned HTTP {status}; run the same command again, and if it repeats check --repo and the token"
+    ))
 }
 
 fn remote_from_run(

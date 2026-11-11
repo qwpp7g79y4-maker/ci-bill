@@ -1,3 +1,5 @@
+//! Actions cost per repository and workflow, highest net first.
+
 use std::collections::{BTreeSet, HashMap};
 
 use crate::money::Micros;
@@ -6,22 +8,34 @@ use crate::usage::{is_actions_product, UsageError, UsageErrorKind, UsageRow};
 /// Cost of one SKU inside a repository workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkuTotal {
+    /// Runner SKU.
     pub sku: String,
+    /// Net USD for this SKU inside the workflow.
     pub net: Micros,
+    /// Gross USD before discount.
     pub gross: Micros,
+    /// Discount USD. Net is gross minus this.
     pub discount: Micros,
+    /// Quantity whose `unit_type` is minutes. Other units stay out of this sum.
     pub minutes: Micros,
 }
 
 /// Cost of one repository + workflow path, with a total per SKU.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowTotal {
+    /// `owner/repo` from the usage row.
     pub repository: String,
+    /// Workflow path from the usage row. Empty rows use `(no workflow)`.
     pub workflow_path: String,
+    /// Net Actions USD for this repository and path.
     pub net: Micros,
+    /// Gross Actions USD before discount.
     pub gross: Micros,
+    /// Discount USD.
     pub discount: Micros,
+    /// Minutes billed to this workflow. Other unit types are not included.
     pub minutes: Micros,
+    /// The same totals split by SKU.
     pub skus: Vec<SkuTotal>,
 }
 
@@ -31,18 +45,26 @@ pub struct WorkflowTotal {
 /// are summed into `other_products_net` and stay outside the Actions total.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bill {
+    /// Net USD of product `actions` only.
     pub total_net: Micros,
+    /// Minutes of product `actions` only.
     pub total_minutes: Micros,
+    /// Net USD of every product that is not `actions`.
     pub other_products_net: Micros,
+    /// Earliest `date` in the usage rows, when any row has one.
     pub period_from: Option<String>,
+    /// Latest `date` in the usage rows, when any row has one.
     pub period_to: Option<String>,
+    /// Repositories named on a usage row, in name order. An empty name is left out.
     pub repositories: Vec<String>,
 }
 
 /// Ranked Actions workflows plus the bill those rows came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ranking {
+    /// Actions workflows, highest net first.
     pub workflows: Vec<WorkflowTotal>,
+    /// Totals those rows were ranked from. Always the full bill, not a `top` slice.
     pub bill: Bill,
 }
 

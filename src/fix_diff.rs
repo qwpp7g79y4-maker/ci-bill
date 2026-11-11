@@ -6,13 +6,19 @@
 //! one of these kinds is the one priced highest.
 
 use std::fmt::Write as _;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::findings::{Finding, FindingKind};
 
 const CONTEXT: usize = 3;
 const DEFAULT_TIMEOUT_MINUTES: &str = "30";
+
+/// Workflow text for a diff. A file past the input limit is skipped, the same
+/// as a file that can no longer be read. `scan` already refused that file.
+fn read_text(path: &Path) -> Option<String> {
+    let bytes = crate::input_limit::read_capped(path).ok()?;
+    String::from_utf8(bytes).ok()
+}
 
 /// Diff for the highest-savings finding this module can fix, or `None` when
 /// no such finding is present, or its file can no longer be read.
@@ -54,7 +60,7 @@ fn resolve_target(finding: &Finding, workflows_dir: Option<&Path>) -> Option<(Pa
 
 fn lint_diff(finding: &Finding, workflows_dir: Option<&Path>) -> Option<String> {
     let (path, line) = resolve_target(finding, workflows_dir)?;
-    let text = fs::read_to_string(&path).ok()?;
+    let text = read_text(&path)?;
     let lines = split_lines(&text);
     let key_idx = line.checked_sub(1)?;
     if key_idx >= lines.len() {
@@ -95,7 +101,7 @@ fn lint_diff(finding: &Finding, workflows_dir: Option<&Path>) -> Option<String> 
 
 fn timeout_diff(finding: &Finding) -> Option<String> {
     let path = finding.path.clone();
-    let text = fs::read_to_string(&path).ok()?;
+    let text = read_text(&path)?;
     let lines = split_lines(&text);
     let key_idx = finding.line.checked_sub(1)?;
     if key_idx >= lines.len() {
@@ -253,7 +259,7 @@ fn flow_job_brace(path: &Path, text: &str, line: &str, job_line: usize) -> Optio
 
 fn concurrency_diff(finding: &Finding) -> Option<String> {
     let path = finding.path.clone();
-    let text = fs::read_to_string(&path).ok()?;
+    let text = read_text(&path)?;
     let lines = split_lines(&text);
     let key_idx = finding.line.checked_sub(1)?;
     if key_idx >= lines.len() {
