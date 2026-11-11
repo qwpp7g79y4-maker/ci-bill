@@ -19,14 +19,14 @@ gebruikt het netwerk, met een `GH_TOKEN` of `GITHUB_TOKEN` uit de omgeving.
 
 ## Installatie
 
-Versie 1.0.0 is release-klaar en nog niet gepubliceerd. `cargo install ci-bill` vanaf [crates.io](https://crates.io/crates/ci-bill) geeft nog 0.1.2. Versie 1.0.0 komt uit de bron: `cargo install --locked --path .`.
-
-Met Rust 1.85 of nieuwer is de crate op [crates.io](https://crates.io/crates/ci-bill) nog 0.1.2:
+Versie 1.0.0 staat op [crates.io](https://crates.io/crates/ci-bill). Met Rust 1.85 of nieuwer:
 
 ```sh
-cargo install --locked ci-bill
+cargo install ci-bill
 ci-bill --help
 ```
+
+`cargo install --locked ci-bill` zet de lockfile van de crate vast.
 
 Kant-en-klare archieven voor Linux, Windows en macOS staan bij elke
 [GitHub-release](https://github.com/qwpp7g79y4-maker/ci-bill/releases), met een

@@ -33,14 +33,14 @@ Manual page: `man/ci-bill.1`.
 
 ## Installation
 
-Version 1.0.0 is release-ready and is not published yet. `cargo install ci-bill` from [crates.io](https://crates.io/crates/ci-bill) still installs 0.1.2. Version 1.0.0 comes from the source: `cargo install --locked --path .`.
-
-With Rust 1.85 or newer, the crate on [crates.io](https://crates.io/crates/ci-bill) is still 0.1.2:
+Version 1.0.0 is on [crates.io](https://crates.io/crates/ci-bill). With Rust 1.85 or newer:
 
 ```sh
-cargo install --locked ci-bill
+cargo install ci-bill
 ci-bill --help
 ```
+
+`cargo install --locked ci-bill` pins the crate's lockfile.
 
 Ready-made archives for Linux, Windows and macOS are attached to each
 [GitHub release](https://github.com/qwpp7g79y4-maker/ci-bill/releases), each
