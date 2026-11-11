@@ -4,6 +4,8 @@ Zoek uit welke GitHub Actions-workflow het geld kost, en waarom.
 
 English: [README.md](README.md). Handleiding: `man/ci-bill.1`.
 
+[![crates.io](https://img.shields.io/crates/v/ci-bill.svg)](https://crates.io/crates/ci-bill) [![downloads](https://img.shields.io/crates/d/ci-bill.svg)](https://crates.io/crates/ci-bill) [![CI](https://github.com/qwpp7g79y4-maker/ci-bill/actions/workflows/ci.yml/badge.svg)](https://github.com/qwpp7g79y4-maker/ci-bill/actions/workflows/ci.yml) [![PEPAI gecontroleerd](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fqwpp7g79y4-maker%2Fci-bill%2Fmain%2F.github%2Fbadge.json)](QUALITY.md) [![MSRV 1.85](https://img.shields.io/badge/MSRV-1.85-blue.svg)](Cargo.toml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licentie)
+
 `ci-bill` rangschikt de kosten per repository, workflow en runner-SKU en wijst
 met `bestand:regel` naar de waarschijnlijke oorzaak. Het leest twee soorten invoer:
 
@@ -17,7 +19,9 @@ gebruikt het netwerk, met een `GH_TOKEN` of `GITHUB_TOKEN` uit de omgeving.
 
 ## Installatie
 
-Met Rust 1.85 of nieuwer, vanaf [crates.io](https://crates.io/crates/ci-bill):
+Versie 1.0.0 is release-klaar en nog niet gepubliceerd. `cargo install ci-bill` vanaf [crates.io](https://crates.io/crates/ci-bill) geeft nog 0.1.2. Versie 1.0.0 komt uit de bron: `cargo install --locked --path .`.
+
+Met Rust 1.85 of nieuwer is de crate op [crates.io](https://crates.io/crates/ci-bill) nog 0.1.2:
 
 ```sh
 cargo install --locked ci-bill
