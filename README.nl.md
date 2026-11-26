@@ -153,6 +153,10 @@ Elk verbruiksbestand, workflowbestand, runs-JSON-bestand, runner-map en standaar
 Bij een fout noemt `ci-bill` wat er misging en, bij invoerfouten, onder
 "what to do" wat je eraan kunt doen.
 
+## Onderhoud
+
+Na een release staat de tool in sluimermodus (dormant): een nieuwe versie komt er alleen bij een gemelde bug, een verzoek of een beveiligingsprobleem. Beveiliging gaat altijd voor.
+
 ## Licentie
 
 MIT OR Apache-2.0. Onderhouden door PEPAI (pep_ai@icloud.com).

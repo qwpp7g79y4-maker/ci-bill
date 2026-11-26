@@ -201,8 +201,13 @@ fn five_minute_section_commands_run_literally() {
         ("README.md", README),
         ("README.nl.md", include_str!("../README.nl.md")),
     ] {
+        let heading = if page == "README.md" {
+            "## Quickstart in 5 minutes\n"
+        } else {
+            "## Aan de slag in 5 minuten\n"
+        };
         let part = text
-            .split("## Aan de slag in 5 minuten\n")
+            .split(heading)
             .nth(1)
             .and_then(|rest| rest.split("\n## ").next())
             .unwrap_or_else(|| panic!("{page}: no 5-minute section"));

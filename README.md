@@ -103,7 +103,7 @@ example-org/sample-app .github/workflows/ci.yml  0.96   0.96      0.00      120 
 The CSV above is invented. See the Example section below for a larger
 walkthrough on the `samples/` data in this repository.
 
-## Aan de slag in 5 minuten
+## Quickstart in 5 minutes
 
 Five commands, offline, on the invented data in `samples/` and `tests/fixtures/api/`. They need no token, no network and no TUI, and read no system logs. Run them from the root of a clone, with `ci-bill` on your `PATH` (after `cargo install --locked --path .`, or use `target/release/ci-bill`). A test runs the commands in this block literally.
 
@@ -322,6 +322,10 @@ inputs with their expected output are in `examples/`.
   `fetch` stores two called workflows whose paths differ only in letter
   case (for example `lint.yml@v1` and `Lint.yml@V1`) in the same cache
   file, so the later download replaces the earlier one.
+
+## Maintenance
+
+After a release the tool is dormant: a new version appears only for a reported bug, a request, or a security problem. Security always comes first.
 
 ## License
 
