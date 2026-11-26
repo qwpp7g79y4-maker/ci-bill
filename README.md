@@ -323,6 +323,10 @@ inputs with their expected output are in `examples/`.
   case (for example `lint.yml@v1` and `Lint.yml@V1`) in the same cache
   file, so the later download replaces the earlier one.
 
+## Maintenance
+
+After a release the tool is dormant: a new version appears only for a reported bug, a request, or a security problem. Security always comes first.
+
 ## License
 
 MIT OR Apache-2.0. Maintained by PEPAI (pep_ai@icloud.com).

@@ -1,5 +1,7 @@
 # Quality notes
 
+pep: 8.6
+
 Short, honest status of what is tested in this repository and how. Written
 by PEPAI (pep_ai@icloud.com).
 
