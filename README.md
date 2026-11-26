@@ -103,7 +103,7 @@ example-org/sample-app .github/workflows/ci.yml  0.96   0.96      0.00      120 
 The CSV above is invented. See the Example section below for a larger
 walkthrough on the `samples/` data in this repository.
 
-## Aan de slag in 5 minuten
+## Quickstart in 5 minutes
 
 Five commands, offline, on the invented data in `samples/` and `tests/fixtures/api/`. They need no token, no network and no TUI, and read no system logs. Run them from the root of a clone, with `ci-bill` on your `PATH` (after `cargo install --locked --path .`, or use `target/release/ci-bill`). A test runs the commands in this block literally.
 

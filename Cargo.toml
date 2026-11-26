@@ -10,7 +10,7 @@ repository = "https://github.com/qwpp7g79y4-maker/ci-bill"
 readme = "README.md"
 keywords = ["github-actions", "ci", "cost", "billing", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["/.github/", "/.gitattributes", "/fuzz/", "/prive/"]
+exclude = ["/.github/", "/.gitattributes", "/fuzz/", "/prive/", "/claude-plugin/"]
 
 [lib]
 name = "ci_bill"
